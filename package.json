@@ -1,0 +1,12 @@
+{
+  "name": "agent-operating-platform",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @agent-platform/web",
+    "build:web": "npm run build --workspace @agent-platform/web"
+  }
+}
+

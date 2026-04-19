@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass(slots=True)
+class SourceReference:
+    id: str
+    title: str
+    snippet: str
+    source_type: str
+
+
+@dataclass(slots=True)
+class TraceStep:
+    name: str
+    status: str
+    summary: str
+    timestamp: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class TraceRecord:
+    trace_id: str
+    tenant_id: str
+    user_id: str
+    message: str
+    intent: str
+    strategy: str
+    answer: str = ""
+    sources: list[SourceReference] = field(default_factory=list)
+    steps: list[TraceStep] = field(default_factory=list)
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class CapabilityDefinition:
+    name: str
+    description: str
+    risk_level: str
+    side_effect_level: str
+    required_scope: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    enabled: bool = True
+
+
+@dataclass(slots=True)
+class ConversationMessage:
+    role: str
+    content: str
+
+
+@dataclass(slots=True)
+class Conversation:
+    conversation_id: str
+    title: str
+    tenant_id: str
+    messages: list[ConversationMessage] = field(default_factory=list)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class TenantProfile:
+    tenant_id: str
+    name: str
+    package: str
+    environment: str
+    budget: str
+    active: bool = True
+
+
+@dataclass(slots=True)
+class UserContext:
+    user_id: str
+    tenant_id: str
+    role: str
+    scopes: list[str]
+    email: str = ""
+
+
+@dataclass(slots=True)
+class DraftAction:
+    draft_id: str
+    tenant_id: str
+    user_id: str
+    capability_name: str
+    title: str
+    risk_level: str
+    status: str
+    payload: dict[str, Any]
+    summary: str
+    approval_hint: str
+    created_at: datetime = field(default_factory=utc_now)
+    confirmed_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class SecurityEvent:
+    event_id: str
+    tenant_id: str
+    category: str
+    severity: str
+    title: str
+    status: str
+    owner: str
+
+
+@dataclass(slots=True)
+class KnowledgeSource:
+    source_id: str
+    tenant_id: str
+    name: str
+    source_type: str
+    owner: str
+    chunk_count: int
+    status: str
+
+
+@dataclass(slots=True)
+class LLMRuntimeConfig:
+    provider: str
+    base_url: str
+    model: str
+    api_key_configured: bool
+    temperature: float
+    system_prompt: str
+    enabled: bool

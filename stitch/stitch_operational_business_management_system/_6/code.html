@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Precision Agent - 审计与合规控制台</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&amp;family=Noto+Sans+SC:wght@300;400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-tertiary-container": "#fffbff",
+                        "inverse-primary": "#a5c8ff",
+                        "surface": "#f7f9fc",
+                        "tertiary-fixed-dim": "#ffb688",
+                        "surface-tint": "#005fae",
+                        "primary-fixed-dim": "#a5c8ff",
+                        "surface-container": "#eceef1",
+                        "secondary-fixed": "#d4e3ff",
+                        "primary-fixed": "#d4e3ff",
+                        "outline-variant": "#c0c7d6",
+                        "on-tertiary-fixed-variant": "#733600",
+                        "on-primary-fixed": "#001c3a",
+                        "on-primary-container": "#fefcff",
+                        "secondary": "#40608b",
+                        "on-primary": "#ffffff",
+                        "on-secondary-fixed-variant": "#274871",
+                        "on-tertiary": "#ffffff",
+                        "on-secondary-container": "#385782",
+                        "secondary-fixed-dim": "#a9c8f9",
+                        "surface-dim": "#d8dadd",
+                        "on-error-container": "#93000a",
+                        "background": "#f7f9fc",
+                        "on-background": "#191c1e",
+                        "inverse-surface": "#2d3133",
+                        "surface-variant": "#e0e3e6",
+                        "error-container": "#ffdad6",
+                        "on-secondary": "#ffffff",
+                        "tertiary-container": "#b95a00",
+                        "surface-container-low": "#f2f4f7",
+                        "on-surface-variant": "#404753",
+                        "on-error": "#ffffff",
+                        "surface-container-high": "#e6e8eb",
+                        "tertiary": "#934600",
+                        "outline": "#707785",
+                        "inverse-on-surface": "#eff1f4",
+                        "primary-container": "#0075d5",
+                        "surface-bright": "#f7f9fc",
+                        "on-primary-fixed-variant": "#004785",
+                        "primary": "#005daa",
+                        "tertiary-fixed": "#ffdbc7",
+                        "on-tertiary-fixed": "#311300",
+                        "on-secondary-fixed": "#001c3a",
+                        "surface-container-highest": "#e0e3e6",
+                        "error": "#ba1a1a",
+                        "surface-container-lowest": "#ffffff",
+                        "secondary-container": "#afceff",
+                        "on-surface": "#191c1e"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Inter", "Noto Sans SC"],
+                        "body": ["Inter", "Noto Sans SC"],
+                        "label": ["Inter", "Noto Sans SC"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Inter', 'Noto Sans SC', sans-serif; -webkit-font-smoothing: antialiased; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; vertical-align: middle; }
+        .glass-header { backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #f7f9fc; }
+        ::-webkit-scrollbar-thumb { background: #c0c7d6; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-surface text-on-surface">
+<!-- SideNavBar -->
+<aside class="h-screen w-72 fixed left-0 top-0 overflow-y-auto bg-[#f7f9fc] flex flex-col py-8 z-40 border-r border-outline-variant/20">
+<div class="px-8 mb-10">
+<div class="flex items-center gap-3 mb-2">
+<div class="w-10 h-10 rounded-lg bg-gradient-to-br from-primary to-primary-container flex items-center justify-center text-white shadow-lg">
+<span class="material-symbols-outlined" data-icon="gavel">gavel</span>
+</div>
+<div>
+<h1 class="text-lg font-bold text-on_surface uppercase tracking-widest leading-none">管理控制台</h1>
+<p class="text-[10px] text-on-surface-variant font-medium mt-1">全球系统</p>
+</div>
+</div>
+</div>
+<nav class="flex-grow">
+<div class="px-4 space-y-1">
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="dashboard">dashboard</span>
+<span class="text-sm font-medium">运营总览</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="package_2">package_2</span>
+<span class="text-sm font-medium">业务包管理</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="extension">extension</span>
+<span class="text-sm font-medium">插件管理</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="shield">shield</span>
+<span class="text-sm font-medium">安全治理</span>
+</a>
+<!-- Active Navigation: Audit Compliance -->
+<a class="bg-white text-[#005daa] font-bold border-r-4 border-[#005daa] px-4 py-3 flex items-center gap-4 shadow-sm" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="gavel" style="font-variation-settings: 'FILL' 1;">gavel</span>
+<span class="text-sm">审计合规</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="domain">domain</span>
+<span class="text-sm font-medium">租户管理</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg group" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="database">database</span>
+<span class="text-sm font-medium">知识库管理</span>
+</a>
+</div>
+<div class="mt-12 px-8">
+<button class="w-full bg-gradient-to-r from-primary to-primary-container text-white py-3 rounded-xl font-bold text-sm shadow-md hover:opacity-90 active:scale-[0.98] transition-all">
+                    部署新智能体
+                </button>
+</div>
+</nav>
+<div class="px-4 mt-auto border-t border-outline-variant/10 pt-6">
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="contact_support">contact_support</span>
+<span class="text-sm font-medium">技术支持</span>
+</a>
+<a class="text-[#404753] px-4 py-3 flex items-center gap-4 hover:bg-surface-container-high transition-colors duration-200 rounded-lg" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="receipt_long">receipt_long</span>
+<span class="text-sm font-medium">系统日志</span>
+</a>
+</div>
+</aside>
+<!-- Main Canvas -->
+<main class="ml-72 min-h-screen">
+<!-- TopAppBar -->
+<header class="fixed top-0 right-0 left-72 h-16 bg-white/70 backdrop-blur-md z-30 flex justify-between items-center px-8 shadow-[0_4px_20px_0_rgba(25,28,30,0.04)]">
+<div class="flex items-center gap-8">
+<h2 class="text-xl font-black text-[#005daa] tracking-tight">Precision Agent</h2>
+<div class="relative flex items-center">
+<span class="material-symbols-outlined absolute left-3 text-on-surface-variant text-lg" data-icon="search">search</span>
+<input class="pl-10 pr-4 py-1.5 bg-surface-container-low border-none rounded-full text-sm w-80 focus:ring-2 focus:ring-primary/20 transition-all" placeholder="搜索 Trace ID 或 用户..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-5">
+<button class="text-on-surface-variant hover:bg-surface-container-high/50 p-2 rounded-full transition-all">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button class="text-on-surface-variant hover:bg-surface-container-high/50 p-2 rounded-full transition-all">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+</button>
+<button class="text-on-surface-variant hover:bg-surface-container-high/50 p-2 rounded-full transition-all">
+<span class="material-symbols-outlined" data-icon="help_outline">help_outline</span>
+</button>
+<div class="w-8 h-8 rounded-full overflow-hidden ml-2 ring-2 ring-primary/10 ring-offset-2">
+<img alt="用户头像" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDjVnNnW8eTWh0XLaeFbPR_09FCCvlBi78FQ4dnjAM0v-gHBOnSc3Ah4qVrZQx9gqPYoO-imr9zJT3WnOWmqgU_C5Zpn92U4LEQWX9PD4h78QrDQ1S1v5PHtaZT9fd08tqz7TVZ41KvCFP8ik-k3SWXpZcARrCLLQmfXrAupvYjg33WtMmCMKA77OWRT5YZ945Ts4caLz9Eey3LsCOaqzzRjnmPKQR991LfKpKhLlwGbbV2IfcRWlXSauWFCIKL7wh5KwLeX8yB7ww"/>
+</div>
+</div>
+</header>
+<div class="pt-24 px-8 pb-12">
+<!-- Hero Title Section -->
+<div class="flex justify-between items-end mb-8">
+<div>
+<h1 class="text-4xl font-bold tracking-tight text-on-surface leading-tight">审计与合规控制台</h1>
+<p class="text-on-surface-variant mt-2 text-lg">实时监控全局数据流向，确保企业 AI 治理的透明度与安全性。</p>
+</div>
+<div class="flex gap-3">
+<button class="flex items-center gap-2 px-5 py-2.5 bg-surface-container-lowest text-on-surface font-semibold rounded-xl shadow-sm border border-outline-variant/10 hover:bg-surface-container-low transition-all">
+<span class="material-symbols-outlined" data-icon="download">download</span>
+<span>导出完整报告</span>
+</button>
+</div>
+</div>
+<!-- Bento Grid Stats -->
+<div class="grid grid-cols-4 gap-6 mb-8">
+<div class="col-span-1 p-6 bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/5">
+<p class="text-xs font-bold text-on-surface-variant uppercase tracking-wider mb-2">PII 泄露预警 (24h)</p>
+<div class="flex items-end gap-2">
+<span class="text-3xl font-black text-error">02</span>
+<span class="text-xs text-error font-medium mb-1 px-2 py-0.5 bg-error-container rounded-full">-50% 对比昨日</span>
+</div>
+<div class="mt-4 h-1 w-full bg-surface-container rounded-full overflow-hidden">
+<div class="h-full bg-error w-1/4"></div>
+</div>
+</div>
+<div class="col-span-1 p-6 bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/5">
+<p class="text-xs font-bold text-on-surface-variant uppercase tracking-wider mb-2">越权访问尝试</p>
+<div class="flex items-end gap-2">
+<span class="text-3xl font-black text-primary">14</span>
+<span class="text-xs text-on-surface-variant font-medium mb-1">+5% 对比昨日</span>
+</div>
+<div class="mt-4 h-1 w-full bg-surface-container rounded-full overflow-hidden">
+<div class="h-full bg-primary w-2/3"></div>
+</div>
+</div>
+<div class="col-span-2 p-6 bg-gradient-to-br from-primary to-primary-container rounded-xl shadow-lg relative overflow-hidden">
+<div class="relative z-10">
+<p class="text-xs font-bold text-white/80 uppercase tracking-wider mb-2">系统合规指数</p>
+<div class="flex items-center gap-4">
+<span class="text-5xl font-black text-white">98.4</span>
+<div class="flex flex-col">
+<span class="text-white/90 text-sm font-bold">优秀等级</span>
+<span class="text-white/70 text-xs italic">已满足所有 GDPR 审计项</span>
+</div>
+</div>
+</div>
+<div class="absolute -right-8 -bottom-8 opacity-10 scale-150 rotate-12">
+<span class="material-symbols-outlined text-[120px] text-white" data-icon="verified_user">verified_user</span>
+</div>
+</div>
+</div>
+<div class="grid grid-cols-3 gap-6">
+<!-- Audit Log Section -->
+<div class="col-span-2 space-y-6">
+<div class="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden flex flex-col border border-outline-variant/5">
+<div class="px-6 py-5 bg-surface-container-low/50 flex justify-between items-center border-b border-outline-variant/10">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary" data-icon="list_alt">list_alt</span>
+<h3 class="font-bold text-on-surface">全局审计日志</h3>
+</div>
+<div class="flex gap-2">
+<select class="bg-white border-none text-xs font-bold rounded-lg py-1 px-3 shadow-sm ring-1 ring-outline-variant/20">
+<option>所有风险级别</option>
+<option>高风险</option>
+<option>中风险</option>
+</select>
+<button class="p-1.5 bg-white rounded-lg shadow-sm ring-1 ring-outline-variant/20">
+<span class="material-symbols-outlined text-sm" data-icon="filter_list">filter_list</span>
+</button>
+</div>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead class="bg-surface-container-high/40">
+<tr>
+<th class="px-6 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">Trace ID</th>
+<th class="px-6 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">用户 / 租户</th>
+<th class="px-6 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">操作事件</th>
+<th class="px-6 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">风险等级</th>
+<th class="px-6 py-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest text-right">时间戳</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/5">
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="font-mono text-xs text-primary font-bold">TR-99201</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex flex-col">
+<span class="text-sm font-semibold">张子涵</span>
+<span class="text-[10px] text-on-surface-variant">财务部 (租户-A)</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="text-sm text-on-surface-variant">批量导出用户薪酬模型</span>
+</td>
+<td class="px-6 py-4">
+<span class="px-3 py-1 bg-error-container text-error text-[10px] font-bold rounded-full">高风险</span>
+</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs text-on-surface-variant font-mono">14:22:01</span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="font-mono text-xs text-primary font-bold">TR-99215</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex flex-col">
+<span class="text-sm font-semibold">系统机器人</span>
+<span class="text-[10px] text-on-surface-variant">全局系统 (租户-S)</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="text-sm text-on-surface-variant">索引库自动刷新</span>
+</td>
+<td class="px-6 py-4">
+<span class="px-3 py-1 bg-secondary-container text-on-secondary-container text-[10px] font-bold rounded-full">低风险</span>
+</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs text-on-surface-variant font-mono">14:15:33</span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="font-mono text-xs text-primary font-bold">TR-99238</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex flex-col">
+<span class="text-sm font-semibold">刘伟明</span>
+<span class="text-[10px] text-on-surface-variant">技术部 (租户-B)</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="text-sm text-on-surface-variant">修改知识库权限集</span>
+</td>
+<td class="px-6 py-4">
+<span class="px-3 py-1 bg-tertiary-fixed text-on-tertiary-fixed text-[10px] font-bold rounded-full">中风险</span>
+</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs text-on-surface-variant font-mono">13:58:12</span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="font-mono text-xs text-primary font-bold">TR-99241</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex flex-col">
+<span class="text-sm font-semibold">外部集成 (Webhook)</span>
+<span class="text-[10px] text-on-surface-variant">API 调用 (租户-C)</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="text-sm text-on-surface-variant">访问受限文档存储</span>
+</td>
+<td class="px-6 py-4">
+<span class="px-3 py-1 bg-error-container text-error text-[10px] font-bold rounded-full">高风险</span>
+</td>
+<td class="px-6 py-4 text-right">
+<span class="text-xs text-on-surface-variant font-mono">13:45:00</span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="p-4 bg-surface-container-lowest flex justify-between items-center border-t border-outline-variant/10">
+<p class="text-xs text-on-surface-variant">显示 1-4 条，共 1,280 条记录</p>
+<div class="flex gap-1">
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-container-low hover:bg-surface-container-high transition-all text-on-surface-variant">
+<span class="material-symbols-outlined text-sm" data-icon="chevron_left">chevron_left</span>
+</button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-primary text-white text-xs font-bold">1</button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-container-low hover:bg-surface-container-high transition-all text-xs font-bold">2</button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-container-low hover:bg-surface-container-high transition-all text-xs font-bold">3</button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-surface-container-low hover:bg-surface-container-high transition-all text-on-surface-variant">
+<span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Right Sidebar / Task Pane -->
+<div class="col-span-1 space-y-6">
+<!-- Security Event Tracker -->
+<div class="bg-surface-container-lowest rounded-xl shadow-sm p-6 border border-outline-variant/5">
+<div class="flex items-center justify-between mb-6">
+<h3 class="font-bold text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-error" data-icon="security">security</span>
+                                安全事件跟踪
+                            </h3>
+<span class="text-[10px] font-black px-2 py-0.5 bg-error-container text-error rounded">实时</span>
+</div>
+<div class="space-y-4">
+<div class="p-3 bg-error-container/20 rounded-lg border-l-4 border-error">
+<p class="text-xs font-bold text-error">检测到 PII 信息泄露</p>
+<p class="text-[10px] text-on-surface-variant mt-1">租户-A 智能体尝试发送身份证号码到公共 API</p>
+<p class="text-[10px] text-on-surface-variant mt-2 font-mono">14:22:01 | 已拦截</p>
+</div>
+<div class="p-3 bg-tertiary-fixed/20 rounded-lg border-l-4 border-tertiary">
+<p class="text-xs font-bold text-on-tertiary-fixed-variant">异常地理位置登录</p>
+<p class="text-[10px] text-on-surface-variant mt-1">用户 'admin' 尝试从未知 IP 登录管理后台</p>
+<p class="text-[10px] text-on-surface-variant mt-2 font-mono">12:10:45 | 待审核</p>
+</div>
+</div>
+<button class="w-full mt-6 text-xs font-bold text-primary hover:underline flex items-center justify-center gap-1">
+                            查看所有安全警报
+                            <span class="material-symbols-outlined text-xs" data-icon="arrow_forward">arrow_forward</span>
+</button>
+</div>
+<!-- Right to be Forgotten Interface -->
+<div class="bg-surface-container-lowest rounded-xl shadow-sm p-6 border border-outline-variant/5">
+<h3 class="font-bold text-on-surface flex items-center gap-2 mb-4">
+<span class="material-symbols-outlined text-primary" data-icon="delete_forever">delete_forever</span>
+                            被遗忘权 (GDPR)
+                        </h3>
+<p class="text-xs text-on-surface-variant leading-relaxed mb-4">根据合规要求，您可以请求永久擦除特定用户的所有交互历史和向量存储数据。</p>
+<div class="space-y-3">
+<div class="relative">
+<input class="w-full pl-3 pr-3 py-2 bg-surface-container-low border border-outline-variant/20 rounded-lg text-xs focus:ring-1 focus:ring-primary focus:border-primary" placeholder="输入用户唯一标识符..." type="text"/>
+</div>
+<div class="flex gap-2">
+<button class="flex-1 py-2 bg-primary text-white text-xs font-bold rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all">执行数据擦除</button>
+</div>
+</div>
+<div class="mt-6 pt-4 border-t border-outline-variant/10">
+<p class="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider mb-3">最近执行状态</p>
+<div class="flex items-center justify-between text-[10px]">
+<span class="text-on-surface-variant font-mono">USER_ID_882</span>
+<span class="text-green-600 font-bold flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+                                    已完成
+                                </span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- Contextual FAB -->
+<button class="fixed bottom-8 right-8 w-14 h-14 bg-primary text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-50">
+<span class="material-symbols-outlined" data-icon="add_moderator" style="font-variation-settings: 'FILL' 1;">add_moderator</span>
+</button>
+</body></html>

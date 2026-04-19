@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>系统管理 - Agent Platform</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=Noto+Sans+SC:wght@300;400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "tertiary-fixed-dim": "#ffb688",
+                        "surface-tint": "#005fae",
+                        "inverse-on-surface": "#eff1f4",
+                        "primary-fixed": "#d4e3ff",
+                        "surface-container-high": "#e6e8eb",
+                        "primary-fixed-dim": "#a5c8ff",
+                        "on-secondary-fixed": "#001c3a",
+                        "error-container": "#ffdad6",
+                        "outline": "#707785",
+                        "on-secondary-container": "#385782",
+                        "tertiary": "#934600",
+                        "surface-variant": "#e0e3e6",
+                        "on-secondary": "#ffffff",
+                        "on-background": "#191c1e",
+                        "primary": "#005daa",
+                        "on-primary-container": "#fefcff",
+                        "outline-variant": "#c0c7d6",
+                        "tertiary-container": "#b95a00",
+                        "surface-container-lowest": "#ffffff",
+                        "secondary-fixed": "#d4e3ff",
+                        "inverse-primary": "#a5c8ff",
+                        "background": "#f7f9fc",
+                        "inverse-surface": "#2d3133",
+                        "secondary": "#40608b",
+                        "surface-container-low": "#f2f4f7",
+                        "on-surface": "#191c1e",
+                        "on-tertiary-fixed-variant": "#733600",
+                        "error": "#ba1a1a",
+                        "surface-container-highest": "#e0e3e6",
+                        "on-tertiary": "#ffffff",
+                        "secondary-container": "#afceff",
+                        "surface-bright": "#f7f9fc",
+                        "on-primary-fixed-variant": "#004785",
+                        "surface": "#f7f9fc",
+                        "tertiary-fixed": "#ffdbc7",
+                        "surface-container": "#eceef1",
+                        "on-primary-fixed": "#001c3a",
+                        "surface-dim": "#d8dadd",
+                        "on-secondary-fixed-variant": "#274871",
+                        "on-surface-variant": "#404753",
+                        "on-tertiary-fixed": "#311300",
+                        "on-error-container": "#93000a",
+                        "on-error": "#ffffff",
+                        "primary-container": "#0075d5",
+                        "on-primary": "#ffffff",
+                        "secondary-fixed-dim": "#a9c8f9",
+                        "on-tertiary-container": "#fffbff"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Inter", "Noto Sans SC"],
+                        "body": ["Inter", "Noto Sans SC"],
+                        "label": ["Inter", "Noto Sans SC"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Inter', 'Noto Sans SC', sans-serif; -webkit-font-smoothing: antialiased; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .glass-header { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(20px); }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-surface text-on-surface">
+<!-- SideNavBar (Authority: JSON) -->
+<aside class="fixed left-0 top-0 h-full w-64 border-r border-slate-200 bg-slate-50 dark:bg-slate-900 z-50 flex flex-col p-4 gap-2">
+<div class="mb-8 px-4 py-2">
+<h1 class="font-black text-slate-900 dark:text-white uppercase tracking-wider text-lg">Agent Platform</h1>
+<p class="text-[10px] text-slate-500 font-bold tracking-[0.2em] mt-1">ENTERPRISE OS</p>
+</div>
+<nav class="flex-1 space-y-1">
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative overflow-hidden transition-all duration-300 hover:translate-x-1" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-sans text-sm tracking-wide">Dashboard</span>
+</a>
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative overflow-hidden transition-all duration-300 hover:translate-x-1" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+<span class="font-sans text-sm tracking-wide">Packages</span>
+</a>
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative overflow-hidden transition-all duration-300 hover:translate-x-1" href="#">
+<span class="material-symbols-outlined">extension</span>
+<span class="font-sans text-sm tracking-wide">Plugins</span>
+</a>
+<!-- Semantic Mapping: Governance is closest to System Management -->
+<a class="flex items-center gap-3 bg-indigo-100/50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 font-semibold px-4 py-3 rounded-lg group relative overflow-hidden transition-all duration-300" href="#">
+<span class="material-symbols-outlined">policy</span>
+<span class="font-sans text-sm tracking-wide">Governance</span>
+</a>
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative overflow-hidden transition-all duration-300 hover:translate-x-1" href="#">
+<span class="material-symbols-outlined">history_edu</span>
+<span class="font-sans text-sm tracking-wide">Audit</span>
+</a>
+</nav>
+<div class="mt-auto space-y-1 pt-4 border-t border-slate-200/60">
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative transition-all duration-300" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-sans text-sm tracking-wide">Settings</span>
+</a>
+<a class="flex items-center gap-3 text-slate-600 dark:text-slate-400 px-4 py-3 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 rounded-lg group relative transition-all duration-300" href="#">
+<span class="material-symbols-outlined">contact_support</span>
+<span class="font-sans text-sm tracking-wide">Support</span>
+</a>
+</div>
+</aside>
+<!-- TopNavBar (Authority: JSON) -->
+<header class="fixed top-0 right-0 left-0 ml-64 h-16 glass-header z-40 border-b border-slate-200 dark:border-slate-800 px-6 flex items-center justify-between">
+<div class="flex items-center gap-4">
+<span class="text-xl font-bold tracking-tight text-slate-900 dark:text-white">Agent Platform</span>
+<div class="h-4 w-px bg-slate-200 mx-2"></div>
+<nav class="flex gap-6">
+<a class="font-sans text-sm font-medium text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-600 pb-4 h-16 flex items-center translate-y-[2px]" href="#">租户与用户管理</a>
+<a class="font-sans text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 transition-colors h-16 flex items-center" href="#">资源监控</a>
+<a class="font-sans text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 transition-colors h-16 flex items-center" href="#">权限配置</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<div class="relative group">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+<input class="bg-surface-container-high border-none rounded-full pl-10 pr-4 py-1.5 text-sm w-64 focus:ring-2 focus:ring-primary/20 transition-all outline-none" placeholder="搜索资源..." type="text"/>
+</div>
+<div class="flex items-center gap-2">
+<button class="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
+<span class="material-symbols-outlined">account_tree</span>
+</button>
+<button class="p-2 text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
+<span class="material-symbols-outlined">apps</span>
+</button>
+<div class="ml-2 flex items-center gap-3 pl-4 border-l border-slate-200">
+<div class="text-right">
+<p class="text-xs font-bold text-slate-900">Admin User</p>
+<p class="text-[10px] text-slate-500 uppercase tracking-tighter">Super Admin</p>
+</div>
+<img alt="User profile" class="w-8 h-8 rounded-full bg-indigo-100 border border-indigo-200" data-alt="professional avatar of a male administrator in a light blue shirt with a clean minimalist background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuB-DCN1s7ZOvTGKreVPJigODf8eyepaVJCAgfnOinGaPBd0p73fxNp-z87UmV33Sn9kwbogWXfjfXOSaUY2I1nYWx96I_9xvjDTigxUkhm4G-hdRq7MmyMTVlm8gqZcwIxhVFo0Iv1Pw3psMTRe3yGY98Inz-OJkZDPi79ZqOCzA18NE7bXYrDoqjrsEXFzbxGtOWiB59oOtcxu0-UuVxILz3eTuoHkIibdIhZrUBSRuAyQXP0aqNLVyGI1o7ClSwgtaq7FfuTFSA0"/>
+</div>
+</div>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="ml-64 pt-16 min-h-screen">
+<div class="p-8 max-w-[1600px] mx-auto">
+<!-- Breadcrumbs & Header -->
+<div class="mb-8">
+<div class="flex items-center gap-2 text-on-surface-variant text-sm mb-2">
+<span>系统管理</span>
+<span class="material-symbols-outlined text-xs">chevron_right</span>
+<span class="text-primary font-medium">租户与用户管理</span>
+</div>
+<div class="flex justify-between items-end">
+<div>
+<h2 class="text-display-sm font-black tracking-tight text-on-surface leading-tight">租户与用户管理</h2>
+<p class="text-on-surface-variant mt-2 max-w-2xl">管理企业级多租户架构，分配模型配额及监控用户权限生命周期。通过精细化的角色管理确保系统安全性。</p>
+</div>
+<div class="flex gap-3">
+<button class="px-4 py-2 bg-surface-container-highest text-on-surface rounded-md font-medium text-sm flex items-center gap-2 hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">download</span>
+                            导出报告
+                        </button>
+<button class="px-6 py-2 bg-gradient-to-r from-primary to-primary-container text-on-primary rounded-md font-bold text-sm flex items-center gap-2 shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity">
+<span class="material-symbols-outlined text-sm">add</span>
+                            新增租户
+                        </button>
+</div>
+</div>
+</div>
+<!-- Tab Switcher -->
+<div class="mb-8 flex gap-1 p-1 bg-surface-container-low rounded-xl w-fit">
+<button class="px-8 py-2.5 rounded-lg bg-surface-container-lowest shadow-sm text-primary font-bold text-sm transition-all">
+                    租户管理
+                </button>
+<button class="px-8 py-2.5 rounded-lg text-on-surface-variant font-medium text-sm hover:bg-surface-container-high transition-all">
+                    用户管理
+                </button>
+</div>
+<!-- Dashboard Stats Bento Grid -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+<div class="col-span-1 bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-sm relative overflow-hidden group">
+<div class="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform duration-500">
+<span class="material-symbols-outlined text-8xl">apartment</span>
+</div>
+<p class="text-label-md text-on-surface-variant uppercase tracking-widest font-bold">活跃租户</p>
+<div class="mt-4 flex items-end gap-2">
+<h3 class="text-4xl font-black text-on-surface leading-none">128</h3>
+<span class="text-xs text-error font-bold flex items-center mb-1">
+<span class="material-symbols-outlined text-xs">trending_up</span>
+                            +12%
+                        </span>
+</div>
+<p class="text-xs text-on-surface-variant/60 mt-2">相比上月增长</p>
+</div>
+<div class="col-span-1 bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-sm relative overflow-hidden group">
+<div class="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform duration-500">
+<span class="material-symbols-outlined text-8xl">group</span>
+</div>
+<p class="text-label-md text-on-surface-variant uppercase tracking-widest font-bold">总用户量</p>
+<div class="mt-4 flex items-end gap-2">
+<h3 class="text-4xl font-black text-on-surface leading-none">8,421</h3>
+<span class="text-xs text-primary font-bold flex items-center mb-1">
+<span class="material-symbols-outlined text-xs">trending_up</span>
+                            +4.5%
+                        </span>
+</div>
+<p class="text-xs text-on-surface-variant/60 mt-2">系统活跃账户</p>
+</div>
+<div class="col-span-1 bg-surface-container-lowest p-6 rounded-xl border border-outline-variant/10 shadow-sm relative overflow-hidden group">
+<div class="absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform duration-500">
+<span class="material-symbols-outlined text-8xl">token</span>
+</div>
+<p class="text-label-md text-on-surface-variant uppercase tracking-widest font-bold">本月消耗配额</p>
+<div class="mt-4 flex items-end gap-2">
+<h3 class="text-4xl font-black text-on-surface leading-none">72.4M</h3>
+<span class="text-xs text-tertiary font-bold flex items-center mb-1">
+                            Tokens
+                        </span>
+</div>
+<div class="w-full bg-surface-container-high h-1 rounded-full mt-4">
+<div class="bg-primary w-2/3 h-full rounded-full"></div>
+</div>
+</div>
+<div class="col-span-1 bg-gradient-to-br from-primary to-primary-container p-6 rounded-xl shadow-lg shadow-primary/20 relative overflow-hidden group">
+<div class="absolute -right-2 -bottom-2 opacity-10 group-hover:scale-110 transition-transform duration-500">
+<span class="material-symbols-outlined text-9xl text-white">shield_person</span>
+</div>
+<p class="text-label-md text-on-primary/60 uppercase tracking-widest font-bold">系统安全等级</p>
+<div class="mt-4">
+<h3 class="text-3xl font-black text-on-primary">极高 (L5)</h3>
+<p class="text-sm text-on-primary/80 mt-2">所有审计追踪已启用</p>
+</div>
+<button class="mt-4 text-xs font-bold text-on-primary bg-white/20 px-3 py-1.5 rounded-full hover:bg-white/30 transition-colors">
+                        查看详情
+                    </button>
+</div>
+</div>
+<!-- Tenant List Table -->
+<div class="bg-surface-container-lowest rounded-xl border border-outline-variant/5 shadow-sm overflow-hidden">
+<div class="px-6 py-5 border-b border-surface-container-high flex justify-between items-center bg-surface-container-lowest">
+<div class="flex items-center gap-4">
+<h3 class="font-black text-on-surface">租户列表</h3>
+<div class="flex items-center gap-2 px-2 py-1 bg-secondary-container/30 rounded-md">
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+<span class="text-[10px] font-bold text-on-secondary-container uppercase tracking-tighter">实时同步中</span>
+</div>
+</div>
+<div class="flex gap-2">
+<div class="flex items-center gap-2 border border-outline-variant/30 px-3 py-1.5 rounded-lg text-sm text-on-surface-variant cursor-pointer hover:bg-surface-container-low transition-all">
+<span class="material-symbols-outlined text-sm">filter_list</span>
+                            筛选状态
+                        </div>
+<div class="flex items-center gap-2 border border-outline-variant/30 px-3 py-1.5 rounded-lg text-sm text-on-surface-variant cursor-pointer hover:bg-surface-container-low transition-all">
+<span class="material-symbols-outlined text-sm">sort</span>
+                            排序规则
+                        </div>
+</div>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left">
+<thead>
+<tr class="bg-surface-container-high/50">
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider">租户名称 / ID</th>
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider">状态</th>
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider">模型配额 (Tokens)</th>
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider">活跃用户</th>
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider">创建日期</th>
+<th class="px-6 py-4 text-label-md font-black text-on-surface-variant uppercase tracking-wider text-right">操作</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-surface-container-low">
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-6">
+<div class="flex items-center gap-4">
+<div class="w-10 h-10 rounded-lg bg-primary-fixed flex items-center justify-center text-primary font-black">智</div>
+<div>
+<p class="font-bold text-on-surface">智算科技 (Shanghai) Co., Ltd.</p>
+<p class="text-xs font-mono text-on-surface-variant/60">TN-882-901-X2</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<span class="px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container text-xs font-bold flex items-center w-fit gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                        运行中
+                                    </span>
+</td>
+<td class="px-6 py-6">
+<div class="space-y-1.5">
+<div class="flex justify-between text-[10px] font-bold text-on-surface-variant">
+<span>24.5M / 100.0M</span>
+<span>24.5%</span>
+</div>
+<div class="w-32 bg-surface-container-high h-1.5 rounded-full overflow-hidden">
+<div class="bg-primary h-full rounded-full w-[24.5%]"></div>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<p class="font-mono font-medium text-on-surface">1,248 <span class="text-on-surface-variant/40 text-xs font-sans">/ 2000</span></p>
+</td>
+<td class="px-6 py-6">
+<p class="text-sm font-medium text-on-surface-variant">2023-11-20</p>
+</td>
+<td class="px-6 py-6 text-right">
+<button class="text-primary hover:bg-primary-fixed px-3 py-1.5 rounded-lg transition-colors font-bold text-sm">管理配置</button>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-6">
+<div class="flex items-center gap-4">
+<div class="w-10 h-10 rounded-lg bg-tertiary-fixed flex items-center justify-center text-tertiary font-black">瑞</div>
+<div>
+<p class="font-bold text-on-surface">瑞通全球供应链 (Ruitong Global)</p>
+<p class="text-xs font-mono text-on-surface-variant/60">TN-773-452-Y9</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<span class="px-3 py-1 rounded-full bg-surface-container-high text-on-surface-variant text-xs font-bold flex items-center w-fit gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-on-surface-variant/40"></span>
+                                        已停用
+                                    </span>
+</td>
+<td class="px-6 py-6">
+<div class="space-y-1.5">
+<div class="flex justify-between text-[10px] font-bold text-on-surface-variant">
+<span>0.0M / 50.0M</span>
+<span>0%</span>
+</div>
+<div class="w-32 bg-surface-container-high h-1.5 rounded-full overflow-hidden">
+<div class="bg-outline-variant h-full rounded-full w-0"></div>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<p class="font-mono font-medium text-on-surface">0 <span class="text-on-surface-variant/40 text-xs font-sans">/ 500</span></p>
+</td>
+<td class="px-6 py-6">
+<p class="text-sm font-medium text-on-surface-variant">2023-12-05</p>
+</td>
+<td class="px-6 py-6 text-right">
+<button class="text-primary hover:bg-primary-fixed px-3 py-1.5 rounded-lg transition-colors font-bold text-sm">重新激活</button>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-6">
+<div class="flex items-center gap-4">
+<div class="w-10 h-10 rounded-lg bg-secondary-fixed flex items-center justify-center text-secondary font-black">云</div>
+<div>
+<p class="font-bold text-on-surface">云端创想实验室 (Cloud Vision Lab)</p>
+<p class="text-xs font-mono text-on-surface-variant/60">TN-102-334-K1</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<span class="px-3 py-1 rounded-full bg-error-container text-on-error-container text-xs font-bold flex items-center w-fit gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-error"></span>
+                                        欠费警告
+                                    </span>
+</td>
+<td class="px-6 py-6">
+<div class="space-y-1.5">
+<div class="flex justify-between text-[10px] font-bold text-error">
+<span>49.8M / 50.0M</span>
+<span>99.6%</span>
+</div>
+<div class="w-32 bg-surface-container-high h-1.5 rounded-full overflow-hidden">
+<div class="bg-error h-full rounded-full w-[99.6%]"></div>
+</div>
+</div>
+</td>
+<td class="px-6 py-6">
+<p class="font-mono font-medium text-on-surface">482 <span class="text-on-surface-variant/40 text-xs font-sans">/ 500</span></p>
+</td>
+<td class="px-6 py-6">
+<p class="text-sm font-medium text-on-surface-variant">2024-01-12</p>
+</td>
+<td class="px-6 py-6 text-right">
+<button class="text-primary hover:bg-primary-fixed px-3 py-1.5 rounded-lg transition-colors font-bold text-sm">增加配额</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="px-6 py-4 bg-surface-container-low/30 border-t border-surface-container-high flex justify-between items-center">
+<p class="text-xs text-on-surface-variant font-medium">显示第 1-10 条，共 128 条记录</p>
+<div class="flex gap-1">
+<button class="w-8 h-8 rounded-md flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant transition-colors">
+<span class="material-symbols-outlined text-sm">chevron_left</span>
+</button>
+<button class="w-8 h-8 rounded-md flex items-center justify-center bg-primary text-on-primary font-bold text-xs">1</button>
+<button class="w-8 h-8 rounded-md flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant font-medium text-xs transition-colors">2</button>
+<button class="w-8 h-8 rounded-md flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant font-medium text-xs transition-colors">3</button>
+<span class="w-8 h-8 flex items-center justify-center text-on-surface-variant text-xs">...</span>
+<button class="w-8 h-8 rounded-md flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant font-medium text-xs transition-colors">13</button>
+<button class="w-8 h-8 rounded-md flex items-center justify-center hover:bg-surface-container-high text-on-surface-variant transition-colors">
+<span class="material-symbols-outlined text-sm">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Contextual Help / Action Area -->
+<div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+<div class="bg-surface-container-low p-6 rounded-xl flex gap-6 items-start">
+<div class="p-3 bg-white rounded-lg shadow-sm">
+<span class="material-symbols-outlined text-primary text-3xl">hub</span>
+</div>
+<div>
+<h4 class="font-black text-on-surface">租户隔离策略</h4>
+<p class="text-sm text-on-surface-variant mt-1">当前系统采用硬隔离机制（Hard-Multi-Tenancy），各租户数据存储及算力分配互不干扰。如需跨租户共享资源，请在系统设置中启用“联盟链”模式。</p>
+<a class="inline-flex items-center gap-1 text-primary text-xs font-bold mt-3 hover:underline" href="#">
+                            阅读详细技术白皮书
+                            <span class="material-symbols-outlined text-[10px]">open_in_new</span>
+</a>
+</div>
+</div>
+<div class="bg-surface-container-low p-6 rounded-xl flex gap-6 items-start">
+<div class="p-3 bg-white rounded-lg shadow-sm">
+<span class="material-symbols-outlined text-tertiary text-3xl">key</span>
+</div>
+<div>
+<h4 class="font-black text-on-surface">全局用户安全审计</h4>
+<p class="text-sm text-on-surface-variant mt-1">系统正实时监控所有 API Key 调用及高频登录行为。当前异常行为拦截率 99.8%，发现 2 个潜在的风险账户，建议立即前往用户管理进行锁定。</p>
+<a class="inline-flex items-center gap-1 text-tertiary text-xs font-bold mt-3 hover:underline" href="#">
+                            进入审计合规中心
+                            <span class="material-symbols-outlined text-[10px]">arrow_forward</span>
+</a>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- FAB for Quick Actions (Suppressed on details pages, active here) -->
+<button class="fixed bottom-8 right-8 w-14 h-14 bg-primary text-on-primary rounded-full shadow-2xl flex items-center justify-center hover:scale-105 transition-transform z-50">
+<span class="material-symbols-outlined text-2xl">support_agent</span>
+</button>
+</body></html>
