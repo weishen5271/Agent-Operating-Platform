@@ -1,5 +1,5 @@
 # 数据库配置
-database_url = "postgresql+psycopg://app_user:doubi32310@115.190.173.215:5432/agent_platform"
+database_url = "postgresql+psycopg://username:password@127.0.0.1:5432/agent_platform"
 
 # LLM 配置 (可选)
 # llm_base_url = "https://api.openai.com/v1"
