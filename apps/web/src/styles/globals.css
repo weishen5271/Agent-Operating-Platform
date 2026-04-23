@@ -875,6 +875,78 @@ select {
   color: var(--on-surface);
 }
 
+.knowledge-ingest-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.4fr);
+  gap: 16px;
+}
+
+.knowledge-ingest-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--on-surface-variant);
+}
+
+.knowledge-ingest-form label.full {
+  grid-column: 1 / -1;
+}
+
+.knowledge-ingest-form input,
+.knowledge-ingest-form textarea {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+  font-size: 0.9rem;
+  outline: none;
+  transition: background 0.18s, border-color 0.18s, box-shadow 0.18s;
+}
+
+.knowledge-ingest-form input {
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.knowledge-ingest-form textarea {
+  min-height: 168px;
+  resize: vertical;
+  padding: 12px 14px;
+  line-height: 1.65;
+}
+
+.knowledge-ingest-form input:focus,
+.knowledge-ingest-form textarea:focus {
+  background: var(--surface-container-lowest);
+  border-color: rgba(0, 93, 170, 0.4);
+  box-shadow: 0 0 0 3px rgba(0, 93, 170, 0.12);
+}
+
+.knowledge-ingest-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.form-status {
+  font-size: 0.84rem;
+  color: var(--on-surface-variant);
+}
+
+.form-status.success {
+  color: var(--success);
+}
+
+.form-status.error {
+  color: var(--error);
+}
+
 /* ============================================================= */
 /* Buttons                                                        */
 /* ============================================================= */
@@ -2355,6 +2427,15 @@ select {
 
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .knowledge-ingest-form {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledge-ingest-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .four-cols,

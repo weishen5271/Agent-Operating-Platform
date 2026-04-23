@@ -1,4 +1,5 @@
 import { getAdminKnowledge } from "@/lib/api-client";
+import { KnowledgeIngestPanel } from "@/components/knowledge/knowledge-ingest-panel";
 import { Shell } from "@/components/shared/shell";
 import { knowledgeData } from "@/lib/workspace-fixtures";
 
@@ -105,6 +106,8 @@ export default async function KnowledgePage() {
             <span className="material-symbols-outlined stat-card-glyph">schedule</span>
           </article>
         </div>
+
+        <KnowledgeIngestPanel />
 
         <div className="dashboard-grid">
           <section className="panel-card">

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import selectinload
 
 from agent_platform.bootstrap.settings import settings
@@ -14,6 +14,7 @@ from agent_platform.domain.models import (
     ConversationMessage,
     DraftAction,
     KnowledgeSource,
+    KnowledgeSearchResult,
     LLMRuntimeConfig,
     SecurityEvent,
     SourceReference,
@@ -29,6 +30,7 @@ from agent_platform.infrastructure.db_models import (
     ConversationMessageRecord,
     ConversationRecord,
     KnowledgeDocumentRecord,
+    KnowledgeChunkRecord,
     LLMRuntimeConfigRecord,
     RequestTraceRecord,
     SecurityEventRecord,
@@ -36,6 +38,7 @@ from agent_platform.infrastructure.db_models import (
     TraceStepRecord,
     UserAccountRecord,
 )
+from agent_platform.retrieval.text import chunk_text, content_hash, cosine_similarity, embed_text, tokenize
 
 
 class ConversationRepository(Protocol):
@@ -58,6 +61,22 @@ class TraceRepository(Protocol):
     async def get(self, trace_id: str) -> TraceRecord | None: ...
 
     async def list_recent(self, tenant_id: str, limit: int = 20) -> list[TraceRecord]: ...
+
+
+class KnowledgeRepository(Protocol):
+    async def list_recent(self, tenant_id: str) -> list[KnowledgeSource]: ...
+
+    async def ingest_text(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        content: str,
+        source_type: str,
+        owner: str,
+    ) -> KnowledgeSource: ...
+
+    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult: ...
 
 
 class TenantRepository(Protocol):
@@ -96,10 +115,6 @@ class DraftRepository(Protocol):
 
 class SecurityRepository(Protocol):
     async def list_recent(self, tenant_id: str) -> list[SecurityEvent]: ...
-
-
-class KnowledgeRepository(Protocol):
-    async def list_recent(self, tenant_id: str) -> list[KnowledgeSource]: ...
 
 
 class LLMConfigRepository(Protocol):
@@ -598,6 +613,157 @@ class PostgresKnowledgeRepository:
             )
             return [_knowledge_from_record(item) for item in result.scalars().all()]
 
+    async def ingest_text(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        content: str,
+        source_type: str,
+        owner: str,
+    ) -> KnowledgeSource:
+        chunks = chunk_text(content)
+        if not chunks:
+            raise ValueError("Knowledge content is empty after parsing")
+
+        source_id = f"ks-{uuid4().hex[:12]}"
+        async with self._runtime.session() as session:
+            document = KnowledgeDocumentRecord(
+                source_id=source_id,
+                tenant_id=tenant_id,
+                name=name,
+                source_type=source_type,
+                owner=owner,
+                chunk_count=len(chunks),
+                status="运行中",
+            )
+            session.add(document)
+            for index, chunk in enumerate(chunks):
+                session.add(
+                    KnowledgeChunkRecord(
+                        chunk_id=f"kc-{uuid4().hex[:12]}",
+                        source_id=source_id,
+                        tenant_id=tenant_id,
+                        chunk_index=index,
+                        title=name,
+                        content=chunk,
+                        content_hash=content_hash(chunk),
+                        embedding=embed_text(chunk),
+                        metadata_json={
+                            "version": "v1",
+                            "classification": "internal",
+                            "locator": f"chunk:{index + 1}",
+                        },
+                        token_count=len(tokenize(chunk)),
+                        status="published",
+                    )
+                )
+            await session.commit()
+            await session.refresh(document)
+            return _knowledge_from_record(document)
+
+    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
+        terms = tokenize(query)
+        query_vector = embed_text(query)
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(KnowledgeChunkRecord, KnowledgeDocumentRecord)
+                .join(KnowledgeDocumentRecord, KnowledgeDocumentRecord.source_id == KnowledgeChunkRecord.source_id)
+                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
+                .where(KnowledgeChunkRecord.status == "published")
+                .where(KnowledgeDocumentRecord.status == "运行中")
+            )
+            rows = result.all()
+
+        keyword_ranked: list[tuple[str, float]] = []
+        vector_ranked: list[tuple[str, float]] = []
+        chunk_map: dict[str, tuple[KnowledgeChunkRecord, KnowledgeDocumentRecord]] = {}
+        for chunk, document in rows:
+            chunk_map[chunk.chunk_id] = (chunk, document)
+            keyword_score = self._keyword_score(chunk=chunk, document=document, terms=terms, query=query)
+            if keyword_score > 0:
+                keyword_ranked.append((chunk.chunk_id, keyword_score))
+            vector_score = cosine_similarity(query_vector, chunk.embedding)
+            if vector_score > 0:
+                vector_ranked.append((chunk.chunk_id, vector_score))
+
+        keyword_ranked.sort(key=lambda item: item[1], reverse=True)
+        vector_ranked.sort(key=lambda item: item[1], reverse=True)
+        fused_scores = self._rrf(keyword_ranked, vector_ranked)
+        ordered_ids = sorted(fused_scores, key=lambda chunk_id: fused_scores[chunk_id], reverse=True)[:top_k]
+        matches = [
+            self._source_reference(chunk_map[chunk_id][0], chunk_map[chunk_id][1], query=query, terms=terms)
+            for chunk_id in ordered_ids
+        ]
+        return KnowledgeSearchResult(
+            matches=matches,
+            backend="postgres_json_hybrid",
+            query=query,
+            candidate_count=len(rows),
+            match_count=len(matches),
+            keyword_match_count=len(keyword_ranked),
+            vector_match_count=len(vector_ranked),
+        )
+
+    @staticmethod
+    def _keyword_score(
+        *,
+        chunk: KnowledgeChunkRecord,
+        document: KnowledgeDocumentRecord,
+        terms: list[str],
+        query: str,
+    ) -> float:
+        title = document.name.lower()
+        content = chunk.content.lower()
+        normalized_query = query.lower()
+        score = 0.0
+        if normalized_query and normalized_query in title:
+            score += 12.0
+        if normalized_query and normalized_query in content:
+            score += 8.0
+        for term in terms:
+            if term in title:
+                score += 4.0
+            if term in content:
+                score += min(content.count(term), 5)
+        return score
+
+    @staticmethod
+    def _rrf(*ranked_lists: list[tuple[str, float]], k: int = 60) -> dict[str, float]:
+        scores: dict[str, float] = {}
+        for ranked in ranked_lists:
+            for rank, (chunk_id, _score) in enumerate(ranked, start=1):
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1 / (k + rank)
+        return scores
+
+    @staticmethod
+    def _source_reference(
+        chunk: KnowledgeChunkRecord,
+        document: KnowledgeDocumentRecord,
+        *,
+        query: str,
+        terms: list[str],
+    ) -> SourceReference:
+        snippet = PostgresKnowledgeRepository._build_snippet(chunk.content, query=query, terms=terms)
+        return SourceReference(
+            id=chunk.chunk_id,
+            title=document.name,
+            snippet=snippet,
+            source_type="knowledge",
+        )
+
+    @staticmethod
+    def _build_snippet(content: str, *, query: str, terms: list[str]) -> str:
+        lowered = content.lower()
+        index = lowered.find(query.lower()) if query else -1
+        if index == -1:
+            index = next((lowered.find(term) for term in terms if lowered.find(term) != -1), -1)
+        if index == -1:
+            return content[:180].replace("\n", " ")
+        start = max(index - 60, 0)
+        end = min(index + 160, len(content))
+        return content[start:end].replace("\n", " ")
+
 
 class PostgresLLMConfigRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:
@@ -831,6 +997,56 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
                     owner="财务运营组",
                     chunk_count=1946,
                     status="运行中",
+                )
+            )
+        existing_chunk_ids = set((await session.execute(select(KnowledgeChunkRecord.chunk_id))).scalars().all())
+        if "kc-seed-p0a" not in existing_chunk_ids:
+            seed_content = (
+                "P0a 阶段交付统一对话入口、基础编排、检索增强、插件调用、Trace 留痕与基础治理能力。"
+                "知识问答链路通过 knowledge.search 召回知识切片，返回 SourceReference 引用，再由 LLM Runtime "
+                "基于检索上下文生成最终回答。"
+            )
+            session.add(
+                KnowledgeChunkRecord(
+                    chunk_id="kc-seed-p0a",
+                    source_id="ks-001",
+                    tenant_id="tenant-demo",
+                    chunk_index=0,
+                    title="企业制度库",
+                    content=seed_content,
+                    content_hash=content_hash(seed_content),
+                    embedding=embed_text(seed_content),
+                    metadata_json={
+                        "version": "seed",
+                        "classification": "internal",
+                        "locator": "seed:p0a",
+                    },
+                    token_count=len(tokenize(seed_content)),
+                    status="published",
+                )
+            )
+        if "kc-seed-finance" not in existing_chunk_ids:
+            seed_content = (
+                "财务流程文档覆盖费用报销、采购申请、预算校验和审批流转。涉及写操作时，平台需要先生成草稿，"
+                "由用户确认或审批通过后再执行。"
+            )
+            session.add(
+                KnowledgeChunkRecord(
+                    chunk_id="kc-seed-finance",
+                    source_id="ks-002",
+                    tenant_id="tenant-demo",
+                    chunk_index=0,
+                    title="财务流程文档",
+                    content=seed_content,
+                    content_hash=content_hash(seed_content),
+                    embedding=embed_text(seed_content),
+                    metadata_json={
+                        "version": "seed",
+                        "classification": "internal",
+                        "locator": "seed:finance",
+                    },
+                    token_count=len(tokenize(seed_content)),
+                    status="published",
                 )
             )
 

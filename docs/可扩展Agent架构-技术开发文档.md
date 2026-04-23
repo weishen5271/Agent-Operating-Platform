@@ -1,7 +1,7 @@
 # 可扩展Agent架构 - 技术开发文档
 
-**版本**: v1.2  
-**日期**: 2026-04-19  
+**版本**: v1.3  
+**日期**: 2026-04-22  
 **状态**: 正式版  
 **关联文档**: [可扩展Agent平台-通用PRD-v1.0.md](/Users/shenwei/简历/可扩展Agent平台-通用PRD-v1.0.md)
 
@@ -542,6 +542,61 @@ Chat API
  -> 发布到指定租户 / 业务包
 ```
 
+RAG 能力由两条链路组成：离线或准实时的“知识入库 / 建索引”链路，以及在线的“检索增强生成”链路。入库链路负责把原始文档转成可检索、可引用、可治理的知识切片；在线链路只消费已发布索引，避免在用户请求路径中做重解析、重切片或批量向量化。
+
+知识入库与向量索引创建步骤如下：
+
+1. 采集原始文档：从后台上传、对象存储、Git 文档库或业务系统同步文档，生成 `knowledge_source` 与 `knowledge_document` 元数据，记录租户、业务包、版本、来源、密级和责任人。
+2. 解析与清洗：按文件类型提取正文、标题层级、表格文本和页码；去除页眉页脚、重复目录、空白噪音和不可引用内容；解析失败时进入 `parse_failed` 状态，不写入可检索索引。
+3. 切片：按标题、段落、列表和语义边界优先切分；单个 chunk 控制在模型上下文友好的长度内，并保留少量 overlap，避免答案依据被截断。
+4. 元数据标注：每个 chunk 必须携带 `tenant_id`、`source_id`、`document_id`、`chunk_index`、`version`、`classification`、`updated_at`、`locator` 等字段，后续权限过滤、引用展示和审计都依赖这些字段。
+5. 内容去重：为标准化后的 chunk 计算 `content_hash`。同一文档版本内 hash 相同的切片不重复写入；跨版本 hash 相同的切片可复用 embedding，但必须保留版本关系。
+6. 生成 embedding：调用统一 Embedding Client，把 chunk 文本转成固定维度向量。向量维度必须与 `pgvector` 字段定义一致，同一索引空间内不得混用不同 embedding 模型或维度。
+7. 写入切片与向量：先写 `knowledge_chunk`，再写 `embedding` 向量与检索元数据。写入过程使用事务保证 chunk 与向量一致；失败时不能发布半成品索引。
+8. 创建 / 刷新索引：为向量字段创建 pgvector 近似最近邻索引，为正文创建全文检索索引，并为 `tenant_id + status + source_id` 创建过滤索引。
+9. 质量校验：运行抽样检索，验证 top-k 命中、引用片段、租户隔离、版本过滤和敏感等级过滤；不通过时保持 `indexed` 但不进入 `published`。
+10. 发布：生成 `knowledge_publish_record`，把通过校验的索引版本发布到指定租户、业务包或 capability 绑定空间。
+
+```mermaid
+flowchart TD
+    A["原始文档"] --> B["解析与清洗"]
+    B --> C["结构化切片"]
+    C --> D["元数据标注与去重"]
+    D --> E["Embedding Client 生成向量"]
+    E --> F["knowledge_chunk + vector 写入 PostgreSQL"]
+    F --> G["pgvector / 全文索引刷新"]
+    G --> H["检索质量校验"]
+    H --> I["发布到租户 / 业务包知识空间"]
+```
+
+pgvector 索引创建原则：
+
+- P0 阶段优先使用 PostgreSQL + pgvector，避免新增独立向量数据库带来的部署和事务一致性复杂度。
+- 向量列建议使用 `vector(dimensions)`，`dimensions` 来自当前 embedding 模型配置，例如 1536、3072 或本地模型输出维度。
+- 小规模数据可以先使用精确扫描或普通索引过滤；数据量上来后再启用 `ivfflat` 或 `hnsw` 近似索引。
+- `ivfflat` 适合批量构建、数据相对稳定的知识库；`hnsw` 适合检索质量要求高、增量写入更频繁的场景，但索引体积和构建成本更高。
+- 向量相似度通常使用 cosine distance。SQL 层按距离升序取 top-k，业务层再换算为 score，并与关键词得分融合。
+
+示例 SQL 仅表达设计意图，实际迁移需根据 embedding 维度与 PostgreSQL 版本调整：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+ALTER TABLE knowledge_chunk
+  ADD COLUMN IF NOT EXISTS embedding vector(1536);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_tenant_status
+  ON knowledge_chunk (tenant_id, status, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embedding_hnsw
+  ON knowledge_chunk
+  USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_content_fts
+  ON knowledge_chunk
+  USING gin (to_tsvector('simple', content));
+```
+
 ### 6.5 插件发布链路
 
 ```text
@@ -662,9 +717,41 @@ Planner 输出结构：
 5. 混合召回与重排
 6. 引用格式化
 
+在线 RAG 检索的核心目标不是“找最像的一段文本”这么简单，而是在权限、租户、版本、密级、时效性约束下，找到足够支撑回答的证据集合。在线链路必须只读取 `published` 状态的知识切片，并把每个被模型使用的片段回写到 Trace 和响应引用中。
+
+在线检索步骤：
+
+1. Query Normalize：清理用户问题中的无效空白、特殊控制字符和明显噪音，保留业务术语、编号、流程名和人名等强特征。
+2. Query Rewrite：必要时基于对话短期上下文补全省略词，例如把“这个流程”改写为明确的流程名称；改写结果必须记录到 Trace，避免不可解释。
+3. 权限过滤：根据 `tenant_id`、用户 scope、业务包绑定、知识源状态、文档密级、版本状态构造过滤条件，优先在 SQL 层过滤。
+4. 稀疏检索：使用关键词、全文检索或 BM25 召回精确术语匹配结果，适合制度编号、字段名、专有名词、错误码。
+5. 稠密检索：把 query 生成 embedding，在 pgvector 中按向量相似度召回语义相近切片，适合用户自然语言问法和同义表达。
+6. 混合召回：合并稀疏与稠密结果，推荐使用 RRF（Reciprocal Rank Fusion）按排名融合，避免不同检索器分数尺度不一致。
+7. 基础重排：按标题命中、来源权威度、版本新鲜度、密级可见性、chunk 连续性和相似度阈值重排；P0 可规则重排，P1 再接入 cross-encoder reranker。
+8. 引用组装：截取最小可用证据片段，生成 `SourceReference`，包含 `source_id`、`chunk_id`、标题、版本、更新时间、定位信息和 snippet。
+9. 上下文压缩：按模型上下文预算选择 top-k 证据，优先保留高分、不同来源、相邻切片可合并的内容，避免把重复片段塞给模型。
+10. 生成回答：LLM 只能基于检索上下文回答；上下文不足时必须说明不足，不能编造来源。
+
+RAG 检索原理：
+
+- 稀疏检索关注“词是否出现”，对精确匹配强，但无法理解同义表达。
+- 稠密检索关注“语义是否相近”，通过 embedding 把文本映射到向量空间，相似文本在空间距离上更近。
+- 向量索引的作用是加速最近邻搜索。没有索引时需要扫描全部 chunk；使用 pgvector 的 HNSW / IVFFlat 后，可以在召回质量和检索延迟之间做工程取舍。
+- 混合检索同时利用关键词确定性和语义泛化能力。RRF 只依赖排名，不依赖原始分数，因此适合融合 BM25、全文检索、向量检索这类分数尺度不同的结果。
+- 重排不是兜底逻辑，而是把业务治理因素纳入排序：同样相关的切片，已发布、更新、权威、权限明确的来源优先。
+
+RRF 融合公式：
+
+```text
+score(d) = Σ 1 / (k + rank_i(d))
+```
+
+其中 `rank_i(d)` 是文档 `d` 在第 `i` 个检索器中的排名，`k` 通常取 60。一个结果同时被关键词和向量检索排到前列时，融合分会自然升高。
+
 每次检索结果必须返回：
 
 - `source_id`
+- `chunk_id`
 - `title`
 - `snippet`
 - `version`
@@ -672,6 +759,19 @@ Planner 输出结构：
 - `tenant_id`
 - `classification`
 - `score`
+- `retrieval_backend`
+- `locator`
+
+Retriever 模块建议拆分为：
+
+| 模块 | 职责 |
+|------|------|
+| `BaseRetriever` | 统一检索接口，约束输入、输出和 top-k 语义 |
+| `KeywordRetriever` | 基于 PostgreSQL 全文索引、关键词或 BM25 的稀疏召回 |
+| `VectorRetriever` | 基于 Embedding Client + pgvector 的语义召回 |
+| `HybridRetriever` | 并行调用稀疏和稠密检索，用 RRF 或加权策略融合 |
+| `Reranker` | 根据相关性、版本、权威度、密级和连续 chunk 关系重排 |
+| `ReferenceComposer` | 把检索结果转换成可展示、可审计、可进入 LLM 上下文的引用对象 |
 
 ### 7.6 Memory 记忆模块
 
@@ -1061,13 +1161,25 @@ approval:
 - `knowledge_chunk`
 - `knowledge_publish_record`
 
+当启用向量检索时，还需要在 `knowledge_chunk` 上保存 embedding 向量，或拆出 `knowledge_embedding` 表保存向量、embedding 模型、维度与生成状态。是否拆表取决于运维需求：单表查询简单，拆表更便于重建索引和切换 embedding 模型。
+
 发布必须区分：
 
 - 草稿
 - 已解析
+- 已切片
+- 已向量化
 - 已索引
 - 已发布
 - 已失效
+
+知识索引发布规则：
+
+- 未通过解析、切片、向量化和质量校验的版本不得进入 `published` 状态。
+- 同一知识源可以存在多个索引版本，但同一租户 / 业务包绑定空间只能有一个默认生效版本。
+- 重建索引必须生成新版本，不直接覆盖线上已发布向量，避免在线检索出现前后不一致。
+- 删除或失效知识源时，先取消发布绑定，再异步清理 chunk、embedding、对象存储和审计关联。
+- embedding 模型变更会导致向量空间变化，必须全量重建对应索引，不能把不同模型生成的向量混在同一个检索空间。
 
 ### 10.5 新鲜度与引用要求
 
@@ -1175,6 +1287,8 @@ approval:
 | `memory_item` | 记忆数据 |
 | `knowledge_document` | 知识文档 |
 | `knowledge_chunk` | 检索切片 |
+| `knowledge_embedding` | 可选，知识切片向量与 embedding 模型版本 |
+| `knowledge_publish_record` | 知识索引发布记录 |
 | `evaluation_run` | 评估任务 |
 | `feedback_record` | 用户反馈 |
 

@@ -48,6 +48,15 @@ class UserUpdateRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class KnowledgeIngestRequest(BaseModel):
+    tenant_id: str | None = Field(default=None)
+    user_id: str | None = Field(default=None)
+    name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    source_type: str = Field(default="Markdown", max_length=64)
+    owner: str = Field(default="知识平台组", max_length=255)
+
+
 @router.get("/packages")
 async def list_packages(
     tenant_id: str | None = Query(default=None),
@@ -196,6 +205,27 @@ async def knowledge_sources(
         return await chat_service.list_knowledge_sources(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/knowledge/ingest")
+async def ingest_knowledge_source(
+    payload: KnowledgeIngestRequest,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await chat_service.ingest_knowledge_source(
+            tenant_id=payload.tenant_id or tenant_id,
+            user_id=payload.user_id or user_id,
+            name=payload.name,
+            content=payload.content,
+            source_type=payload.source_type,
+            owner=payload.owner,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/traces")

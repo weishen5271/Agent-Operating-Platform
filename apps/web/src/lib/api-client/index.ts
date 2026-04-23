@@ -9,6 +9,7 @@ import type {
   DraftActionResponse,
   HomeSnapshot,
   LLMRuntimeConfig,
+  KnowledgeIngestResponse,
   TenantProfile,
   TraceResponse,
   UserProfile,
@@ -142,6 +143,18 @@ export function getAdminSecurity(): Promise<AdminSecurityResponse> {
 
 export function getAdminKnowledge(): Promise<AdminKnowledgeResponse> {
   return request<AdminKnowledgeResponse>("/admin/knowledge");
+}
+
+export function ingestKnowledgeSource(payload: {
+  name: string;
+  content: string;
+  source_type: string;
+  owner: string;
+}): Promise<KnowledgeIngestResponse> {
+  return request<KnowledgeIngestResponse>("/admin/knowledge/ingest", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getAdminTraces(): Promise<AdminTracesResponse> {

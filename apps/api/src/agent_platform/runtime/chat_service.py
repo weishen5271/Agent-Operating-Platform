@@ -183,7 +183,10 @@ class ChatService:
             self._check_quota(message)
             trace.steps.append(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
 
-            result = self._registry.invoke(capability_name, payload)
+            if intent == "knowledge_query":
+                result = await self._run_knowledge_search(context.tenant_id, payload["query"])
+            else:
+                result = self._registry.invoke(capability_name, payload)
             trace.steps.append(TraceStep(name="executed", status="completed", summary=self._execution_summary(capability_name, result)))
 
             answer, sources = self._compose_answer(intent, result)
@@ -366,6 +369,27 @@ class ChatService:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
         return {"sources": [asdict(item) for item in await self._knowledge_sources.list_recent(context.tenant_id)]}
+
+    async def ingest_knowledge_source(
+        self,
+        *,
+        name: str,
+        content: str,
+        source_type: str,
+        owner: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        source = await self._knowledge_sources.ingest_text(
+            tenant_id=context.tenant_id,
+            name=name,
+            content=content,
+            source_type=source_type,
+            owner=owner,
+        )
+        return {"source": asdict(source)}
 
     async def get_llm_runtime(self, tenant_id: str | None = None) -> dict[str, object]:
         config, _api_key = await self._llm_config.get(tenant_id=tenant_id)
@@ -589,6 +613,29 @@ class ChatService:
         if intent == "hr_query":
             return "hr.leave.balance.query", {"employee_name": self._extract_employee_name(message)}
         return "knowledge.search", {"query": message}
+
+    async def _run_knowledge_search(self, tenant_id: str, query: str) -> dict[str, object]:
+        if not hasattr(self._knowledge_sources, "search"):
+            return self._registry.invoke("knowledge.search", {"query": query})
+        search_result = await self._knowledge_sources.search(tenant_id=tenant_id, query=query, top_k=3)
+        summary = (
+            "已从已发布知识切片中整理出与你问题最相关的要点。"
+            if search_result.matches
+            else "未在当前已发布知识源中检索到相关内容。"
+        )
+        return {
+            "summary": summary,
+            "matches": search_result.matches,
+            "retrieval": {
+                "backend": search_result.backend,
+                "query": search_result.query,
+                "matched": bool(search_result.matches),
+                "candidate_count": search_result.candidate_count,
+                "match_count": search_result.match_count,
+                "keyword_match_count": search_result.keyword_match_count,
+                "vector_match_count": search_result.vector_match_count,
+            },
+        }
 
     @staticmethod
     def _compose_answer(intent: str, result: dict[str, object]) -> tuple[str, list[SourceReference]]:

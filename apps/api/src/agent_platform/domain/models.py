@@ -124,6 +124,17 @@ class KnowledgeSource:
 
 
 @dataclass(slots=True)
+class KnowledgeSearchResult:
+    matches: list[SourceReference]
+    backend: str
+    query: str
+    candidate_count: int
+    match_count: int
+    keyword_match_count: int
+    vector_match_count: int
+
+
+@dataclass(slots=True)
 class LLMRuntimeConfig:
     provider: str
     base_url: str

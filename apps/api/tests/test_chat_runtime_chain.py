@@ -2,8 +2,10 @@ import asyncio
 
 from agent_platform.domain.models import (
     Conversation,
+    KnowledgeSearchResult,
     KnowledgeSource,
     LLMRuntimeConfig,
+    SourceReference,
     TenantProfile,
     UserContext,
 )
@@ -78,6 +80,24 @@ class FakeKnowledgeRepository:
                 status="运行中",
             )
         ]
+
+    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
+        return KnowledgeSearchResult(
+            matches=[
+                SourceReference(
+                    id="kc-test",
+                    title="企业制度库",
+                    snippet="P0a 阶段交付统一对话入口、基础编排、检索增强和插件调用。",
+                    source_type="knowledge",
+                )
+            ],
+            backend="fake_hybrid",
+            query=query,
+            candidate_count=1,
+            match_count=1,
+            keyword_match_count=1,
+            vector_match_count=1,
+        )
 
 
 class FakeLLMConfigRepository:

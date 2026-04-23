@@ -194,6 +194,12 @@ export type AdminKnowledgeResponse = {
   }>;
 };
 
+export type KnowledgeSource = AdminKnowledgeResponse["sources"][number];
+
+export type KnowledgeIngestResponse = {
+  source: KnowledgeSource;
+};
+
 export type AdminTracesResponse = {
   items: Array<{
     trace_id: string;
