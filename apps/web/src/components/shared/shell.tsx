@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useLinkStatus } from "next/dist/client/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { getCurrentUser } from "@/lib/api-client";
 
@@ -37,8 +38,9 @@ type ConsoleNavGroup = {
 
 type ConsoleTab = {
   label: string;
-  href?: NavHref;
+  href?: string;
   active?: boolean;
+  onClick?: () => void;
 };
 
 type AuthUser = {
@@ -78,6 +80,12 @@ function Icon({ name }: { name: string }) {
   return <span className="material-symbols-outlined">{name}</span>;
 }
 
+function NavPendingIndicator() {
+  const { pending } = useLinkStatus();
+  if (!pending) return null;
+  return <span className="nav-spinner" aria-hidden="true" />;
+}
+
 export function Shell({
   activeKey,
   title,
@@ -92,9 +100,17 @@ export function Shell({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  const [progressKey, setProgressKey] = useState(0);
+  const [navigating, setNavigating] = useState(false);
+  useEffect(() => {
+    setProgressKey((k) => k + 1);
+    setNavigating(false);
+  }, [pathname]);
 
   useEffect(() => {
     const userStr = localStorage.getItem("auth_user");
@@ -165,10 +181,15 @@ export function Shell({
                 <Link
                   key={item.key}
                   href={item.href}
+                  prefetch
                   className={`console-nav-item ${isActive ? "active" : ""}`}
+                  onClick={() => {
+                    if (!isActive) setNavigating(true);
+                  }}
                 >
                   <Icon name={item.icon} />
                   <span>{item.label}</span>
+                  <NavPendingIndicator />
                 </Link>
               );
             })}
@@ -184,6 +205,12 @@ export function Shell({
       </aside>
 
       <div className="console-main">
+        <span
+          key={progressKey}
+          className={`top-nav-progress ${navigating ? "is-navigating" : ""}`}
+          aria-hidden="true"
+        />
+        {navigating ? <div className="nav-loading-overlay" aria-hidden="true" /> : null}
         <header className="console-header">
           <div className="console-header-left">
             <h2>{title}</h2>
@@ -195,11 +222,20 @@ export function Shell({
                     tab.href ? (
                       <Link
                         key={tab.label}
-                        href={tab.href}
+                        href={tab.href as never}
                         className={`console-tab ${tab.active ? "active" : ""}`}
                       >
                         {tab.label}
                       </Link>
+                    ) : tab.onClick ? (
+                      <button
+                        key={tab.label}
+                        type="button"
+                        className={`console-tab ${tab.active ? "active" : ""}`}
+                        onClick={tab.onClick}
+                      >
+                        {tab.label}
+                      </button>
                     ) : (
                       <span
                         key={tab.label}
