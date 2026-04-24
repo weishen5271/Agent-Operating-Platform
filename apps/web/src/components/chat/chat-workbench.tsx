@@ -20,6 +20,8 @@ type RenderTraceStep = {
   timestamp: string;
 };
 
+type RetrievalMode = "auto" | "rag" | "wiki";
+
 function nowTime(): string {
   return new Date().toLocaleTimeString("zh-CN", {
     hour: "2-digit",
@@ -41,13 +43,17 @@ export function ChatWorkbench() {
     "帮我生成这次采购审批的草稿，并标注风险等级和审批链。",
   );
   const [latestResponse, setLatestResponse] = useState<ChatCompletionResponse | null>(null);
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("auto");
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
   const references = latestResponse
     ? latestResponse.sources.map((item) => ({
         title: item.title,
-        snippet: item.snippet,
+        snippet:
+          item.source_type === "wiki" && item.claim_text
+            ? `${item.claim_text} (${item.locator ?? "wiki"})`
+            : item.snippet,
         type: item.source_type,
       }))
     : chatData.references;
@@ -79,7 +85,7 @@ export function ChatWorkbench() {
 
     startTransition(async () => {
       try {
-        const completion = await createChatCompletion(trimmed);
+        const completion = await createChatCompletion(trimmed, undefined, retrievalMode);
         setLatestResponse(completion);
         setMessages((prev) => [
           ...prev,
@@ -122,6 +128,29 @@ export function ChatWorkbench() {
               {item}
             </button>
           ))}
+        </div>
+
+        <div className="retrieval-mode-row">
+          <span className="retrieval-mode-label">检索模式</span>
+          <div className="pill-tabs retrieval-mode-tabs">
+            {[
+              { key: "auto", label: "自动" },
+              { key: "rag", label: "RAG" },
+              { key: "wiki", label: "Wiki" },
+            ].map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`pill-tab ${retrievalMode === item.key ? "active" : ""}`}
+                onClick={() => setRetrievalMode(item.key as RetrievalMode)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <span className="status-chip plain info">
+            {retrievalMode === "auto" ? "按意图自动选择" : retrievalMode === "rag" ? "固定走 RAG" : "固定走 Wiki"}
+          </span>
         </div>
 
         <div className="chat-history">

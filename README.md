@@ -40,12 +40,24 @@ docker compose up -d postgres
 
 ### 2. 启动 API
 
+macOS / Linux:
+
 ```bash
 export AOP_DATABASE_URL='postgresql+psycopg://postgres:postgres@127.0.0.1:5432/agent_platform'
 export AOP_LLM_BASE_URL='https://api.openai.com/v1'
 export AOP_LLM_MODEL='gpt-4o-mini'
 export AOP_LLM_API_KEY='sk-...'
 bash scripts/run-api.sh
+```
+
+Windows PowerShell:
+
+```powershell
+$env:AOP_DATABASE_URL='postgresql+psycopg://postgres:postgres@127.0.0.1:5432/agent_platform'
+$env:AOP_LLM_BASE_URL='https://api.openai.com/v1'
+$env:AOP_LLM_MODEL='gpt-4o-mini'
+$env:AOP_LLM_API_KEY='sk-...'
+.\scripts\run-api.ps1
 ```
 
 API 启动时会自动执行 `alembic upgrade head`，本地也可以手动运行：
@@ -56,8 +68,17 @@ uv run alembic upgrade head
 
 ### 3. 启动 Web
 
+macOS / Linux:
+
 ```bash
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1 npm run dev:web
+```
+
+Windows PowerShell:
+
+```powershell
+$env:NEXT_PUBLIC_API_BASE_URL='http://127.0.0.1:8000/api/v1'
+npm run dev:web
 ```
 
 默认访问：

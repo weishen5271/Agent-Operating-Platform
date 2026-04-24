@@ -1,20 +1,83 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { ChangeEvent, FormEvent, useState } from "react";
 
 import { ingestKnowledgeSource } from "@/lib/api-client";
+import type { AdminKnowledgeBasesResponse } from "@/lib/api-client/types";
 
 type Status = {
   tone: "idle" | "success" | "error";
   message: string;
 };
 
-export function KnowledgeIngestPanel() {
+type KnowledgeIngestPanelProps = {
+  knowledgeBaseCode?: string;
+  knowledgeBases?: AdminKnowledgeBasesResponse["items"];
+};
+
+export function KnowledgeIngestPanel({
+  knowledgeBaseCode = "knowledge",
+  knowledgeBases = [],
+}: KnowledgeIngestPanelProps) {
+  const availableKnowledgeBases =
+    knowledgeBases.length > 0
+      ? knowledgeBases
+      : [
+          {
+            knowledge_base_code: knowledgeBaseCode,
+            name: knowledgeBaseCode,
+            description: "",
+            status: "active",
+            tenant_id: "",
+            created_by: "",
+            updated_by: "",
+            created_at: "",
+            updated_at: "",
+          },
+        ];
+  const [mode, setMode] = useState<"text" | "file">("file");
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("知识平台组");
   const [content, setContent] = useState("");
+  const [sourceType, setSourceType] = useState("Markdown");
+  const [selectedKnowledgeBaseCode, setSelectedKnowledgeBaseCode] = useState(knowledgeBaseCode);
+  const [selectedFileName, setSelectedFileName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<Status>({ tone: "idle", message: "" });
+
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      setName(file.name.replace(/\.[^.]+$/, ""));
+      setSelectedFileName(file.name);
+      setContent(text);
+      const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (extension === "md" || extension === "markdown") {
+        setSourceType("Markdown");
+      } else if (extension === "txt") {
+        setSourceType("Text");
+      } else if (extension === "json") {
+        setSourceType("JSON");
+      } else if (extension === "csv") {
+        setSourceType("CSV");
+      } else {
+        setSourceType("Text");
+      }
+      setStatus({
+        tone: "success",
+        message: `已读取文件 ${file.name}，可以直接入库。`,
+      });
+    } catch (error) {
+      setStatus({
+        tone: "error",
+        message: error instanceof Error ? error.message : "读取文件失败",
+      });
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,9 +85,10 @@ export function KnowledgeIngestPanel() {
     setStatus({ tone: "idle", message: "" });
     try {
       const response = await ingestKnowledgeSource({
+        knowledge_base_code: selectedKnowledgeBaseCode,
         name,
         owner,
-        source_type: "Markdown",
+        source_type: sourceType,
         content,
       });
       setStatus({
@@ -33,6 +97,7 @@ export function KnowledgeIngestPanel() {
       });
       setName("");
       setContent("");
+      setSelectedFileName("");
       window.location.reload();
     } catch (error) {
       setStatus({
@@ -49,10 +114,39 @@ export function KnowledgeIngestPanel() {
       <div className="panel-header">
         <div>
           <h3>知识入库</h3>
-          <p>提交 Markdown 或纯文本后，系统会完成切片、向量创建、索引发布，并进入 RAG 检索链路。</p>
+          <p>先把原始文件放进 Raw Sources，再进入切片、索引和 Wiki 编译链路。支持本地文件上传，也保留文本粘贴方式。</p>
         </div>
       </div>
+      <div className="console-tabs ingest-tabs">
+        <button
+          type="button"
+          className={`console-tab ${mode === "file" ? "active" : ""}`}
+          onClick={() => setMode("file")}
+        >
+          文件上传
+        </button>
+        <button
+          type="button"
+          className={`console-tab ${mode === "text" ? "active" : ""}`}
+          onClick={() => setMode("text")}
+        >
+          文本粘贴
+        </button>
+      </div>
       <form className="knowledge-ingest-form" onSubmit={handleSubmit}>
+        <label>
+          <span>目标知识库</span>
+          <select
+            value={selectedKnowledgeBaseCode}
+            onChange={(event) => setSelectedKnowledgeBaseCode(event.target.value)}
+          >
+            {availableKnowledgeBases.map((item) => (
+              <option key={item.knowledge_base_code} value={item.knowledge_base_code}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           <span>知识源名称</span>
           <input
@@ -73,13 +167,31 @@ export function KnowledgeIngestPanel() {
             onChange={(event) => setOwner(event.target.value)}
           />
         </label>
+        <label>
+          <span>源文件类型</span>
+          <select value={sourceType} onChange={(event) => setSourceType(event.target.value)}>
+            <option value="Markdown">Markdown</option>
+            <option value="Text">Text</option>
+            <option value="JSON">JSON</option>
+            <option value="CSV">CSV</option>
+          </select>
+        </label>
+        {mode === "file" ? (
+          <label className="full">
+            <span>选择本地文件</span>
+            <input type="file" accept=".md,.markdown,.txt,.json,.csv" onChange={handleFileChange} />
+            <small className="field-hint">
+              {selectedFileName ? `当前文件：${selectedFileName}` : "支持 .md / .txt / .json / .csv，读取后会落到 Raw Sources。"}
+            </small>
+          </label>
+        ) : null}
         <label className="full">
-          <span>文档内容</span>
+          <span>{mode === "file" ? "文件内容预览" : "文档内容"}</span>
           <textarea
             required
             value={content}
             rows={8}
-            placeholder="粘贴需要入库的 Markdown 或纯文本内容..."
+            placeholder={mode === "file" ? "选择文件后自动填充内容..." : "粘贴需要入库的 Markdown 或纯文本内容..."}
             onChange={(event) => setContent(event.target.value)}
           />
         </label>

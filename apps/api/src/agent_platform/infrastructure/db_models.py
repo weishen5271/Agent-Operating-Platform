@@ -115,6 +115,7 @@ class KnowledgeDocumentRecord(Base):
 
     source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    knowledge_base_code: Mapped[str] = mapped_column(String(64), nullable=False, default="knowledge", index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_type: Mapped[str] = mapped_column(String(64), nullable=False)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -139,6 +140,141 @@ class KnowledgeChunkRecord(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="published", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     document: Mapped["KnowledgeDocumentRecord"] = relationship(back_populates="chunks")
+
+
+class KnowledgeWikiPageRecord(Base):
+    __tablename__ = "knowledge_wiki_page"
+
+    page_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    space_code: Mapped[str] = mapped_column(String(64), nullable=False, default="knowledge")
+    page_type: Mapped[str] = mapped_column(String(32), nullable=False, default="overview")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    freshness_score: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    citation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    updated_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class KnowledgeWikiPageRevisionRecord(Base):
+    __tablename__ = "knowledge_wiki_page_revision"
+
+    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    page_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_page.page_id"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    compile_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_wiki_compile_run.compile_run_id"),
+        nullable=True,
+        index=True,
+    )
+    change_type: Mapped[str] = mapped_column(String(32), nullable=False, default="update")
+    content_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    change_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    quality_score: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+
+
+class KnowledgeWikiCitationRecord(Base):
+    __tablename__ = "knowledge_wiki_citation"
+
+    citation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    page_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_page.page_id"), nullable=False, index=True)
+    revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_wiki_page_revision.revision_id"),
+        nullable=False,
+        index=True,
+    )
+    section_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_document.source_id"), nullable=False, index=True)
+    chunk_id: Mapped[str] = mapped_column(ForeignKey("knowledge_chunk.chunk_id"), nullable=False, index=True)
+    evidence_snippet: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    support_type: Mapped[str] = mapped_column(String(16), nullable=False, default="direct")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class KnowledgeWikiLinkRecord(Base):
+    __tablename__ = "knowledge_wiki_link"
+
+    link_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    from_page_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_page.page_id"), nullable=False, index=True)
+    to_page_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_page.page_id"), nullable=False, index=True)
+    link_type: Mapped[str] = mapped_column(String(32), nullable=False, default="related")
+    weight: Mapped[float] = mapped_column(nullable=False, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class KnowledgeWikiCompileRunRecord(Base):
+    __tablename__ = "knowledge_wiki_compile_run"
+
+    compile_run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    scope_type: Mapped[str] = mapped_column(String(32), nullable=False, default="source")
+    scope_value: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    input_source_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    input_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    affected_page_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    token_usage: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class KnowledgeWikiFeedbackRecord(Base):
+    __tablename__ = "knowledge_wiki_feedback"
+
+    feedback_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    page_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    result_status: Mapped[str] = mapped_column(String(32), nullable=False, default="partial")
+    feedback_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class KnowledgeBaseRecord(Base):
+    __tablename__ = "knowledge_base"
+
+    knowledge_base_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    updated_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 class LLMRuntimeConfigRecord(Base):
@@ -168,5 +304,12 @@ def import_db_models() -> None:
         SecurityEventRecord,
         KnowledgeDocumentRecord,
         KnowledgeChunkRecord,
+        KnowledgeWikiPageRecord,
+        KnowledgeWikiPageRevisionRecord,
+        KnowledgeWikiCitationRecord,
+        KnowledgeWikiLinkRecord,
+        KnowledgeWikiCompileRunRecord,
+        KnowledgeWikiFeedbackRecord,
+        KnowledgeBaseRecord,
         LLMRuntimeConfigRecord,
     )

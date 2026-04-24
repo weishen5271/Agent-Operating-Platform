@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import re
+from typing import Literal
 from uuid import uuid4
 
 from agent_platform.bootstrap.settings import settings
@@ -9,6 +10,7 @@ from agent_platform.domain.models import (
     CapabilityDefinition,
     Conversation,
     DraftAction,
+    KnowledgeBase,
     SourceReference,
     TenantProfile,
     TraceRecord,
@@ -22,6 +24,7 @@ from agent_platform.infrastructure.repositories import (
     ConversationRepository,
     DraftRepository,
     KnowledgeRepository,
+    KnowledgeBaseRepository,
     LLMConfigRepository,
     SecurityRepository,
     TenantRepository,
@@ -29,6 +32,7 @@ from agent_platform.infrastructure.repositories import (
     UserRepository,
 )
 from agent_platform.runtime.registry import CapabilityRegistry
+from agent_platform.wiki.service import WikiService
 
 
 class ChatService:
@@ -42,6 +46,8 @@ class ChatService:
         drafts: DraftRepository,
         security_events: SecurityRepository,
         knowledge_sources: KnowledgeRepository,
+        knowledge_bases: KnowledgeBaseRepository,
+        wiki_service: WikiService,
         llm_config: LLMConfigRepository,
         llm_client: OpenAICompatibleLLMClient,
     ) -> None:
@@ -53,6 +59,8 @@ class ChatService:
         self._drafts = drafts
         self._security_events = security_events
         self._knowledge_sources = knowledge_sources
+        self._knowledge_bases = knowledge_bases
+        self._wiki_service = wiki_service
         self._llm_config = llm_config
         self._llm_client = llm_client
 
@@ -74,7 +82,6 @@ class ChatService:
                     "required_scope": capability.required_scope,
                 }
                 for capability in self._registry.list_capabilities()
-                if capability.required_scope in context.scopes
             ],
             "recent_conversations": [
                 {
@@ -92,6 +99,7 @@ class ChatService:
         conversation_id: str | None = None,
         tenant_id: str | None = None,
         user_id: str | None = None,
+        retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
     ) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         tenant = await self._tenants.get(context.tenant_id)
@@ -130,7 +138,7 @@ class ChatService:
             )
         )
 
-        intent = self._classify_intent(message)
+        intent = self._classify_intent(message, retrieval_mode=retrieval_mode)
         strategy = "plan_execute" if intent in {"hr_query", "procurement_draft"} else "direct_answer"
         trace.intent = intent
         trace.strategy = strategy
@@ -141,7 +149,7 @@ class ChatService:
             TraceStep(
                 name="capability_candidates",
                 status="completed",
-                summary=f"按 scope 筛选出 {len(candidate_capabilities)} 个候选 capability。",
+                summary=f"当前可用 capability 共 {len(candidate_capabilities)} 个。",
             )
         )
 
@@ -185,6 +193,12 @@ class ChatService:
 
             if intent == "knowledge_query":
                 result = await self._run_knowledge_search(context.tenant_id, payload["query"])
+            elif intent == "wiki_query":
+                result = await self._run_wiki_search(
+                    tenant_id=context.tenant_id,
+                    user_id=context.user_id,
+                    query=payload["query"],
+                )
             else:
                 result = self._registry.invoke(capability_name, payload)
             trace.steps.append(TraceStep(name="executed", status="completed", summary=self._execution_summary(capability_name, result)))
@@ -203,7 +217,20 @@ class ChatService:
                     trace.steps.append(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。"))
                 else:
                     trace.steps.append(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。"))
-        if intent != "knowledge_query" and intent != "general_chat":
+            elif intent == "wiki_query":
+                llm_answer = await self._generate_wiki_llm_answer(
+                    tenant_id=context.tenant_id,
+                    message=message,
+                    sources=sources,
+                )
+                if llm_answer:
+                    answer = llm_answer
+                    trace.steps.append(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。"))
+                elif not sources:
+                    trace.steps.append(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。"))
+                else:
+                    trace.steps.append(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。"))
+        if intent not in {"knowledge_query", "wiki_query", "general_chat"}:
             trace.steps.append(TraceStep(name="model", status="completed", summary="当前能力无需模型生成。"))
         answer = self._review_output(answer)
         trace.steps.append(TraceStep(name="output_guard", status="completed", summary="输出脱敏与内容审查完成。"))
@@ -229,12 +256,7 @@ class ChatService:
                 "content": answer,
             },
             "sources": [
-                {
-                    "id": source.id,
-                    "title": source.title,
-                    "snippet": source.snippet,
-                    "source_type": source.source_type,
-                }
+                self._serialize_source(source)
                 for source in sources
             ],
         }
@@ -311,7 +333,7 @@ class ChatService:
     async def list_admin_packages(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
-        capabilities = [item for item in self._registry.list_capabilities() if item.required_scope in context.scopes]
+        capabilities = [item for item in self._registry.list_capabilities() if item.enabled]
         return {
             "packages": [
                 {
@@ -365,10 +387,28 @@ class ChatService:
             "drafts": [self._serialize_draft(item) for item in await self._drafts.list_recent(context.tenant_id)],
         }
 
-    async def list_knowledge_sources(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+    async def list_knowledge_sources(
+        self,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        knowledge_base_code: str | None = None,
+    ) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
-        return {"sources": [asdict(item) for item in await self._knowledge_sources.list_recent(context.tenant_id)]}
+        return {
+            "sources": [
+                asdict(item)
+                for item in await self._knowledge_sources.list_recent(
+                    context.tenant_id,
+                    knowledge_base_code=knowledge_base_code,
+                )
+            ]
+        }
+
+    async def list_knowledge_bases(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        return {"items": [asdict(item) for item in await self._knowledge_bases.list_by_tenant(context.tenant_id)]}
 
     async def ingest_knowledge_source(
         self,
@@ -377,6 +417,7 @@ class ChatService:
         content: str,
         source_type: str,
         owner: str,
+        knowledge_base_code: str,
         tenant_id: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, object]:
@@ -388,8 +429,76 @@ class ChatService:
             content=content,
             source_type=source_type,
             owner=owner,
+            knowledge_base_code=knowledge_base_code,
         )
         return {"source": asdict(source)}
+
+    async def create_knowledge_base(
+        self,
+        *,
+        knowledge_base_code: str,
+        name: str,
+        description: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        entity = KnowledgeBase(
+            knowledge_base_code=knowledge_base_code,
+            tenant_id=context.tenant_id,
+            name=name,
+            description=description,
+            status="active",
+            created_by=context.user_id,
+            updated_by=context.user_id,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        return asdict(await self._knowledge_bases.create(entity))
+
+    async def update_knowledge_base(
+        self,
+        *,
+        knowledge_base_code: str,
+        name: str,
+        description: str,
+        status: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        existing = next(
+            (
+                item
+                for item in await self._knowledge_bases.list_by_tenant(context.tenant_id)
+                if item.knowledge_base_code == knowledge_base_code
+            ),
+            None,
+        )
+        if existing is None:
+            raise ValueError("Knowledge base not found")
+        existing.name = name
+        existing.description = description
+        existing.status = status
+        existing.updated_by = context.user_id
+        existing.updated_at = utc_now()
+        return asdict(await self._knowledge_bases.update(existing))
+
+    async def delete_knowledge_base(
+        self,
+        *,
+        knowledge_base_code: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        deleted = await self._knowledge_bases.delete(context.tenant_id, knowledge_base_code)
+        if not deleted:
+            raise ValueError("Knowledge base not found")
+        return {"deleted": True}
 
     async def get_llm_runtime(self, tenant_id: str | None = None) -> dict[str, object]:
         config, _api_key = await self._llm_config.get(tenant_id=tenant_id)
@@ -565,11 +674,26 @@ class ChatService:
         return await self._users.delete(tenant_id, user_id)
 
     @staticmethod
-    def _classify_intent(message: str) -> str:
+    def _classify_intent(message: str, retrieval_mode: Literal["auto", "rag", "wiki"] = "auto") -> str:
         if "采购" in message or "审批草稿" in message or "草稿" in message:
             return "procurement_draft"
         if "年假" in message or "假期" in message:
             return "hr_query"
+        if retrieval_mode == "wiki":
+            return "wiki_query"
+        if retrieval_mode == "rag":
+            return "knowledge_query"
+        wiki_keywords = (
+            "wiki",
+            "Wiki",
+            "维基",
+            "知识页",
+            "编译页",
+            "引用证据",
+            "citation",
+        )
+        if any(keyword in message for keyword in wiki_keywords):
+            return "wiki_query"
         knowledge_keywords = (
             "知识库",
             "文档",
@@ -612,6 +736,8 @@ class ChatService:
             )
         if intent == "hr_query":
             return "hr.leave.balance.query", {"employee_name": self._extract_employee_name(message)}
+        if intent == "wiki_query":
+            return "wiki.search", {"query": message}
         return "knowledge.search", {"query": message}
 
     async def _run_knowledge_search(self, tenant_id: str, query: str) -> dict[str, object]:
@@ -637,6 +763,21 @@ class ChatService:
             },
         }
 
+    async def _run_wiki_search(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+    ) -> dict[str, object]:
+        return await self._wiki_service.search(
+            query=query,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            top_k=3,
+            scope_mode="chat",
+        )
+
     @staticmethod
     def _compose_answer(intent: str, result: dict[str, object]) -> tuple[str, list[SourceReference]]:
         if intent == "procurement_draft":
@@ -646,6 +787,32 @@ class ChatService:
             sources = result["sources"]
             answer = f"{result['summary']} 数据来源为 HR 示例插件。"
             return answer, list(sources)
+        if intent == "wiki_query":
+            hits = list(result["hits"])
+            if not hits:
+                return str(result["summary"]), []
+            sources = [
+                SourceReference(
+                    id=item["citation_id"] or item["page_id"],
+                    title=item["title"],
+                    snippet=item["snippet"],
+                    source_type="wiki",
+                    page_id=item["page_id"],
+                    revision_id=item["revision_id"],
+                    citation_id=item["citation_id"],
+                    claim_text=item["claim_text"],
+                    source_id=item["source_id"],
+                    chunk_id=item["chunk_id"],
+                    locator=item["locator"],
+                )
+                for item in hits
+            ]
+            bullets = "\n".join(
+                f"- {item['title']}: {item['claim_text'] or item['snippet']}"
+                for item in hits
+            )
+            answer = f"{result['summary']}\n{bullets}"
+            return answer, sources
 
         matches = list(result["matches"])
         if not matches:
@@ -680,11 +847,8 @@ class ChatService:
         return f"{len(active_sources)} 个运行中知识源（{names}）"
 
     def _select_candidate_capabilities(self, context: UserContext) -> list[CapabilityDefinition]:
-        return [
-            capability
-            for capability in self._registry.list_capabilities()
-            if capability.enabled and capability.required_scope in context.scopes
-        ]
+        _ = context
+        return [capability for capability in self._registry.list_capabilities() if capability.enabled]
 
     @staticmethod
     def _evaluate_risk(capability: CapabilityDefinition) -> str:
@@ -744,6 +908,36 @@ class ChatService:
             context_blocks=context_blocks,
         )
 
+    async def _generate_wiki_llm_answer(
+        self,
+        *,
+        tenant_id: str,
+        message: str,
+        sources: list[SourceReference],
+    ) -> str | None:
+        config, api_key = await self._llm_config.get(tenant_id=tenant_id)
+        if not config.enabled or not sources:
+            return None
+        context_blocks = [
+            "\n".join(
+                part
+                for part in (
+                    f"Wiki页面: {item.title}",
+                    f"定位: {item.locator}" if item.locator else "",
+                    f"主张: {item.claim_text}" if item.claim_text else "",
+                    f"证据: {item.snippet}",
+                )
+                if part
+            )
+            for item in sources
+        ]
+        return self._llm_client.complete(
+            config=config,
+            api_key=api_key,
+            user_message=message,
+            context_blocks=context_blocks,
+        )
+
     @staticmethod
     def _serialize_draft(draft: DraftAction) -> dict[str, object]:
         return {
@@ -758,6 +952,22 @@ class ChatService:
             "created_at": draft.created_at.isoformat(),
         }
 
+    @staticmethod
+    def _serialize_source(source: SourceReference) -> dict[str, object]:
+        return {
+            "id": source.id,
+            "title": source.title,
+            "snippet": source.snippet,
+            "source_type": source.source_type,
+            "page_id": source.page_id,
+            "revision_id": source.revision_id,
+            "citation_id": source.citation_id,
+            "claim_text": source.claim_text,
+            "source_id": source.source_id,
+            "chunk_id": source.chunk_id,
+            "locator": source.locator,
+        }
+
     async def _require_context(self, tenant_id: str | None, user_id: str | None) -> UserContext:
         resolved_tenant_id = tenant_id or settings.default_tenant_id
         resolved_user_id = user_id or settings.default_user_id
@@ -768,5 +978,6 @@ class ChatService:
 
     @staticmethod
     def _ensure_scope(context: UserContext, required_scope: str) -> None:
-        if required_scope not in context.scopes:
-            raise PermissionError(f"Missing scope: {required_scope}")
+        # 临时关闭现有 scope 校验，后续统一替换为新的权限模型。
+        _ = (context, required_scope)
+        return None

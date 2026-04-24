@@ -15,6 +15,13 @@ class SourceReference:
     title: str
     snippet: str
     source_type: str
+    page_id: str | None = None
+    revision_id: str | None = None
+    citation_id: str | None = None
+    claim_text: str | None = None
+    source_id: str | None = None
+    chunk_id: str | None = None
+    locator: str | None = None
 
 
 @dataclass(slots=True)
@@ -116,11 +123,25 @@ class SecurityEvent:
 class KnowledgeSource:
     source_id: str
     tenant_id: str
+    knowledge_base_code: str
     name: str
     source_type: str
     owner: str
     chunk_count: int
     status: str
+
+
+@dataclass(slots=True)
+class KnowledgeBase:
+    knowledge_base_code: str
+    tenant_id: str
+    name: str
+    description: str
+    status: str
+    created_by: str
+    updated_by: str
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(slots=True)

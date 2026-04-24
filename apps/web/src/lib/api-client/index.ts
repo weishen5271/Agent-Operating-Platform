@@ -1,9 +1,15 @@
 import type {
   AdminKnowledgeResponse,
+  AdminKnowledgeBasesResponse,
   AdminPackagesResponse,
   AdminSecurityResponse,
   AdminSystemResponse,
   AdminTracesResponse,
+  AdminWikiCompileRunsResponse,
+  AdminWikiFileDistributionDetailResponse,
+  AdminWikiFileDistributionResponse,
+  AdminWikiPagesResponse,
+  AdminWikiSearchResponse,
   AuthResponse,
   ChatCompletionResponse,
   DraftActionResponse,
@@ -13,6 +19,7 @@ import type {
   TenantProfile,
   TraceResponse,
   UserProfile,
+  WikiCompileResponse,
 } from "./types";
 
 const API_BASE_URL =
@@ -115,12 +122,14 @@ export function getHomeSnapshot(): Promise<HomeSnapshot> {
 export function createChatCompletion(
   message: string,
   conversationId?: string,
+  retrievalMode: "auto" | "rag" | "wiki" = "auto",
 ): Promise<ChatCompletionResponse> {
   return request<ChatCompletionResponse>("/chat/completions", {
     method: "POST",
     body: JSON.stringify({
       message,
       conversation_id: conversationId,
+      retrieval_mode: retrievalMode,
     }),
   });
 }
@@ -141,11 +150,44 @@ export function getAdminSecurity(): Promise<AdminSecurityResponse> {
   return request<AdminSecurityResponse>("/admin/security");
 }
 
-export function getAdminKnowledge(): Promise<AdminKnowledgeResponse> {
-  return request<AdminKnowledgeResponse>("/admin/knowledge");
+export function getAdminKnowledge(knowledgeBaseCode?: string): Promise<AdminKnowledgeResponse> {
+  const suffix = knowledgeBaseCode ? `?knowledge_base_code=${encodeURIComponent(knowledgeBaseCode)}` : "";
+  return request<AdminKnowledgeResponse>(`/admin/knowledge${suffix}`);
+}
+
+export function getAdminKnowledgeBases(): Promise<AdminKnowledgeBasesResponse> {
+  return request<AdminKnowledgeBasesResponse>("/admin/knowledge-bases");
+}
+
+export function createKnowledgeBase(payload: {
+  knowledge_base_code: string;
+  name: string;
+  description: string;
+}): Promise<AdminKnowledgeBasesResponse["items"][number]> {
+  return request<AdminKnowledgeBasesResponse["items"][number]>("/admin/knowledge-bases", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateKnowledgeBase(
+  knowledgeBaseCode: string,
+  payload: { name: string; description: string; status: string },
+): Promise<AdminKnowledgeBasesResponse["items"][number]> {
+  return request<AdminKnowledgeBasesResponse["items"][number]>(`/admin/knowledge-bases/${knowledgeBaseCode}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteKnowledgeBase(knowledgeBaseCode: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`/admin/knowledge-bases/${knowledgeBaseCode}`, {
+    method: "DELETE",
+  });
 }
 
 export function ingestKnowledgeSource(payload: {
+  knowledge_base_code: string;
   name: string;
   content: string;
   source_type: string;
@@ -154,6 +196,97 @@ export function ingestKnowledgeSource(payload: {
   return request<KnowledgeIngestResponse>("/admin/knowledge/ingest", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function searchAdminWiki(params: {
+  query: string;
+  topK?: number;
+  spaceCode?: string;
+}): Promise<AdminWikiSearchResponse> {
+  const search = new URLSearchParams();
+  search.set("query", params.query);
+  if (params.topK) {
+    search.set("top_k", String(params.topK));
+  }
+  if (params.spaceCode) {
+    search.set("space_code", params.spaceCode);
+  }
+  return request<AdminWikiSearchResponse>(`/admin/wiki/search?${search.toString()}`);
+}
+
+export function getAdminWikiPages(params?: {
+  status?: string;
+  pageType?: string;
+  spaceCode?: string;
+}): Promise<AdminWikiPagesResponse> {
+  const search = new URLSearchParams();
+  if (params?.status) {
+    search.set("status", params.status);
+  }
+  if (params?.pageType) {
+    search.set("page_type", params.pageType);
+  }
+  if (params?.spaceCode) {
+    search.set("space_code", params.spaceCode);
+  }
+  const suffix = search.size ? `?${search.toString()}` : "";
+  return request<AdminWikiPagesResponse>(`/admin/wiki/pages${suffix}`);
+}
+
+export function getAdminWikiCompileRuns(): Promise<AdminWikiCompileRunsResponse> {
+  return request<AdminWikiCompileRunsResponse>("/admin/wiki/compile-runs");
+}
+
+export function getAdminWikiFileDistribution(params?: {
+  spaceCode?: string;
+  groupBy?: string;
+  coverageStatus?: string;
+  sourceType?: string;
+  owner?: string;
+  keyword?: string;
+}): Promise<AdminWikiFileDistributionResponse> {
+  const search = new URLSearchParams();
+  if (params?.spaceCode) {
+    search.set("space_code", params.spaceCode);
+  }
+  if (params?.groupBy) {
+    search.set("group_by", params.groupBy);
+  }
+  if (params?.coverageStatus) {
+    search.set("coverage_status", params.coverageStatus);
+  }
+  if (params?.sourceType) {
+    search.set("source_type", params.sourceType);
+  }
+  if (params?.owner) {
+    search.set("owner", params.owner);
+  }
+  if (params?.keyword) {
+    search.set("keyword", params.keyword);
+  }
+  const suffix = search.size ? `?${search.toString()}` : "";
+  return request<AdminWikiFileDistributionResponse>(`/admin/wiki/file-distribution${suffix}`);
+}
+
+export function getAdminWikiFileDistributionDetail(
+  sourceId: string,
+  spaceCode?: string,
+): Promise<AdminWikiFileDistributionDetailResponse> {
+  const suffix = spaceCode ? `?space_code=${encodeURIComponent(spaceCode)}` : "";
+  return request<AdminWikiFileDistributionDetailResponse>(`/admin/wiki/file-distribution/${sourceId}${suffix}`);
+}
+
+export function compileAdminWiki(payload?: {
+  source_id?: string | null;
+  space_code?: string;
+}): Promise<WikiCompileResponse> {
+  return request<WikiCompileResponse>("/admin/wiki/compile", {
+    method: "POST",
+    body: JSON.stringify({
+      source_id: payload?.source_id ?? null,
+      space_code: payload?.space_code ?? "knowledge",
+    }),
   });
 }
 

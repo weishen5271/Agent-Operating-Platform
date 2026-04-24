@@ -6,6 +6,7 @@ from agent_platform.domain.models import CapabilityDefinition
 from agent_platform.plugins.base import CapabilityPlugin
 from agent_platform.plugins.hr import HRLeaveBalancePlugin
 from agent_platform.plugins.knowledge import KnowledgePlugin
+from agent_platform.plugins.wiki import WikiSearchPlugin
 from agent_platform.plugins.workflow import ProcurementDraftPlugin
 
 
@@ -13,6 +14,7 @@ class CapabilityRegistry:
     def __init__(self) -> None:
         plugins: list[CapabilityPlugin] = [
             KnowledgePlugin(),
+            WikiSearchPlugin(),
             HRLeaveBalancePlugin(),
             ProcurementDraftPlugin(),
         ]

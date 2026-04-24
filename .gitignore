@@ -6,4 +6,5 @@ node_modules/
 dist/
 .venv/
 config.toml
+.idea/
 

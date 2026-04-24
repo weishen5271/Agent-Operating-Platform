@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from agent_platform.bootstrap.container import chat_service
+from agent_platform.bootstrap.container import chat_service, wiki_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -51,10 +51,34 @@ class UserUpdateRequest(BaseModel):
 class KnowledgeIngestRequest(BaseModel):
     tenant_id: str | None = Field(default=None)
     user_id: str | None = Field(default=None)
+    knowledge_base_code: str = Field(default="knowledge", max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
     content: str = Field(..., min_length=1)
     source_type: str = Field(default="Markdown", max_length=64)
     owner: str = Field(default="知识平台组", max_length=255)
+
+
+class WikiCompileRequest(BaseModel):
+    tenant_id: str | None = Field(default=None)
+    user_id: str | None = Field(default=None)
+    source_id: str | None = Field(default=None, max_length=64)
+    space_code: str = Field(default="knowledge", max_length=64)
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    tenant_id: str | None = Field(default=None)
+    user_id: str | None = Field(default=None)
+    knowledge_base_code: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="")
+
+
+class KnowledgeBaseUpdateRequest(BaseModel):
+    tenant_id: str | None = Field(default=None)
+    user_id: str | None = Field(default=None)
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="")
+    status: str = Field(default="active", max_length=32)
 
 
 @router.get("/packages")
@@ -200,11 +224,248 @@ async def security_overview(
 async def knowledge_sources(
     tenant_id: str | None = Query(default=None),
     user_id: str | None = Query(default=None),
+    knowledge_base_code: str | None = Query(default=None),
 ) -> dict[str, object]:
     try:
-        return await chat_service.list_knowledge_sources(tenant_id=tenant_id, user_id=user_id)
+        return await chat_service.list_knowledge_sources(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            knowledge_base_code=knowledge_base_code,
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/knowledge-bases")
+async def list_knowledge_bases(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await chat_service.list_knowledge_bases(tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-bases")
+async def create_knowledge_base(payload: KnowledgeBaseCreateRequest) -> dict[str, object]:
+    try:
+        return await chat_service.create_knowledge_base(
+            knowledge_base_code=payload.knowledge_base_code,
+            name=payload.name,
+            description=payload.description,
+            tenant_id=payload.tenant_id,
+            user_id=payload.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/knowledge-bases/{knowledge_base_code}")
+async def update_knowledge_base(
+    knowledge_base_code: str,
+    payload: KnowledgeBaseUpdateRequest,
+) -> dict[str, object]:
+    try:
+        return await chat_service.update_knowledge_base(
+            knowledge_base_code=knowledge_base_code,
+            name=payload.name,
+            description=payload.description,
+            status=payload.status,
+            tenant_id=payload.tenant_id,
+            user_id=payload.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/knowledge-bases/{knowledge_base_code}")
+async def delete_knowledge_base(
+    knowledge_base_code: str,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await chat_service.delete_knowledge_base(
+            knowledge_base_code=knowledge_base_code,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/wiki/pages")
+async def list_wiki_pages(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page_type: str | None = Query(default=None),
+    space_code: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.list_pages(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            status=status,
+            page_type=page_type,
+            space_code=space_code,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/wiki/pages/{page_id}")
+async def get_wiki_page(
+    page_id: str,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.get_page_detail(page_id=page_id, tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/wiki/pages/{page_id}/revisions")
+async def get_wiki_page_revisions(
+    page_id: str,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.list_page_revisions(page_id=page_id, tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/wiki/search")
+async def search_wiki(
+    query: str = Query(..., min_length=1),
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    top_k: int = Query(default=5, ge=1, le=20),
+    space_code: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.search(
+            query=query,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            top_k=top_k,
+            space_code=space_code,
+            scope_mode="admin",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/wiki/compile")
+async def compile_wiki(payload: WikiCompileRequest) -> dict[str, object]:
+    try:
+        return await wiki_service.compile_sources(
+            tenant_id=payload.tenant_id,
+            user_id=payload.user_id,
+            source_id=payload.source_id,
+            space_code=payload.space_code,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/wiki/compile-runs")
+async def list_wiki_compile_runs(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.list_compile_runs(tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/wiki/compile-runs/{compile_run_id}")
+async def get_wiki_compile_run(
+    compile_run_id: str,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.get_compile_run(
+            compile_run_id=compile_run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/wiki/file-distribution/overview")
+async def get_wiki_file_distribution_overview(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    space_code: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.get_file_distribution_overview(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            space_code=space_code,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/wiki/file-distribution")
+async def list_wiki_file_distribution(
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    space_code: str | None = Query(default=None),
+    group_by: str = Query(default="source_type"),
+    coverage_status: str | None = Query(default=None),
+    source_type: str | None = Query(default=None),
+    owner: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.list_file_distribution(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            space_code=space_code,
+            group_by=group_by,
+            coverage_status=coverage_status,
+            source_type=source_type,
+            owner=owner,
+            keyword=keyword,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/wiki/file-distribution/{source_id}")
+async def get_wiki_file_distribution_detail(
+    source_id: str,
+    tenant_id: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+    space_code: str | None = Query(default=None),
+) -> dict[str, object]:
+    try:
+        return await wiki_service.get_file_distribution_detail(
+            source_id=source_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            space_code=space_code,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/ingest")
@@ -217,6 +478,7 @@ async def ingest_knowledge_source(
         return await chat_service.ingest_knowledge_source(
             tenant_id=payload.tenant_id or tenant_id,
             user_id=payload.user_id or user_id,
+            knowledge_base_code=payload.knowledge_base_code,
             name=payload.name,
             content=payload.content,
             source_type=payload.source_type,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -10,6 +11,7 @@ class ChatCompletionRequest(BaseModel):
     conversation_id: str | None = None
     tenant_id: str | None = None
     user_id: str | None = None
+    retrieval_mode: Literal["auto", "rag", "wiki"] = "auto"
 
 
 class ChatMessageResponse(BaseModel):
@@ -22,6 +24,13 @@ class SourceReferenceResponse(BaseModel):
     title: str
     snippet: str
     source_type: str
+    page_id: str | None = None
+    revision_id: str | None = None
+    citation_id: str | None = None
+    claim_text: str | None = None
+    source_id: str | None = None
+    chunk_id: str | None = None
+    locator: str | None = None
 
 
 class ChatCompletionResponse(BaseModel):

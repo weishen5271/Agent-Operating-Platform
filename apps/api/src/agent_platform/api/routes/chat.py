@@ -33,6 +33,7 @@ async def create_completion(
             conversation_id=payload.conversation_id,
             tenant_id=tenant_id,
             user_id=user_id,
+            retrieval_mode=payload.retrieval_mode,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

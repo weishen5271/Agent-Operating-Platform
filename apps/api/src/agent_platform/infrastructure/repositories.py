@@ -13,6 +13,7 @@ from agent_platform.domain.models import (
     Conversation,
     ConversationMessage,
     DraftAction,
+    KnowledgeBase,
     KnowledgeSource,
     KnowledgeSearchResult,
     LLMRuntimeConfig,
@@ -31,6 +32,7 @@ from agent_platform.infrastructure.db_models import (
     ConversationRecord,
     KnowledgeDocumentRecord,
     KnowledgeChunkRecord,
+    KnowledgeBaseRecord,
     LLMRuntimeConfigRecord,
     RequestTraceRecord,
     SecurityEventRecord,
@@ -64,7 +66,7 @@ class TraceRepository(Protocol):
 
 
 class KnowledgeRepository(Protocol):
-    async def list_recent(self, tenant_id: str) -> list[KnowledgeSource]: ...
+    async def list_recent(self, tenant_id: str, knowledge_base_code: str | None = None) -> list[KnowledgeSource]: ...
 
     async def ingest_text(
         self,
@@ -74,7 +76,18 @@ class KnowledgeRepository(Protocol):
         content: str,
         source_type: str,
         owner: str,
+        knowledge_base_code: str,
     ) -> KnowledgeSource: ...
+
+
+class KnowledgeBaseRepository(Protocol):
+    async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]: ...
+
+    async def create(self, knowledge_base: KnowledgeBase) -> KnowledgeBase: ...
+
+    async def update(self, knowledge_base: KnowledgeBase) -> KnowledgeBase: ...
+
+    async def delete(self, tenant_id: str, knowledge_base_code: str) -> bool: ...
 
     async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult: ...
 
@@ -220,11 +233,26 @@ def _knowledge_from_record(record: KnowledgeDocumentRecord) -> KnowledgeSource:
     return KnowledgeSource(
         source_id=record.source_id,
         tenant_id=record.tenant_id,
+        knowledge_base_code=record.knowledge_base_code,
         name=record.name,
         source_type=record.source_type,
         owner=record.owner,
         chunk_count=record.chunk_count,
         status=record.status,
+    )
+
+
+def _knowledge_base_from_record(record: KnowledgeBaseRecord) -> KnowledgeBase:
+    return KnowledgeBase(
+        knowledge_base_code=record.knowledge_base_code,
+        tenant_id=record.tenant_id,
+        name=record.name,
+        description=record.description,
+        status=record.status,
+        created_by=record.created_by,
+        updated_by=record.updated_by,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
     )
 
 
@@ -604,13 +632,16 @@ class PostgresKnowledgeRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:
         self._runtime = runtime
 
-    async def list_recent(self, tenant_id: str) -> list[KnowledgeSource]:
+    async def list_recent(self, tenant_id: str, knowledge_base_code: str | None = None) -> list[KnowledgeSource]:
         async with self._runtime.session() as session:
-            result = await session.execute(
+            stmt = (
                 select(KnowledgeDocumentRecord)
                 .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
                 .order_by(KnowledgeDocumentRecord.source_id)
             )
+            if knowledge_base_code:
+                stmt = stmt.where(KnowledgeDocumentRecord.knowledge_base_code == knowledge_base_code)
+            result = await session.execute(stmt)
             return [_knowledge_from_record(item) for item in result.scalars().all()]
 
     async def ingest_text(
@@ -621,6 +652,7 @@ class PostgresKnowledgeRepository:
         content: str,
         source_type: str,
         owner: str,
+        knowledge_base_code: str,
     ) -> KnowledgeSource:
         chunks = chunk_text(content)
         if not chunks:
@@ -631,6 +663,7 @@ class PostgresKnowledgeRepository:
             document = KnowledgeDocumentRecord(
                 source_id=source_id,
                 tenant_id=tenant_id,
+                knowledge_base_code=knowledge_base_code,
                 name=name,
                 source_type=source_type,
                 owner=owner,
@@ -661,6 +694,68 @@ class PostgresKnowledgeRepository:
             await session.commit()
             await session.refresh(document)
             return _knowledge_from_record(document)
+
+
+class PostgresKnowledgeBaseRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(KnowledgeBaseRecord)
+                .where(KnowledgeBaseRecord.tenant_id == tenant_id)
+                .order_by(KnowledgeBaseRecord.created_at)
+            )
+            return [_knowledge_base_from_record(item) for item in result.scalars().all()]
+
+    async def create(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
+        async with self._runtime.session() as session:
+            session.add(KnowledgeBaseRecord(**asdict(knowledge_base)))
+            await session.commit()
+            result = await session.execute(
+                select(KnowledgeBaseRecord).where(
+                    KnowledgeBaseRecord.knowledge_base_code == knowledge_base.knowledge_base_code
+                )
+            )
+            return _knowledge_base_from_record(result.scalar_one())
+
+    async def update(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(KnowledgeBaseRecord)
+                .where(KnowledgeBaseRecord.tenant_id == knowledge_base.tenant_id)
+                .where(KnowledgeBaseRecord.knowledge_base_code == knowledge_base.knowledge_base_code)
+            )
+            record = result.scalar_one()
+            record.name = knowledge_base.name
+            record.description = knowledge_base.description
+            record.status = knowledge_base.status
+            record.updated_by = knowledge_base.updated_by
+            await session.commit()
+            await session.refresh(record)
+            return _knowledge_base_from_record(record)
+
+    async def delete(self, tenant_id: str, knowledge_base_code: str) -> bool:
+        async with self._runtime.session() as session:
+            source_result = await session.execute(
+                select(KnowledgeDocumentRecord.source_id)
+                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
+                .where(KnowledgeDocumentRecord.knowledge_base_code == knowledge_base_code)
+            )
+            if source_result.scalars().first() is not None:
+                raise ValueError("Knowledge base still has sources")
+            result = await session.execute(
+                select(KnowledgeBaseRecord)
+                .where(KnowledgeBaseRecord.tenant_id == tenant_id)
+                .where(KnowledgeBaseRecord.knowledge_base_code == knowledge_base_code)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return False
+            await session.delete(record)
+            await session.commit()
+            return True
 
     async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
         terms = tokenize(query)
@@ -974,81 +1069,10 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
                 )
             )
 
-        existing_sources = set((await session.execute(select(KnowledgeDocumentRecord.source_id))).scalars().all())
-        if "ks-001" not in existing_sources:
-            session.add(
-                KnowledgeDocumentRecord(
-                    source_id="ks-001",
-                    tenant_id="tenant-demo",
-                    name="企业制度库",
-                    source_type="PDF / Docx",
-                    owner="知识平台组",
-                    chunk_count=4812,
-                    status="运行中",
-                )
-            )
-        if "ks-002" not in existing_sources:
-            session.add(
-                KnowledgeDocumentRecord(
-                    source_id="ks-002",
-                    tenant_id="tenant-demo",
-                    name="财务流程文档",
-                    source_type="Confluence",
-                    owner="财务运营组",
-                    chunk_count=1946,
-                    status="运行中",
-                )
-            )
-        existing_chunk_ids = set((await session.execute(select(KnowledgeChunkRecord.chunk_id))).scalars().all())
-        if "kc-seed-p0a" not in existing_chunk_ids:
-            seed_content = (
-                "P0a 阶段交付统一对话入口、基础编排、检索增强、插件调用、Trace 留痕与基础治理能力。"
-                "知识问答链路通过 knowledge.search 召回知识切片，返回 SourceReference 引用，再由 LLM Runtime "
-                "基于检索上下文生成最终回答。"
-            )
-            session.add(
-                KnowledgeChunkRecord(
-                    chunk_id="kc-seed-p0a",
-                    source_id="ks-001",
-                    tenant_id="tenant-demo",
-                    chunk_index=0,
-                    title="企业制度库",
-                    content=seed_content,
-                    content_hash=content_hash(seed_content),
-                    embedding=embed_text(seed_content),
-                    metadata_json={
-                        "version": "seed",
-                        "classification": "internal",
-                        "locator": "seed:p0a",
-                    },
-                    token_count=len(tokenize(seed_content)),
-                    status="published",
-                )
-            )
-        if "kc-seed-finance" not in existing_chunk_ids:
-            seed_content = (
-                "财务流程文档覆盖费用报销、采购申请、预算校验和审批流转。涉及写操作时，平台需要先生成草稿，"
-                "由用户确认或审批通过后再执行。"
-            )
-            session.add(
-                KnowledgeChunkRecord(
-                    chunk_id="kc-seed-finance",
-                    source_id="ks-002",
-                    tenant_id="tenant-demo",
-                    chunk_index=0,
-                    title="财务流程文档",
-                    content=seed_content,
-                    content_hash=content_hash(seed_content),
-                    embedding=embed_text(seed_content),
-                    metadata_json={
-                        "version": "seed",
-                        "classification": "internal",
-                        "locator": "seed:finance",
-                    },
-                    token_count=len(tokenize(seed_content)),
-                    status="published",
-                )
-            )
+        source_records = (await session.execute(select(KnowledgeDocumentRecord))).scalars().all()
+        for record in source_records:
+            if not getattr(record, "knowledge_base_code", None):
+                record.knowledge_base_code = "knowledge"
 
         if await session.get(LLMRuntimeConfigRecord, "default") is None:
             session.add(
