@@ -113,8 +113,35 @@ def _compile_run_from_record(record: KnowledgeWikiCompileRunRecord) -> WikiCompi
 
 
 class PostgresWikiRepository:
-    def __init__(self, runtime: DatabaseRuntime) -> None:
+    def __init__(
+        self,
+        runtime: DatabaseRuntime,
+        *,
+        llm_config=None,
+        embedding_client=None,
+    ) -> None:
         self._runtime = runtime
+        self._llm_config = llm_config
+        self._embedding_client = embedding_client
+
+    async def _embed_texts(
+        self, *, tenant_id: str | None, texts: list[str]
+    ) -> tuple[list[list[float]], str | None]:
+        if not texts:
+            return [], None
+        if self._llm_config is None or self._embedding_client is None:
+            return [[] for _ in texts], None
+        try:
+            config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
+        except Exception:
+            return [[] for _ in texts], None
+        if not config.embedding_enabled or not api_key:
+            return [[] for _ in texts], None
+        try:
+            vectors = self._embedding_client.embed(config=config, api_key=api_key, texts=texts)
+        except Exception:
+            return [[] for _ in texts], None
+        return vectors, config.embedding_model
 
     async def list_pages(
         self,
@@ -386,9 +413,16 @@ class PostgresWikiRepository:
         owner: str,
         knowledge_base_code: str,
     ) -> KnowledgeWikiSourceRecord:
-        chunks = chunk_text(content)
-        if not chunks:
+        chunked = chunk_text(content)
+        if not chunked:
             raise ValueError("Wiki source content is empty after parsing")
+
+        normalized = [
+            piece if isinstance(piece, dict) else {"content": piece, "parents": [], "locator": ""}
+            for piece in chunked
+        ]
+        contents = [item["content"] for item in normalized]
+        vectors, embedding_model = await self._embed_texts(tenant_id=tenant_id, texts=contents)
 
         source_id = f"wks-{uuid4().hex[:12]}"
         async with self._runtime.session() as session:
@@ -399,11 +433,12 @@ class PostgresWikiRepository:
                 name=name,
                 source_type=source_type,
                 owner=owner,
-                chunk_count=len(chunks),
+                chunk_count=len(contents),
                 status="运行中",
             )
             session.add(document)
-            for index, chunk in enumerate(chunks):
+            for index, item in enumerate(normalized):
+                vec = vectors[index] if index < len(vectors) else []
                 session.add(
                     KnowledgeWikiSourceChunkRecord(
                         chunk_id=f"wkc-{uuid4().hex[:12]}",
@@ -411,16 +446,19 @@ class PostgresWikiRepository:
                         tenant_id=tenant_id,
                         chunk_index=index,
                         title=name,
-                        content=chunk,
-                        content_hash=content_hash(chunk),
-                        embedding=embed_text(chunk),
+                        content=item["content"],
+                        content_hash=content_hash(item["content"]),
+                        embedding=vec or [],
                         metadata_json={
                             "version": "v1",
                             "classification": "internal",
-                            "locator": f"chunk:{index + 1}",
+                            "locator": item.get("locator") or f"chunk:{index + 1}",
+                            "parents": item.get("parents") or [],
                         },
-                        token_count=len(tokenize(chunk)),
+                        token_count=len(tokenize(item["content"])),
                         status="published",
+                        embedding_status="ready" if vec else "pending",
+                        embedding_model=embedding_model or "",
                     )
                 )
             await session.commit()

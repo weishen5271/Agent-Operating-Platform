@@ -2,6 +2,7 @@ import asyncio
 
 from agent_platform.domain.models import (
     Conversation,
+    ConversationMessage,
     KnowledgeSearchResult,
     KnowledgeSource,
     LLMRuntimeConfig,
@@ -15,20 +16,31 @@ from agent_platform.runtime.registry import CapabilityRegistry
 
 
 class FakeConversationRepository:
-    async def list_recent(self, tenant_id: str, limit: int = 5) -> list[Conversation]:
-        return []
+    def __init__(self, conversation: Conversation | None = None) -> None:
+        self.conversation = conversation
 
-    async def get(self, tenant_id: str, conversation_id: str) -> Conversation | None:
+    async def list_recent(self, tenant_id: str, user_id: str, limit: int = 5) -> list[Conversation]:
+        return [self.conversation] if self.conversation else []
+
+    async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None:
+        if self.conversation and self.conversation.conversation_id == conversation_id:
+            return self.conversation
         return None
 
     async def append_message(
         self,
         tenant_id: str,
+        user_id: str,
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
     ) -> Conversation:
-        return Conversation(conversation_id=conversation_id or "conv-test", title=user_message, tenant_id=tenant_id)
+        return Conversation(
+            conversation_id=conversation_id or "conv-test",
+            title=user_message,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
 
 
 class FakeTraceRepository:
@@ -73,6 +85,7 @@ class FakeKnowledgeRepository:
             KnowledgeSource(
                 source_id="ks-test",
                 tenant_id=tenant_id,
+                knowledge_base_code="default",
                 name="企业制度库",
                 source_type="Markdown",
                 owner="知识平台组",
@@ -129,6 +142,16 @@ class FakeSecurityRepository:
     pass
 
 
+class FakeKnowledgeBaseRepository:
+    async def list_recent(self, tenant_id: str) -> list:
+        return []
+
+
+class FakeWikiService:
+    async def search(self, *, query: str, tenant_id: str, user_id: str, top_k: int = 3, scope_mode: str = "chat"):
+        return {"summary": "未启用 Wiki", "hits": []}
+
+
 class FakeLLMClient:
     def __init__(self) -> None:
         self.calls = []
@@ -145,16 +168,24 @@ class FakeLLMClient:
         return f"模型回复：{user_message}"
 
 
-def build_service(*, traces: FakeTraceRepository, llm_config: FakeLLMConfigRepository, llm_client) -> ChatService:
+def build_service(
+    *,
+    traces: FakeTraceRepository,
+    llm_config: FakeLLMConfigRepository,
+    llm_client,
+    conversations: FakeConversationRepository | None = None,
+) -> ChatService:
     return ChatService(
         registry=CapabilityRegistry(),
-        conversations=FakeConversationRepository(),
+        conversations=conversations or FakeConversationRepository(),
         traces=traces,
         tenants=FakeTenantRepository(),
         users=FakeUserRepository(),
         drafts=FakeDraftRepository(),
         security_events=FakeSecurityRepository(),
         knowledge_sources=FakeKnowledgeRepository(),
+        knowledge_bases=FakeKnowledgeBaseRepository(),
+        wiki_service=FakeWikiService(),
         llm_config=llm_config,
         llm_client=llm_client,
     )
@@ -172,6 +203,9 @@ def test_chat_completion_records_standard_query_chain_steps() -> None:
 
     assert response["intent"] == "knowledge_query"
     assert response["message"]["content"]
+    # LLM 未启用且检索命中时，应给出退化提示
+    assert "warnings" in response
+    assert any("LLM" in tip for tip in response["warnings"])
     assert traces.saved is not None
     step_names = [step.name for step in traces.saved.steps]
     assert step_names == [
@@ -204,6 +238,7 @@ def test_general_chat_uses_llm_direct_answer() -> None:
 
     assert response["intent"] == "general_chat"
     assert response["sources"] == []
+    assert response["warnings"] == []
     assert response["message"]["content"] == "模型回复：你好，帮我解释一下你能做什么"
     assert llm_client.calls == [
         {
@@ -229,3 +264,72 @@ def test_general_chat_uses_llm_direct_answer() -> None:
         "output_guard",
         "completed",
     ]
+
+
+def test_general_chat_passes_conversation_history_to_llm() -> None:
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient()
+    llm_config = FakeLLMConfigRepository(enabled=True)
+    service = build_service(
+        traces=traces,
+        llm_config=llm_config,
+        llm_client=llm_client,
+        conversations=FakeConversationRepository(
+            Conversation(
+                conversation_id="conv-history",
+                title="上下文测试",
+                tenant_id="tenant-demo",
+                user_id="user-demo",
+                messages=[
+                    ConversationMessage(role="user", content="我叫沈威"),
+                    ConversationMessage(role="assistant", content="好的，我记住了。"),
+                ],
+            )
+        ),
+    )
+
+    response = asyncio.run(
+        service.complete(
+            message="我叫什么？",
+            conversation_id="conv-history",
+            tenant_id="tenant-demo",
+            user_id="user-demo",
+        )
+    )
+
+    assert response["intent"] == "general_chat"
+    assert llm_client.calls[0]["context_blocks"] == [
+        "会话历史（按时间从旧到新）:\n用户: 我叫沈威\n助手: 好的，我记住了。"
+    ]
+
+
+async def collect_events(stream) -> list[dict[str, object]]:
+    return [event async for event in stream]
+
+
+def test_stream_completion_emits_trace_steps_before_answer_chunks() -> None:
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+
+    events = asyncio.run(
+        collect_events(
+            service.stream_complete(
+                message="P0a 要交付什么？",
+                tenant_id="tenant-demo",
+                user_id="user-demo",
+            )
+        )
+    )
+
+    event_names = [str(event["event"]) for event in events]
+    assert event_names.count("trace_step") == 12
+    assert event_names.index("trace_step") < event_names.index("message_delta")
+    assert event_names.index("message_delta") < event_names.index("response_meta")
+    assert event_names.index("response_meta") < event_names.index("message_done")
+    assert event_names[-1] == "done"
+    assert "".join(str(event["content"]) for event in events if event["event"] == "message_delta")
+    assert traces.saved is not None

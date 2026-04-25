@@ -37,6 +37,20 @@ export function LLMRuntimeForm({ tenantId, initialConfig }: LLMRuntimeFormProps)
   const [systemPrompt, setSystemPrompt] = useState(
     initialConfig?.system_prompt ?? "你是企业级 Agent 平台中的智能助手，回答要准确、结构清晰，并优先引用已知上下文。",
   );
+  const [embeddingProvider, setEmbeddingProvider] = useState(
+    initialConfig?.embedding_provider ?? "openai-compatible",
+  );
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState(initialConfig?.embedding_base_url ?? "");
+  const [embeddingModel, setEmbeddingModel] = useState(
+    initialConfig?.embedding_model ?? "text-embedding-3-small",
+  );
+  const [embeddingApiKey, setEmbeddingApiKey] = useState("");
+  const [embeddingDimensions, setEmbeddingDimensions] = useState(
+    String(initialConfig?.embedding_dimensions ?? 1536),
+  );
+  const [embeddingEnabled, setEmbeddingEnabled] = useState<boolean>(
+    initialConfig?.embedding_enabled ?? false,
+  );
   const [runtime, setRuntime] = useState<LLMRuntimeConfig | undefined>(initialConfig);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -48,8 +62,14 @@ export function LLMRuntimeForm({ tenantId, initialConfig }: LLMRuntimeFormProps)
     setProvider(config.provider);
     setTemperature(String(config.temperature));
     setSystemPrompt(config.system_prompt);
+    setEmbeddingProvider(config.embedding_provider ?? "openai-compatible");
+    setEmbeddingBaseUrl(config.embedding_base_url ?? "");
+    setEmbeddingModel(config.embedding_model ?? "text-embedding-3-small");
+    setEmbeddingDimensions(String(config.embedding_dimensions ?? 1536));
+    setEmbeddingEnabled(Boolean(config.embedding_enabled));
     setRuntime(config);
     setApiKey("");
+    setEmbeddingApiKey("");
   }, []);
 
   useEffect(() => {
@@ -92,6 +112,12 @@ export function LLMRuntimeForm({ tenantId, initialConfig }: LLMRuntimeFormProps)
           api_key: apiKey,
           temperature: Number(temperature),
           system_prompt: systemPrompt,
+          embedding_provider: embeddingProvider,
+          embedding_base_url: embeddingBaseUrl,
+          embedding_model: embeddingModel,
+          embedding_api_key: embeddingApiKey || null,
+          embedding_dimensions: Number(embeddingDimensions) || 1536,
+          embedding_enabled: embeddingEnabled,
         });
         setRuntime(next);
         setApiKey("");
@@ -164,12 +190,87 @@ export function LLMRuntimeForm({ tenantId, initialConfig }: LLMRuntimeFormProps)
         />
       </div>
 
+      <div className="form-section-divider">
+        <h4>Embedding 子配置（用于知识库检索）</h4>
+        <p className="form-hint">
+          OpenAI 兼容协议；可填通义、Azure、本地 vLLM 等。未配置时知识库检索将退化为关键词匹配。
+        </p>
+      </div>
+
+      <div className="form-grid">
+        <div className="form-field">
+          <label>Embedding Provider</label>
+          <select
+            value={embeddingProvider}
+            onChange={(e) => setEmbeddingProvider(e.target.value)}
+          >
+            <option value="openai-compatible">OpenAI Compatible</option>
+            <option value="openai">OpenAI</option>
+            <option value="azure">Azure OpenAI</option>
+          </select>
+        </div>
+        <div className="form-field">
+          <label>Embedding Base URL</label>
+          <input
+            value={embeddingBaseUrl}
+            onChange={(e) => setEmbeddingBaseUrl(e.target.value)}
+            placeholder="https://api.openai.com/v1"
+          />
+        </div>
+        <div className="form-field">
+          <label>Embedding Model</label>
+          <input
+            value={embeddingModel}
+            onChange={(e) => setEmbeddingModel(e.target.value)}
+            placeholder="text-embedding-3-small"
+          />
+        </div>
+        <div className="form-field">
+          <label>Embedding API Key</label>
+          <input
+            type="password"
+            value={embeddingApiKey}
+            onChange={(e) => setEmbeddingApiKey(e.target.value)}
+            placeholder="留空则保持现有值"
+          />
+        </div>
+        <div className="form-field">
+          <label>向量维度</label>
+          <input
+            type="number"
+            min="8"
+            max="8192"
+            value={embeddingDimensions}
+            onChange={(e) => setEmbeddingDimensions(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>启用 Embedding</label>
+          <label className="form-toggle">
+            <input
+              type="checkbox"
+              checked={embeddingEnabled}
+              onChange={(e) => setEmbeddingEnabled(e.target.checked)}
+            />
+            <span>启用后将用真实向量做检索</span>
+          </label>
+        </div>
+      </div>
+
       <div className="runtime-meta">
         <span>Provider: {runtime?.provider ?? provider}</span>
         <span>已配置 Key: {runtime?.api_key_configured ? "是" : "否"}</span>
         <span>当前模型: {runtime?.model || model || "未设置"}</span>
         <span className={`status-chip ${runtime?.enabled ? "success" : ""}`}>
           {runtime?.enabled ? "已启用" : "未启用"}
+        </span>
+      </div>
+      <div className="runtime-meta">
+        <span>Embedding Key: {runtime?.embedding_api_key_configured ? "是" : "否"}</span>
+        <span>向量模型: {runtime?.embedding_model || embeddingModel || "未设置"}</span>
+        <span>维度: {runtime?.embedding_dimensions ?? embeddingDimensions}</span>
+        <span className={`status-chip ${runtime?.embedding_enabled ? "success" : ""}`}>
+          {runtime?.embedding_enabled ? "Embedding 已启用" : "Embedding 未启用"}
         </span>
       </div>
 

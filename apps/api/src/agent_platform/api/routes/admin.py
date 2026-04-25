@@ -19,6 +19,13 @@ class LLMRuntimeUpdateRequest(BaseModel):
     api_key: str = Field(default="")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     system_prompt: str = Field(default="")
+    # Embedding 子配置；为空表示不修改对应字段。
+    embedding_provider: Literal["openai-compatible", "openai", "azure"] | None = Field(default=None)
+    embedding_base_url: str | None = Field(default=None)
+    embedding_model: str | None = Field(default=None)
+    embedding_api_key: str | None = Field(default=None)
+    embedding_dimensions: int | None = Field(default=None, ge=8, le=8192)
+    embedding_enabled: bool | None = Field(default=None)
 
 
 class TenantCreateRequest(BaseModel):
@@ -116,6 +123,12 @@ async def update_llm_runtime(payload: LLMRuntimeUpdateRequest, auth: AuthContext
         api_key=payload.api_key,
         temperature=payload.temperature,
         system_prompt=payload.system_prompt,
+        embedding_provider=payload.embedding_provider,
+        embedding_base_url=payload.embedding_base_url,
+        embedding_model=payload.embedding_model,
+        embedding_api_key=payload.embedding_api_key,
+        embedding_dimensions=payload.embedding_dimensions,
+        embedding_enabled=payload.embedding_enabled,
     )
 
 
@@ -523,6 +536,25 @@ async def get_wiki_source_detail(source_id: str, auth: AuthContext) -> dict[str,
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class KnowledgeReembedRequest(BaseModel):
+    batch_size: int = Field(default=32, ge=1, le=128)
+    limit: int | None = Field(default=None, ge=1, le=10000)
+
+
+@router.post("/knowledge/reembed")
+async def reembed_knowledge(payload: KnowledgeReembedRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.reembed_knowledge(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            batch_size=payload.batch_size,
+            limit=payload.limit,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/ingest")

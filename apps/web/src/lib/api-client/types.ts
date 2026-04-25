@@ -51,6 +51,26 @@ export type ChatCompletionResponse = {
     payload: Record<string, unknown>;
     created_at: string;
   } | null;
+  warnings?: string[];
+};
+
+export type ConversationListResponse = {
+  items: Array<{
+    conversation_id: string;
+    title: string;
+    updated_at: string;
+  }>;
+};
+
+export type ConversationResponse = {
+  conversation_id: string;
+  title: string;
+  updated_at: string;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    created_at: string;
+  }>;
 };
 
 export type TraceResponse = {
@@ -70,6 +90,39 @@ export type TraceResponse = {
   }>;
   sources: ChatCompletionResponse["sources"];
 };
+
+export type ChatStreamEvent =
+  | {
+      event: "trace_step";
+      trace_id: string;
+      step: TraceResponse["steps"][number];
+    }
+  | {
+      event: "response_meta";
+      trace_id: string;
+      conversation_id: string;
+      intent: string;
+      strategy: string;
+      sources: ChatCompletionResponse["sources"];
+      warnings?: string[];
+      draft_action?: ChatCompletionResponse["draft_action"];
+    }
+  | {
+      event: "message_delta";
+      content: string;
+    }
+  | {
+      event: "message_done";
+      content: string;
+    }
+  | {
+      event: "done";
+    }
+  | {
+      event: "error";
+      message: string;
+      status?: number;
+    };
 
 export type AdminPackagesResponse = {
   packages: Array<{
@@ -173,6 +226,12 @@ export type LLMRuntimeConfig = {
   temperature: number;
   system_prompt: string;
   enabled: boolean;
+  embedding_provider?: string;
+  embedding_base_url?: string;
+  embedding_model?: string;
+  embedding_dimensions?: number;
+  embedding_api_key_configured?: boolean;
+  embedding_enabled?: boolean;
 };
 
 export type TenantProfile = {

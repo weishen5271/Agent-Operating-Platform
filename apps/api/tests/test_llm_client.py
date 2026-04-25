@@ -67,6 +67,22 @@ def test_azure_request_requires_api_version() -> None:
         )
 
 
+def test_build_prompt_includes_structured_instructions_for_rag() -> None:
+    prompt = OpenAICompatibleLLMClient._build_prompt(
+        user_message="如何设计可扩展 Agent 架构？",
+        context_blocks=["[1] 文档《架构》\n来源ID: doc-1\n正文:\nFoo bar"],
+    )
+    assert "参考资料 1" in prompt
+    assert "[1][2]" in prompt
+    assert "背景与目标" in prompt
+    assert "下一步建议" in prompt
+
+
+def test_build_prompt_returns_user_message_when_context_empty() -> None:
+    prompt = OpenAICompatibleLLMClient._build_prompt(user_message="hi", context_blocks=[])
+    assert prompt == "hi"
+
+
 def test_anthropic_request_uses_messages_endpoint_and_headers() -> None:
     client = OpenAICompatibleLLMClient()
 

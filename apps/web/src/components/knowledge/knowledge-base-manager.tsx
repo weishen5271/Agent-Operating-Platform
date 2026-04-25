@@ -24,6 +24,8 @@ export function KnowledgeBaseManager({
   const [description, setDescription] = useState("");
   const [createError, setCreateError] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deletingCode, setDeletingCode] = useState<string | null>(null);
 
   const editingItem = useMemo(
     () => knowledgeBases.find((item) => item.knowledge_base_code === editingCode) ?? null,
@@ -92,8 +94,19 @@ export function KnowledgeBaseManager({
   }
 
   async function handleDelete(item: AdminKnowledgeBasesResponse["items"][number]) {
-    await deleteKnowledgeBase(item.knowledge_base_code);
-    window.location.href = `/knowledge?tab=${tab}`;
+    const confirmed = window.confirm(`确认删除知识库「${item.name}」及其下的 RAG / Wiki 数据？此操作不可恢复。`);
+    if (!confirmed) {
+      return;
+    }
+    setDeletingCode(item.knowledge_base_code);
+    setDeleteError("");
+    try {
+      await deleteKnowledgeBase(item.knowledge_base_code);
+      window.location.href = `/knowledge?tab=${tab}`;
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "删除知识库失败");
+      setDeletingCode(null);
+    }
   }
 
   return (
@@ -113,6 +126,7 @@ export function KnowledgeBaseManager({
         </button>
       </div>
       <div className="stack-list">
+        {deleteError ? <span className="form-status error">{deleteError}</span> : null}
         {knowledgeBases.length ? (
           knowledgeBases.map((item) => (
             <article
@@ -153,12 +167,13 @@ export function KnowledgeBaseManager({
                   <button
                     type="button"
                     className="secondary-button danger-lite"
+                    disabled={deletingCode === item.knowledge_base_code}
                     onClick={(event) => {
                       event.stopPropagation();
                       void handleDelete(item);
                     }}
                   >
-                    删除
+                    {deletingCode === item.knowledge_base_code ? "删除中" : "删除"}
                   </button>
                 ) : null}
               </div>

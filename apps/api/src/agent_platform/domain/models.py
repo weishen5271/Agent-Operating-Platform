@@ -22,6 +22,8 @@ class SourceReference:
     source_id: str | None = None
     chunk_id: str | None = None
     locator: str | None = None
+    # 完整 chunk 正文，仅用于喂给 LLM；snippet 仍用于 UI 显示。
+    content: str | None = None
 
 
 @dataclass(slots=True)
@@ -62,6 +64,7 @@ class CapabilityDefinition:
 class ConversationMessage:
     role: str
     content: str
+    created_at: datetime = field(default_factory=utc_now)
 
 
 @dataclass(slots=True)
@@ -69,6 +72,7 @@ class Conversation:
     conversation_id: str
     title: str
     tenant_id: str
+    user_id: str
     messages: list[ConversationMessage] = field(default_factory=list)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -187,3 +191,11 @@ class LLMRuntimeConfig:
     temperature: float
     system_prompt: str
     enabled: bool
+    # Embedding 子配置：用于知识库向量化与 RAG 检索时的 query 编码。
+    # 若 embedding_enabled=False 或 embedding_api_key 缺失，则系统退化为关键词匹配。
+    embedding_provider: str = "openai-compatible"
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    embedding_dimensions: int = 1536
+    embedding_api_key_configured: bool = False
+    embedding_enabled: bool = False

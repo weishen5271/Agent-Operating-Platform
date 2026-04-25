@@ -21,22 +21,7 @@ export function KnowledgeIngestPanel({
   knowledgeBases = [],
   target = "rag",
 }: KnowledgeIngestPanelProps) {
-  const availableKnowledgeBases =
-    knowledgeBases.length > 0
-      ? knowledgeBases
-      : [
-          {
-            knowledge_base_code: knowledgeBaseCode,
-            name: knowledgeBaseCode,
-            description: "",
-            status: "active",
-            tenant_id: "",
-            created_by: "",
-            updated_by: "",
-            created_at: "",
-            updated_at: "",
-          },
-        ];
+  const availableKnowledgeBases = knowledgeBases;
   const [mode, setMode] = useState<"text" | "file">("file");
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("知识平台组");
@@ -120,6 +105,9 @@ export function KnowledgeIngestPanel({
           <p>先把原始文件放进 Raw Sources，再进入切片、索引和 Wiki 编译链路。支持本地文件上传，也保留文本粘贴方式。</p>
         </div>
       </div>
+      {availableKnowledgeBases.length === 0 ? (
+        <span className="form-status error">请先创建知识库，再进行知识入库。</span>
+      ) : null}
       <div className="console-tabs ingest-tabs">
         <button
           type="button"
@@ -141,6 +129,7 @@ export function KnowledgeIngestPanel({
           <span>目标知识库</span>
           <select
             value={selectedKnowledgeBaseCode}
+            disabled={availableKnowledgeBases.length === 0}
             onChange={(event) => setSelectedKnowledgeBaseCode(event.target.value)}
           >
             {availableKnowledgeBases.map((item) => (
@@ -200,7 +189,11 @@ export function KnowledgeIngestPanel({
         </label>
         <div className="knowledge-ingest-footer">
           {status.message ? <span className={`form-status ${status.tone}`}>{status.message}</span> : <span />}
-          <button type="submit" className="primary-button" disabled={submitting}>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={submitting || availableKnowledgeBases.length === 0}
+          >
             <span className="material-symbols-outlined">{submitting ? "hourglass_top" : "cloud_upload"}</span>
             {submitting ? "入库中" : "创建索引"}
           </button>

@@ -57,29 +57,6 @@ export const chatData = {
     "北京地区报销政策问答",
     "财务插件报错定位",
   ],
-  messages: [
-    {
-      role: "user",
-      content: "帮我查询一下上个月北京地区的销售总额，并分析主要的增长点在哪里。",
-      time: "14:20:05",
-    },
-    {
-      role: "assistant",
-      content:
-        "为您查询到上个月（2026 年 3 月）北京地区总销售额为 ¥1,245,600，同比提升 12.4%。主要增长点来自新能源汽车配件（+45%）与智能家居终端（+22%）。如需，我可以继续生成详细增长报告与引用依据。",
-      time: "14:20:08 / 耗时 3.2s",
-    },
-  ],
-  trace: [
-    { step: "intent", summary: "识别为销售分析类任务", status: "completed" },
-    { step: "planner", summary: "生成 direct_answer + data_plugin 检索计划", status: "completed" },
-    { step: "plugin", summary: "调用 sales.analytics.region_growth", status: "completed" },
-    { step: "response", summary: "组装分析结论与下一步建议", status: "completed" },
-  ],
-  references: [
-    { title: "北京地区销售日报", type: "knowledge", snippet: "2026-03 月累计销售额 124.56 万元，同比提升 12.4%" },
-    { title: "sales.analytics.region_growth", type: "plugin", snippet: "返回区域维度销售额与主要品类变化" },
-  ],
 };
 
 export const packageData = {

@@ -19,6 +19,24 @@ class ChatMessageResponse(BaseModel):
     content: str
 
 
+class ConversationMessageResponse(ChatMessageResponse):
+    created_at: datetime
+
+
+class ConversationSummaryResponse(BaseModel):
+    conversation_id: str
+    title: str
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    items: list[ConversationSummaryResponse]
+
+
+class ConversationResponse(ConversationSummaryResponse):
+    messages: list[ConversationMessageResponse]
+
+
 class SourceReferenceResponse(BaseModel):
     id: str
     title: str
@@ -41,6 +59,7 @@ class ChatCompletionResponse(BaseModel):
     message: ChatMessageResponse
     sources: list[SourceReferenceResponse]
     draft_action: dict | None = None
+    warnings: list[str] = []
 
 
 class TraceStepResponse(BaseModel):

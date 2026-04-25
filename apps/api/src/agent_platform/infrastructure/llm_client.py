@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from urllib import error, request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from typing import Iterator
 
 from agent_platform.domain.models import LLMRuntimeConfig
 
@@ -64,6 +65,51 @@ class OpenAICompatibleLLMClient:
             return self._extract_anthropic_content(data)
         return self._extract_openai_content(data)
 
+    def stream_complete(
+        self,
+        *,
+        config: LLMRuntimeConfig,
+        api_key: str,
+        user_message: str,
+        context_blocks: list[str],
+    ) -> Iterator[str]:
+        if not config.enabled:
+            raise ValueError("LLM runtime is not enabled")
+        if not api_key:
+            raise ValueError("LLM API key is missing")
+
+        spec = self._build_request_spec(
+            config=config,
+            api_key=api_key,
+            user_message=user_message,
+            context_blocks=context_blocks,
+            stream=True,
+        )
+        req = request.Request(
+            spec.url,
+            data=json.dumps(spec.payload).encode("utf-8"),
+            headers=spec.headers,
+            method="POST",
+        )
+
+        try:
+            with request.urlopen(req, timeout=60) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = self._extract_stream_delta(json.loads(data), spec.response_format)
+                    if chunk:
+                        yield chunk
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            raise ValueError(f"LLM stream request failed: {exc.code} {detail}") from exc
+        except error.URLError as exc:
+            raise ValueError(f"LLM stream request failed: {exc.reason}") from exc
+
     def _build_request_spec(
         self,
         *,
@@ -71,6 +117,7 @@ class OpenAICompatibleLLMClient:
         api_key: str,
         user_message: str,
         context_blocks: list[str],
+        stream: bool = False,
     ) -> LLMRequestSpec:
         provider = config.provider.strip().lower()
         prompt = self._build_prompt(user_message=user_message, context_blocks=context_blocks)
@@ -83,6 +130,7 @@ class OpenAICompatibleLLMClient:
                 },
                 payload={
                     "temperature": config.temperature,
+                    "stream": stream,
                     "messages": [
                         {"role": "system", "content": config.system_prompt},
                         {"role": "user", "content": prompt},
@@ -102,6 +150,7 @@ class OpenAICompatibleLLMClient:
                     "model": config.model,
                     "max_tokens": 1024,
                     "temperature": config.temperature,
+                    "stream": stream,
                     "system": config.system_prompt,
                     "messages": [{"role": "user", "content": prompt}],
                 },
@@ -119,6 +168,7 @@ class OpenAICompatibleLLMClient:
             payload={
                 "model": config.model,
                 "temperature": config.temperature,
+                "stream": stream,
                 "messages": [
                     {"role": "system", "content": config.system_prompt},
                     {"role": "user", "content": prompt},
@@ -151,6 +201,22 @@ class OpenAICompatibleLLMClient:
         if not content:
             raise ValueError("Anthropic response content is empty")
         return content
+
+    @staticmethod
+    def _extract_stream_delta(data: dict[str, object], response_format: str) -> str:
+        if response_format == "anthropic":
+            if data.get("type") == "content_block_delta":
+                delta = data.get("delta", {})
+                if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                    return str(delta.get("text") or "")
+            return ""
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        delta = choices[0].get("delta", {})
+        if not isinstance(delta, dict):
+            return ""
+        return str(delta.get("content") or "")
 
     @staticmethod
     def _openai_chat_completions_url(base_url: str) -> str:
@@ -196,5 +262,21 @@ class OpenAICompatibleLLMClient:
     def _build_prompt(*, user_message: str, context_blocks: list[str]) -> str:
         if not context_blocks:
             return user_message
-        joined = "\n\n".join(f"[上下文 {index + 1}]\n{block}" for index, block in enumerate(context_blocks))
-        return f"用户问题：{user_message}\n\n可用上下文：\n{joined}\n\n请基于上下文回答，若上下文不足要明确说明。"
+        joined = "\n\n".join(f"[参考资料 {index + 1}]\n{block}" for index, block in enumerate(context_blocks))
+        instructions = (
+            "回答要求：\n"
+            "1. 严格基于以上参考资料作答；资料未涵盖的内容请明确说明“资料未提及”，禁止编造。\n"
+            "2. 引用资料时使用 [1][2] 这样的角标，与参考资料编号一一对应。\n"
+            "3. 对“如何设计 / 怎么实现 / 分析”等开放性问题，请按以下结构组织答案：\n"
+            "   一、背景与目标\n"
+            "   二、关键模块与职责\n"
+            "   三、设计要点（含取舍与依赖）\n"
+            "   四、风险与开放问题\n"
+            "4. 不要直接复述原文，要做归纳、提炼与解释，必要时给出表格或要点。\n"
+            "5. 结尾用一句话给出“下一步建议”。"
+        )
+        return (
+            f"用户问题：{user_message}\n\n"
+            f"参考资料：\n{joined}\n\n"
+            f"{instructions}"
+        )

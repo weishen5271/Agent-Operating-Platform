@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
-import { createChatCompletion, getTrace } from "@/lib/api-client";
-import type { ChatCompletionResponse, TraceResponse } from "@/lib/api-client/types";
+import { getChatConversation, getChatConversations, streamChatCompletion } from "@/lib/api-client";
+import type { ChatCompletionResponse, ChatStreamEvent, ConversationResponse, TraceResponse } from "@/lib/api-client/types";
 import { chatData } from "@/lib/workspace-fixtures";
 
 type RenderMessage = {
+  id: string;
   role: "user" | "assistant";
   content: string;
   time: string;
@@ -30,78 +32,415 @@ function nowTime(): string {
   });
 }
 
+function messageTime(value: string): string {
+  return new Date(value).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function conversationToMessages(conversation: ConversationResponse): RenderMessage[] {
+  return conversation.messages.map((message, index) => ({
+    id: `${conversation.conversation_id}-${index}`,
+    role: message.role,
+    content: message.content,
+    time: messageTime(message.created_at),
+  }));
+}
+
+function isTableSeparator(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function isTableRow(line: string): boolean {
+  return line.trim().startsWith("|") && line.trim().endsWith("|");
+}
+
+function parseTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function renderMarkdown(content: string): ReactNode {
+  const lines = content.split(/\r?\n/);
+  const nodes: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (isTableRow(line) && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headers = parseTableRow(line);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && isTableRow(lines[index])) {
+        rows.push(parseTableRow(lines[index]));
+        index += 1;
+      }
+      nodes.push(
+        <div className="markdown-table-wrap" key={`table-${index}`}>
+          <table>
+            <thead>
+              <tr>
+                {headers.map((header, cellIndex) => (
+                  <th key={`${header}-${cellIndex}`}>{renderInlineMarkdown(header)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {headers.map((_, cellIndex) => (
+                    <td key={cellIndex}>{renderInlineMarkdown(row[cellIndex] ?? "")}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      const level = heading[1].length;
+      const HeadingTag = `h${Math.min(level + 2, 5)}` as "h3" | "h4" | "h5";
+      nodes.push(
+        <HeadingTag key={`heading-${index}`} className="markdown-heading">
+          {renderInlineMarkdown(heading[2])}
+        </HeadingTag>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^---+$/.test(trimmed)) {
+      nodes.push(<hr key={`hr-${index}`} className="markdown-divider" />);
+      index += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
+        index += 1;
+      }
+      nodes.push(
+        <ul key={`ul-${index}`} className="markdown-list">
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^\d+\.\s+/, ""));
+        index += 1;
+      }
+      nodes.push(
+        <ol key={`ol-${index}`} className="markdown-list">
+          {items.map((item, itemIndex) => (
+            <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [trimmed];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^(#{1,4})\s+/.test(lines[index].trim()) &&
+      !/^[-*]\s+/.test(lines[index].trim()) &&
+      !/^\d+\.\s+/.test(lines[index].trim()) &&
+      !/^---+$/.test(lines[index].trim()) &&
+      !(isTableRow(lines[index]) && index + 1 < lines.length && isTableSeparator(lines[index + 1]))
+    ) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    nodes.push(
+      <p key={`p-${index}`} className="markdown-paragraph">
+        {renderInlineMarkdown(paragraphLines.join(" "))}
+      </p>,
+    );
+  }
+
+  return <div className="markdown-content">{nodes}</div>;
+}
+
 export function ChatWorkbench() {
-  const [messages, setMessages] = useState<RenderMessage[]>(
-    chatData.messages.map((item) => ({
-      role: item.role as "user" | "assistant",
-      content: item.content,
-      time: item.time,
-    })),
-  );
+  const [messages, setMessages] = useState<RenderMessage[]>([]);
   const [trace, setTrace] = useState<TraceResponse | null>(null);
-  const [input, setInput] = useState(
-    "帮我生成这次采购审批的草稿，并标注风险等级和审批链。",
-  );
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
+  const [input, setInput] = useState("");
   const [latestResponse, setLatestResponse] = useState<ChatCompletionResponse | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("auto");
-  const [isPending, startTransition] = useTransition();
+  const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const deltaBuffersRef = useRef<Record<string, string>>({});
+  const finalContentRef = useRef<Record<string, string>>({});
+  const typewriterTimersRef = useRef<Record<string, number>>({});
+  const hasStartedLocalConversationRef = useRef(false);
 
-  const references = latestResponse
-    ? latestResponse.sources.map((item) => ({
-        title: item.title,
-        snippet:
-          item.source_type === "wiki" && item.claim_text
-            ? `${item.claim_text} (${item.locator ?? "wiki"})`
-            : item.snippet,
-        type: item.source_type,
-      }))
-    : chatData.references;
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLatestConversation() {
+      try {
+        const conversations = await getChatConversations();
+        const latestConversation = conversations.items[0];
+        if (!latestConversation || cancelled) return;
+        const conversation = await getChatConversation(latestConversation.conversation_id);
+        if (cancelled || hasStartedLocalConversationRef.current) return;
+        setConversationId(conversation.conversation_id);
+        setMessages(conversationToMessages(conversation));
+      } catch (err) {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : "对话历史加载失败。";
+          setError(`对话历史加载失败：${message}`);
+        }
+      }
+    }
+
+    loadLatestConversation();
+
+    return () => {
+      cancelled = true;
+      Object.values(typewriterTimersRef.current).forEach((timer) => window.clearInterval(timer));
+    };
+  }, []);
+
+  const references =
+    latestResponse?.sources.map((item) => ({
+      title: item.title,
+      snippet:
+        item.source_type === "wiki" && item.claim_text
+          ? `${item.claim_text} (${item.locator ?? "wiki"})`
+          : item.snippet,
+      type: item.source_type,
+    })) ?? [];
 
   const hasLatestResponse = latestResponse !== null;
   const hasReferences = references.length > 0;
 
-  const traceSteps: RenderTraceStep[] = trace?.steps
-    ? trace.steps.map((item) => ({
-        name: item.name,
-        summary: item.summary,
-        status: item.status,
-        timestamp: item.timestamp ?? item.name,
-      }))
-    : chatData.trace.map((item) => ({
-        name: item.step,
-        summary: item.summary,
-        status: item.status,
-        timestamp: item.step,
-      }));
+  const traceSteps: RenderTraceStep[] =
+    trace?.steps.map((item) => ({
+      name: item.name,
+      summary: item.summary,
+      status: item.status,
+      timestamp: item.timestamp ?? item.name,
+    })) ?? [];
 
-  function submitMessage(message: string) {
+  async function submitMessage(message: string) {
     const trimmed = message.trim();
-    if (!trimmed) return;
+    if (!trimmed || isStreaming) return;
 
+    const userMessageId = crypto.randomUUID();
+    const assistantMessageId = crypto.randomUUID();
+    hasStartedLocalConversationRef.current = true;
     setError(null);
-    setMessages((prev) => [...prev, { role: "user", content: trimmed, time: nowTime() }]);
-    setInput("");
-
-    startTransition(async () => {
-      try {
-        const completion = await createChatCompletion(trimmed, undefined, retrievalMode);
-        setLatestResponse(completion);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: completion.message.content,
-            time: nowTime(),
-          },
-        ]);
-        const traceDetail = await getTrace(completion.trace_id);
-        setTrace(traceDetail);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "请确认后端 API 已启动。";
-        setError(`请求失败：${message}`);
-      }
+    setLatestResponse(null);
+    setTrace({
+      trace_id: "",
+      tenant_id: "",
+      user_id: "",
+      message: trimmed,
+      intent: "",
+      strategy: "",
+      answer: "",
+      created_at: new Date().toISOString(),
+      steps: [],
+      sources: [],
     });
+    setMessages((prev) => [
+      ...prev,
+      { id: userMessageId, role: "user", content: trimmed, time: nowTime() },
+      { id: assistantMessageId, role: "assistant", content: "", time: nowTime() },
+    ]);
+    setInput("");
+    setIsStreaming(true);
+
+    let failed = false;
+    try {
+      await streamChatCompletion(trimmed, retrievalMode, (event) => {
+        handleStreamEvent(event, assistantMessageId, trimmed);
+      }, conversationId);
+    } catch (err) {
+      failed = true;
+      const message = err instanceof Error ? err.message : "请确认后端 API 已启动。";
+      setError(`请求失败：${message}`);
+      clearTypewriterState(assistantMessageId);
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === assistantMessageId && !item.content
+            ? { ...item, content: "请求失败，未收到 Agent 响应。" }
+            : item,
+        ),
+      );
+    } finally {
+      if (failed) {
+        setIsStreaming(false);
+      }
+    }
+  }
+
+  function clearTypewriterState(messageId: string) {
+    const timer = typewriterTimersRef.current[messageId];
+    if (timer) {
+      window.clearInterval(timer);
+      delete typewriterTimersRef.current[messageId];
+    }
+    delete deltaBuffersRef.current[messageId];
+    delete finalContentRef.current[messageId];
+  }
+
+  function appendAssistantContent(messageId: string, content: string) {
+    setMessages((prev) =>
+      prev.map((item) =>
+        item.id === messageId
+          ? { ...item, content: `${item.content}${content}` }
+          : item,
+      ),
+    );
+  }
+
+  function startTypewriter(messageId: string) {
+    if (typewriterTimersRef.current[messageId]) return;
+
+    typewriterTimersRef.current[messageId] = window.setInterval(() => {
+      const buffer = deltaBuffersRef.current[messageId] ?? "";
+      if (!buffer) {
+        const finalContent = finalContentRef.current[messageId];
+        clearTypewriterState(messageId);
+        if (finalContent !== undefined) {
+          setMessages((prev) =>
+            prev.map((item) =>
+              item.id === messageId ? { ...item, content: finalContent } : item,
+            ),
+          );
+          setIsStreaming(false);
+        }
+        return;
+      }
+
+      const takeSize = buffer.length > 32 ? 4 : 2;
+      const nextChunk = buffer.slice(0, takeSize);
+      deltaBuffersRef.current[messageId] = buffer.slice(takeSize);
+      appendAssistantContent(messageId, nextChunk);
+    }, 16);
+  }
+
+  function enqueueAssistantDelta(messageId: string, content: string) {
+    deltaBuffersRef.current[messageId] = `${deltaBuffersRef.current[messageId] ?? ""}${content}`;
+    startTypewriter(messageId);
+  }
+
+  function finishAssistantMessage(messageId: string, content: string) {
+    finalContentRef.current[messageId] = content;
+    if (!deltaBuffersRef.current[messageId]) {
+      clearTypewriterState(messageId);
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === messageId ? { ...item, content } : item,
+        ),
+      );
+      setIsStreaming(false);
+      return;
+    }
+    startTypewriter(messageId);
+  }
+
+  function handleStreamEvent(event: ChatStreamEvent, assistantMessageId: string, userMessage: string) {
+    if (event.event === "trace_step") {
+      setTrace((prev) => ({
+        trace_id: event.trace_id,
+        tenant_id: prev?.tenant_id ?? "",
+        user_id: prev?.user_id ?? "",
+        message: prev?.message ?? userMessage,
+        intent: prev?.intent ?? "",
+        strategy: prev?.strategy ?? "",
+        answer: prev?.answer ?? "",
+        created_at: prev?.created_at ?? new Date().toISOString(),
+        sources: prev?.sources ?? [],
+        steps: [...(prev?.steps ?? []), event.step],
+      }));
+      return;
+    }
+
+    if (event.event === "response_meta") {
+      setConversationId(event.conversation_id);
+      setTrace((prev) => ({
+        trace_id: event.trace_id,
+        tenant_id: prev?.tenant_id ?? "",
+        user_id: prev?.user_id ?? "",
+        message: prev?.message ?? userMessage,
+        intent: event.intent,
+        strategy: event.strategy,
+        answer: prev?.answer ?? "",
+        created_at: prev?.created_at ?? new Date().toISOString(),
+        steps: prev?.steps ?? [],
+        sources: event.sources,
+      }));
+      setLatestResponse({
+        trace_id: event.trace_id,
+        conversation_id: event.conversation_id,
+        intent: event.intent,
+        strategy: event.strategy,
+        message: {
+          role: "assistant",
+          content: "",
+        },
+        sources: event.sources,
+        warnings: event.warnings,
+        draft_action: event.draft_action ?? null,
+      });
+      return;
+    }
+
+    if (event.event === "message_delta") {
+      enqueueAssistantDelta(assistantMessageId, event.content);
+      return;
+    }
+
+    if (event.event === "message_done") {
+      finishAssistantMessage(assistantMessageId, event.content);
+      setLatestResponse((prev) =>
+        prev
+          ? {
+              ...prev,
+              message: {
+                role: "assistant",
+                content: event.content,
+              },
+            }
+          : prev,
+      );
+      setTrace((prev) => (prev ? { ...prev, answer: event.content } : prev));
+    }
   }
 
   return (
@@ -112,8 +451,8 @@ export function ChatWorkbench() {
             <h3>对话演练场</h3>
             <p>模拟真实用户环境测试 Agent 的逻辑响应。</p>
           </div>
-          <span className={`status-chip ${isPending ? "warning pulse" : "success"}`}>
-            {isPending ? "生成中" : "就绪"}
+          <span className={`status-chip ${isStreaming ? "warning pulse" : "success"}`}>
+            {isStreaming ? "生成中" : "就绪"}
           </span>
         </div>
 
@@ -154,23 +493,47 @@ export function ChatWorkbench() {
         </div>
 
         <div className="chat-history">
-          {messages.map((message) => (
-            <article
-              key={`${message.role}-${message.time}-${message.content.slice(0, 12)}`}
-              className={`chat-bubble-row ${message.role}`}
-            >
-              <div className="bubble-avatar">
-                <span className="material-symbols-outlined">
-                  {message.role === "user" ? "person" : "smart_toy"}
-                </span>
-              </div>
-              <div className="bubble-column">
-                <div className={`chat-bubble ${message.role}`}>{message.content}</div>
-                <span className="bubble-time">{message.time}</span>
-              </div>
-            </article>
-          ))}
+          {messages.length > 0 ? (
+            messages.map((message) => (
+              <article
+                key={message.id}
+                className={`chat-bubble-row ${message.role}`}
+              >
+                <div className="bubble-avatar">
+                  <span className="material-symbols-outlined">
+                    {message.role === "user" ? "person" : "smart_toy"}
+                  </span>
+                </div>
+                <div className="bubble-column">
+                  <div className={`chat-bubble ${message.role}`}>
+                    {message.content
+                      ? message.role === "assistant"
+                        ? renderMarkdown(message.content)
+                        : message.content
+                      : <span className="streaming-caret">正在响应</span>}
+                  </div>
+                  <span className="bubble-time">{message.time}</span>
+                </div>
+              </article>
+            ))
+          ) : (
+            <div className="chat-empty-state">
+              <span className="material-symbols-outlined">forum</span>
+              <p>输入任务后开始真实对话。</p>
+            </div>
+          )}
         </div>
+
+        {latestResponse?.warnings && latestResponse.warnings.length > 0 ? (
+          <div className="chat-warnings">
+            {latestResponse.warnings.map((tip) => (
+              <p key={tip} className="chat-warning-item">
+                <span className="material-symbols-outlined">warning</span>
+                {tip}
+              </p>
+            ))}
+          </div>
+        ) : null}
 
         {latestResponse?.draft_action ? (
           <div className="draft-callout">
@@ -212,11 +575,11 @@ export function ChatWorkbench() {
             <button
               type="button"
               className="primary-button"
-              disabled={isPending}
+              disabled={isStreaming}
               onClick={() => submitMessage(input)}
             >
               <span className="material-symbols-outlined">send</span>
-              {isPending ? "处理中..." : "发送请求"}
+              {isStreaming ? "处理中..." : "发送请求"}
             </button>
           </div>
           {error ? <p className="inline-error">{error}</p> : null}
@@ -236,21 +599,28 @@ export function ChatWorkbench() {
         </div>
 
         <div className="trace-list">
-          {traceSteps.map((item, index) => (
-            <article
-              key={`${item.name}-${item.timestamp}-${index}`}
-              className={`trace-item ${item.status === "completed" ? "completed" : ""}`}
-            >
-              <div className="trace-dot">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <strong>{item.name}</strong>
-                <p>{item.summary}</p>
-              </div>
-              <span className={`status-chip ${item.status === "completed" ? "success" : "warning"}`}>
-                {item.status}
-              </span>
-            </article>
-          ))}
+          {traceSteps.length > 0 ? (
+            traceSteps.map((item, index) => (
+              <article
+                key={`${item.name}-${item.timestamp}-${index}`}
+                className={`trace-item ${item.status === "completed" ? "completed" : ""}`}
+              >
+                <div className="trace-dot">{String(index + 1).padStart(2, "0")}</div>
+                <div>
+                  <strong>{item.name}</strong>
+                  <p>{item.summary}</p>
+                </div>
+                <span className={`status-chip ${item.status === "completed" ? "success" : "warning"}`}>
+                  {item.status}
+                </span>
+              </article>
+            ))
+          ) : (
+            <div className="trace-empty-state">
+              <span className="material-symbols-outlined">timeline</span>
+              <p>发送请求后展示本轮真实执行链路。</p>
+            </div>
+          )}
         </div>
 
         <div className="panel-subsection">

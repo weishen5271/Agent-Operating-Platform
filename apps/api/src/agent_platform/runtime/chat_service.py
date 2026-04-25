@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 import re
-from typing import Literal
+from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
 
 from agent_platform.bootstrap.settings import settings
@@ -11,6 +12,7 @@ from agent_platform.domain.models import (
     Conversation,
     DraftAction,
     KnowledgeBase,
+    LLMRuntimeConfig,
     SourceReference,
     TenantProfile,
     TraceRecord,
@@ -36,6 +38,8 @@ from agent_platform.wiki.service import WikiService
 
 
 TENANT_MANAGE_SCOPE = "tenant:manage"
+TraceStepCallback = Callable[[TraceRecord, TraceStep], Awaitable[None]]
+AnswerDeltaCallback = Callable[[str], Awaitable[None]]
 
 
 class ChatService:
@@ -92,7 +96,7 @@ class ChatService:
                     "title": conversation.title,
                     "updated_at": conversation.updated_at.isoformat(),
                 }
-                for conversation in await self._conversations.list_recent(context.tenant_id)
+                for conversation in await self._conversations.list_recent(context.tenant_id, context.user_id)
             ],
         }
 
@@ -103,6 +107,79 @@ class ChatService:
         tenant_id: str | None = None,
         user_id: str | None = None,
         retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+    ) -> dict[str, object]:
+        return await self._complete_core(
+            message=message,
+            conversation_id=conversation_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            retrieval_mode=retrieval_mode,
+        )
+
+    async def stream_complete(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+    ) -> AsyncIterator[dict[str, object]]:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        async def emit_step(trace: TraceRecord, step: TraceStep) -> None:
+            await queue.put(
+                {
+                    "event": "trace_step",
+                    "trace_id": trace.trace_id,
+                    "step": asdict(step),
+                }
+            )
+
+        async def emit_answer_delta(chunk: str) -> None:
+            await queue.put({"event": "message_delta", "content": chunk})
+
+        task = asyncio.create_task(
+            self._complete_core(
+                message=message,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                retrieval_mode=retrieval_mode,
+                on_step=emit_step,
+                on_answer_delta=emit_answer_delta,
+            )
+        )
+
+        while not task.done() or not queue.empty():
+            try:
+                yield await asyncio.wait_for(queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+
+        response = task.result()
+        yield {
+            "event": "response_meta",
+            "trace_id": response["trace_id"],
+            "conversation_id": response["conversation_id"],
+            "intent": response["intent"],
+            "strategy": response["strategy"],
+            "sources": response["sources"],
+            "warnings": response.get("warnings", []),
+            "draft_action": response.get("draft_action"),
+        }
+        answer = str(response["message"]["content"])
+        yield {"event": "message_done", "content": answer}
+        yield {"event": "done"}
+
+    async def _complete_core(
+        self,
+        message: str,
+        conversation_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+        on_step: TraceStepCallback | None = None,
+        on_answer_delta: AnswerDeltaCallback | None = None,
     ) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         tenant = await self._tenants.get(context.tenant_id)
@@ -117,10 +194,25 @@ class ChatService:
             intent="unknown",
             strategy="direct_answer",
         )
-        trace.steps.append(TraceStep(name="received", status="completed", summary="请求已进入 Supervisor。"))
+
+        async def add_step(step: TraceStep) -> None:
+            trace.steps.append(step)
+            if on_step is not None:
+                await on_step(trace, step)
+
+        answer_streamed = False
+
+        async def stream_answer(answer_chunk: str) -> None:
+            nonlocal answer_streamed
+            if on_answer_delta is None or not answer_chunk:
+                return
+            answer_streamed = True
+            await on_answer_delta(answer_chunk)
+
+        await add_step(TraceStep(name="received", status="completed", summary="请求已进入 Supervisor。"))
 
         input_findings = self._inspect_input(message)
-        trace.steps.append(
+        await add_step(
             TraceStep(
                 name="input_guard",
                 status="completed",
@@ -128,9 +220,9 @@ class ChatService:
             )
         )
 
-        short_memory = await self._load_short_memory(context.tenant_id, conversation_id)
+        short_memory = await self._load_short_memory(context.tenant_id, context.user_id, conversation_id)
         long_memory_summary = await self._load_long_memory_summary(context.tenant_id)
-        trace.steps.append(
+        await add_step(
             TraceStep(
                 name="memory",
                 status="completed",
@@ -145,10 +237,10 @@ class ChatService:
         strategy = "plan_execute" if intent in {"hr_query", "procurement_draft"} else "direct_answer"
         trace.intent = intent
         trace.strategy = strategy
-        trace.steps.append(TraceStep(name="classified", status="completed", summary=f"识别意图为 {intent}，策略为 {strategy}。"))
+        await add_step(TraceStep(name="classified", status="completed", summary=f"识别意图为 {intent}，策略为 {strategy}。"))
 
         candidate_capabilities = self._select_candidate_capabilities(context)
-        trace.steps.append(
+        await add_step(
             TraceStep(
                 name="capability_candidates",
                 status="completed",
@@ -157,33 +249,38 @@ class ChatService:
         )
 
         sources: list[SourceReference] = []
+        warnings: list[str] = []
         capability = None
         if intent == "general_chat":
             self._ensure_scope(context=context, required_scope="chat:read")
             self._check_quota(message)
-            trace.steps.append(TraceStep(name="planned", status="completed", summary="命中模型直答链路: model.direct_chat。"))
-            trace.steps.append(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。"))
-            trace.steps.append(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
+            await add_step(TraceStep(name="planned", status="completed", summary="命中模型直答链路: model.direct_chat。"))
+            await add_step(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。"))
+            await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
             answer, used_model = await self._generate_direct_llm_answer(
                 tenant_id=context.tenant_id,
                 message=message,
+                short_memory=short_memory,
+                on_delta=stream_answer if on_answer_delta is not None else None,
             )
-            trace.steps.append(TraceStep(name="executed", status="completed", summary="model.direct_chat 执行完成。"))
-            trace.steps.append(
+            await add_step(TraceStep(name="executed", status="completed", summary="model.direct_chat 执行完成。"))
+            await add_step(
                 TraceStep(
                     name="model",
                     status="completed" if used_model else "failed",
                     summary="已通过 OpenAI-compatible 模型生成日常对话回答。" if used_model else "LLM Runtime 未启用，无法生成日常对话回答。",
                 )
             )
+            if not used_model:
+                warnings.append("LLM 运行时未启用，已退化到内置文案。请在「设置 → LLM 配置」中启用模型。")
         else:
             capability_name, payload = self._plan(message, intent)
             if capability_name not in {item.name for item in candidate_capabilities}:
                 raise PermissionError(f"Missing scope for capability: {capability_name}")
-            trace.steps.append(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。"))
+            await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。"))
             capability = self._registry.get(capability_name)
             autonomy = self._evaluate_risk(capability)
-            trace.steps.append(
+            await add_step(
                 TraceStep(
                     name="risk",
                     status="completed",
@@ -192,10 +289,12 @@ class ChatService:
             )
             self._ensure_scope(context=context, required_scope=capability.required_scope)
             self._check_quota(message)
-            trace.steps.append(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
+            await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
 
             if intent == "knowledge_query":
-                result = await self._run_knowledge_search(context.tenant_id, payload["query"])
+                result = await self._run_knowledge_search(
+                    context.tenant_id, payload["query"], add_step=add_step
+                )
             elif intent == "wiki_query":
                 result = await self._run_wiki_search(
                     tenant_id=context.tenant_id,
@@ -204,7 +303,7 @@ class ChatService:
                 )
             else:
                 result = self._registry.invoke(capability_name, payload)
-            trace.steps.append(TraceStep(name="executed", status="completed", summary=self._execution_summary(capability_name, result)))
+            await add_step(TraceStep(name="executed", status="completed", summary=self._execution_summary(capability_name, result)))
 
             answer, sources = self._compose_answer(intent, result)
             if intent == "knowledge_query":
@@ -212,38 +311,49 @@ class ChatService:
                     tenant_id=context.tenant_id,
                     message=message,
                     sources=sources,
+                    short_memory=short_memory,
+                    on_delta=stream_answer if on_answer_delta is not None else None,
                 )
                 if llm_answer:
                     answer = llm_answer
-                    trace.steps.append(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型生成最终回答。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型生成最终回答。"))
                 elif not sources:
-                    trace.steps.append(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。"))
+                    warnings.append("未在已发布知识库中检索到相关内容，请尝试更换关键词或上传相关文档。")
                 else:
-                    trace.steps.append(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。"))
+                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。"))
+                    warnings.append("LLM 运行时未启用，当前回答为检索片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
             elif intent == "wiki_query":
                 llm_answer = await self._generate_wiki_llm_answer(
                     tenant_id=context.tenant_id,
                     message=message,
                     sources=sources,
+                    short_memory=short_memory,
+                    on_delta=stream_answer if on_answer_delta is not None else None,
                 )
                 if llm_answer:
                     answer = llm_answer
-                    trace.steps.append(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。"))
                 elif not sources:
-                    trace.steps.append(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。"))
+                    warnings.append("未在 Wiki 中检索到相关页面，请尝试更换关键词或检查权限范围。")
                 else:
-                    trace.steps.append(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。"))
+                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。"))
+                    warnings.append("LLM 运行时未启用，当前回答为 Wiki 片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
         if intent not in {"knowledge_query", "wiki_query", "general_chat"}:
-            trace.steps.append(TraceStep(name="model", status="completed", summary="当前能力无需模型生成。"))
+            await add_step(TraceStep(name="model", status="completed", summary="当前能力无需模型生成。"))
         answer = self._review_output(answer)
-        trace.steps.append(TraceStep(name="output_guard", status="completed", summary="输出脱敏与内容审查完成。"))
+        if on_answer_delta is not None and not answer_streamed:
+            await self._emit_text_deltas(answer, stream_answer)
+        await add_step(TraceStep(name="output_guard", status="completed", summary="输出脱敏与内容审查完成。"))
         trace.answer = answer
         trace.sources = sources
-        trace.steps.append(TraceStep(name="completed", status="completed", summary="响应已组装并返回。"))
+        await add_step(TraceStep(name="completed", status="completed", summary="响应已组装并返回。"))
         await self._traces.save(trace)
 
         conversation = await self._conversations.append_message(
             tenant_id=context.tenant_id,
+            user_id=context.user_id,
             conversation_id=conversation_id,
             user_message=message,
             assistant_message=answer,
@@ -262,6 +372,7 @@ class ChatService:
                 self._serialize_source(source)
                 for source in sources
             ],
+            "warnings": warnings,
         }
         if capability and capability.side_effect_level in {"write", "irreversible"}:
             draft = await self.create_draft(
@@ -273,8 +384,37 @@ class ChatService:
             response["draft_action"] = self._serialize_draft(draft)
         return response
 
-    async def get_trace(self, trace_id: str) -> TraceRecord | None:
-        return await self._traces.get(trace_id)
+    async def list_conversations(self, tenant_id: str | None = None, user_id: str | None = None) -> list[dict[str, object]]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        return [
+            {
+                "conversation_id": item.conversation_id,
+                "title": item.title,
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in await self._conversations.list_recent(context.tenant_id, context.user_id)
+        ]
+
+    async def get_conversation(
+        self,
+        conversation_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> Conversation | None:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        return await self._conversations.get(context.tenant_id, context.user_id, conversation_id)
+
+    async def get_trace(
+        self,
+        trace_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> TraceRecord | None:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        trace = await self._traces.get(trace_id)
+        if trace is None or trace.tenant_id != context.tenant_id or trace.user_id != context.user_id:
+            return None
+        return trace
 
     async def list_traces(self, tenant_id: str | None = None, user_id: str | None = None) -> list[dict[str, object]]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -431,6 +571,26 @@ class ChatService:
         self._ensure_scope(context=context, required_scope="admin:read")
         return {"items": [asdict(item) for item in await self._knowledge_bases.list_by_tenant(context.tenant_id)]}
 
+    async def reembed_knowledge(
+        self,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        batch_size: int = 32,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        reembed = getattr(self._knowledge_sources, "reembed_pending", None)
+        if reembed is None:
+            return {"total": 0, "updated": 0, "failed": 0, "skipped": True}
+        stats = await reembed(
+            tenant_id=context.tenant_id,
+            batch_size=batch_size,
+            limit=limit,
+        )
+        return dict(stats)
+
     async def ingest_knowledge_source(
         self,
         *,
@@ -531,6 +691,10 @@ class ChatService:
 
     async def get_llm_runtime(self, tenant_id: str | None = None) -> dict[str, object]:
         config, _api_key = await self._llm_config.get(tenant_id=tenant_id)
+        return self._serialize_llm_runtime(config)
+
+    @staticmethod
+    def _serialize_llm_runtime(config: LLMRuntimeConfig) -> dict[str, object]:
         return {
             "provider": config.provider,
             "base_url": config.base_url,
@@ -539,6 +703,12 @@ class ChatService:
             "temperature": config.temperature,
             "system_prompt": config.system_prompt,
             "enabled": config.enabled,
+            "embedding_provider": config.embedding_provider,
+            "embedding_base_url": config.embedding_base_url,
+            "embedding_model": config.embedding_model,
+            "embedding_dimensions": config.embedding_dimensions,
+            "embedding_api_key_configured": config.embedding_api_key_configured,
+            "embedding_enabled": config.embedding_enabled,
         }
 
     async def get_tenant(self, tenant_id: str) -> TenantProfile | None:
@@ -554,6 +724,12 @@ class ChatService:
         api_key: str,
         temperature: float,
         system_prompt: str,
+        embedding_provider: str | None = None,
+        embedding_base_url: str | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_dimensions: int | None = None,
+        embedding_enabled: bool | None = None,
     ) -> dict[str, object]:
         config, _ = await self._llm_config.create_or_update_for_tenant(
             tenant_id=tenant_id,
@@ -563,16 +739,14 @@ class ChatService:
             api_key=api_key,
             temperature=temperature,
             system_prompt=system_prompt,
+            embedding_provider=embedding_provider,
+            embedding_base_url=embedding_base_url,
+            embedding_model=embedding_model,
+            embedding_api_key=embedding_api_key,
+            embedding_dimensions=embedding_dimensions,
+            embedding_enabled=embedding_enabled,
         )
-        return {
-            "provider": config.provider,
-            "base_url": config.base_url,
-            "model": config.model,
-            "api_key_configured": config.api_key_configured,
-            "temperature": config.temperature,
-            "system_prompt": config.system_prompt,
-            "enabled": config.enabled,
-        }
+        return self._serialize_llm_runtime(config)
 
     # Tenant CRUD
     async def list_tenants(self, tenant_id: str | None = None, user_id: str | None = None) -> list[TenantProfile]:
@@ -819,28 +993,257 @@ class ChatService:
             return "wiki.search", {"query": message}
         return "knowledge.search", {"query": message}
 
-    async def _run_knowledge_search(self, tenant_id: str, query: str) -> dict[str, object]:
+    async def _run_knowledge_search(
+        self,
+        tenant_id: str,
+        query: str,
+        *,
+        add_step: Callable[[TraceStep], Awaitable[None]] | None = None,
+    ) -> dict[str, object]:
         if not hasattr(self._knowledge_sources, "search"):
             return self._registry.invoke("knowledge.search", {"query": query})
-        search_result = await self._knowledge_sources.search(tenant_id=tenant_id, query=query, top_k=3)
+
+        try:
+            config, api_key = await self._llm_config.get(tenant_id=tenant_id)
+        except Exception:
+            config, api_key = None, ""
+
+        use_llm = (
+            config is not None
+            and getattr(config, "enabled", False)
+            and bool(api_key)
+            and len(query.strip()) >= 4
+        )
+
+        variants: list[str] = [query]
+        if use_llm:
+            try:
+                rewritten = await self._rewrite_query(config=config, api_key=api_key, query=query)
+            except Exception:
+                rewritten = []
+            seen = {query.strip().lower()}
+            for variant in rewritten:
+                normalized = variant.strip()
+                if not normalized or normalized.lower() in seen:
+                    continue
+                variants.append(normalized)
+                seen.add(normalized.lower())
+            if add_step is not None:
+                await add_step(
+                    TraceStep(
+                        name="query_rewrite",
+                        status="completed" if len(variants) > 1 else "skipped",
+                        summary=(
+                            f"Query 改写产生 {len(variants)} 个检索变体: " + " | ".join(variants[:5])
+                            if len(variants) > 1
+                            else "Query 改写未返回有效变体，沿用原始问题。"
+                        ),
+                    )
+                )
+
+        recall_top_k = 20 if use_llm else 8
+        rrf_scores: dict[str, float] = {}
+        chunk_map: dict[str, SourceReference] = {}
+        aggregate_keyword = 0
+        aggregate_vector = 0
+        aggregate_candidates = 0
+        backend = "postgres_json_hybrid"
+        for variant in variants:
+            result = await self._knowledge_sources.search(
+                tenant_id=tenant_id, query=variant, top_k=recall_top_k
+            )
+            backend = result.backend or backend
+            aggregate_keyword += result.keyword_match_count
+            aggregate_vector += result.vector_match_count
+            aggregate_candidates = max(aggregate_candidates, result.candidate_count)
+            for rank, match in enumerate(result.matches, start=1):
+                chunk_map.setdefault(match.id, match)
+                rrf_scores[match.id] = rrf_scores.get(match.id, 0.0) + 1.0 / (60 + rank)
+
+        ordered_ids = sorted(rrf_scores, key=lambda cid: rrf_scores[cid], reverse=True)
+        merged: list[SourceReference] = [chunk_map[cid] for cid in ordered_ids]
+
+        final_top_k = 8
+        rerank_applied = False
+        if use_llm and len(merged) > final_top_k:
+            try:
+                reranked = await self._rerank_candidates(
+                    config=config, api_key=api_key, query=query, candidates=merged
+                )
+            except Exception:
+                reranked = None
+            if reranked:
+                merged = reranked
+                rerank_applied = True
+
+        matches = merged[:final_top_k]
+
+        if add_step is not None and use_llm:
+            await add_step(
+                TraceStep(
+                    name="rerank",
+                    status="completed" if rerank_applied else "skipped",
+                    summary=(
+                        f"LLM rerank 重排 {len(merged)} 候选，保留前 {len(matches)}。"
+                        if rerank_applied
+                        else f"未触发 rerank（候选 {len(merged)} ≤ {final_top_k} 或调用失败）。"
+                    ),
+                )
+            )
+
         summary = (
             "已从已发布知识切片中整理出与你问题最相关的要点。"
-            if search_result.matches
+            if matches
             else "未在当前已发布知识源中检索到相关内容。"
         )
         return {
             "summary": summary,
-            "matches": search_result.matches,
+            "matches": matches,
             "retrieval": {
-                "backend": search_result.backend,
-                "query": search_result.query,
-                "matched": bool(search_result.matches),
-                "candidate_count": search_result.candidate_count,
-                "match_count": search_result.match_count,
-                "keyword_match_count": search_result.keyword_match_count,
-                "vector_match_count": search_result.vector_match_count,
+                "backend": backend,
+                "query": query,
+                "matched": bool(matches),
+                "candidate_count": aggregate_candidates,
+                "match_count": len(matches),
+                "keyword_match_count": aggregate_keyword,
+                "vector_match_count": aggregate_vector,
+                "variants": variants,
+                "rerank_applied": rerank_applied,
             },
         }
+
+    async def _rewrite_query(
+        self,
+        *,
+        config: LLMRuntimeConfig,
+        api_key: str,
+        query: str,
+    ) -> list[str]:
+        """让 LLM 把原始问题改写为 2-3 个检索友好的变体。失败返回 []."""
+        prompt = (
+            "你是企业搜索助手。请将下列用户问题改写为 2-3 个语义等价但表述不同的检索语句，"
+            "用于关键词与向量混合检索互补。\n"
+            "要求：\n"
+            "1. 仅输出 JSON 数组，例如 [\"变体1\", \"变体2\", \"变体3\"]，不要任何额外说明。\n"
+            "2. 保留关键名词与技术术语；去除\"如何 / 怎样 / 分析一下 / 帮我\"等口语化前缀。\n"
+            "3. 不要复述用户原句。\n\n"
+            f"用户问题：{query}"
+        )
+        try:
+            raw = await asyncio.to_thread(
+                self._llm_client.complete,
+                config=config,
+                api_key=api_key,
+                user_message=prompt,
+                context_blocks=[],
+            )
+        except Exception:
+            return []
+        return self._parse_query_variants(raw)
+
+    @staticmethod
+    def _parse_query_variants(raw: str) -> list[str]:
+        if not raw:
+            return []
+        snippet = raw.strip()
+        # 兜底：截取 [...] 之间的 JSON 数组
+        match = re.search(r"\[[^\[\]]*\]", snippet, flags=re.DOTALL)
+        if match:
+            snippet = match.group(0)
+        try:
+            import json as _json
+
+            data = _json.loads(snippet)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        variants: list[str] = []
+        for item in data:
+            if isinstance(item, str) and item.strip():
+                variants.append(item.strip())
+        return variants[:5]
+
+    async def _rerank_candidates(
+        self,
+        *,
+        config: LLMRuntimeConfig,
+        api_key: str,
+        query: str,
+        candidates: list[SourceReference],
+    ) -> list[SourceReference] | None:
+        """让 LLM 对候选片段按相关度 1-5 打分并重排。失败返回 None."""
+        if not candidates:
+            return None
+        truncated = candidates[:20]
+        block_lines: list[str] = []
+        for index, item in enumerate(truncated, start=1):
+            title = (item.title or "未命名").strip()
+            snippet = (item.snippet or "").strip().replace("\n", " ")
+            if len(snippet) > 280:
+                snippet = snippet[:280] + "..."
+            block_lines.append(f"[{index}] 标题: {title} | 片段: {snippet}")
+        prompt = (
+            "对下列候选片段按与\"用户问题\"的相关度打 1-5 分（5 最相关，1 最无关）。\n"
+            "要求：\n"
+            "- 仅输出 JSON 数组，元素形如 {\"index\": 1, \"score\": 5}，覆盖全部候选编号。\n"
+            "- 不要解释、不要任何额外文本。\n\n"
+            f"用户问题：{query}\n\n候选：\n" + "\n".join(block_lines)
+        )
+        try:
+            raw = await asyncio.to_thread(
+                self._llm_client.complete,
+                config=config,
+                api_key=api_key,
+                user_message=prompt,
+                context_blocks=[],
+            )
+        except Exception:
+            return None
+        scores = self._parse_rerank_scores(raw, expected=len(truncated))
+        if not scores:
+            return None
+        # 按得分降序，保留 score>=2 的；同分保持原顺序
+        scored = [
+            (idx, scores.get(idx, 0))
+            for idx in range(1, len(truncated) + 1)
+        ]
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        reordered = [truncated[idx - 1] for idx, score in scored if score >= 2]
+        # 把没参与排序的尾部候选附在后面，避免丢候选
+        tail = candidates[len(truncated):]
+        if not reordered:
+            return None
+        return reordered + tail
+
+    @staticmethod
+    def _parse_rerank_scores(raw: str, *, expected: int) -> dict[int, int]:
+        if not raw:
+            return {}
+        snippet = raw.strip()
+        match = re.search(r"\[.*\]", snippet, flags=re.DOTALL)
+        if match:
+            snippet = match.group(0)
+        try:
+            import json as _json
+
+            data = _json.loads(snippet)
+        except Exception:
+            return {}
+        if not isinstance(data, list):
+            return {}
+        scores: dict[int, int] = {}
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                idx = int(entry.get("index"))
+                score = int(entry.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= idx <= expected:
+                scores[idx] = max(1, min(5, score))
+        return scores
 
     async def _run_wiki_search(
         self,
@@ -909,12 +1312,12 @@ class ChatService:
             findings.append("手机号")
         return findings
 
-    async def _load_short_memory(self, tenant_id: str, conversation_id: str | None) -> Conversation:
+    async def _load_short_memory(self, tenant_id: str, user_id: str, conversation_id: str | None) -> Conversation:
         if conversation_id is None:
-            return Conversation(conversation_id="", title="新会话", tenant_id=tenant_id)
-        conversation = await self._conversations.get(tenant_id, conversation_id)
+            return Conversation(conversation_id="", title="新会话", tenant_id=tenant_id, user_id=user_id)
+        conversation = await self._conversations.get(tenant_id, user_id, conversation_id)
         if conversation is None:
-            return Conversation(conversation_id=conversation_id, title="新会话", tenant_id=tenant_id)
+            raise ValueError("Conversation not found")
         return conversation
 
     async def _load_long_memory_summary(self, tenant_id: str) -> str:
@@ -924,6 +1327,17 @@ class ChatService:
             return "当前租户暂无运行中的知识源"
         names = "、".join(item.name for item in active_sources[:3])
         return f"{len(active_sources)} 个运行中知识源（{names}）"
+
+    @staticmethod
+    def _conversation_context_blocks(short_memory: Conversation, limit: int = 12) -> list[str]:
+        if not short_memory.messages:
+            return []
+        recent_messages = short_memory.messages[-limit:]
+        lines = []
+        for item in recent_messages:
+            role = "用户" if item.role == "user" else "助手"
+            lines.append(f"{role}: {item.content}")
+        return ["会话历史（按时间从旧到新）:\n" + "\n".join(lines)]
 
     def _select_candidate_capabilities(self, context: UserContext) -> list[CapabilityDefinition]:
         _ = context
@@ -954,18 +1368,57 @@ class ChatService:
     def _review_output(answer: str) -> str:
         return re.sub(r"\b1[3-9]\d{3}(\d{4})\d{4}\b", r"1****\1****", answer)
 
-    async def _generate_direct_llm_answer(self, *, tenant_id: str, message: str) -> tuple[str, bool]:
+    @staticmethod
+    def _chunk_answer(answer: str, chunk_size: int = 6) -> list[str]:
+        if not answer:
+            return []
+        chunks: list[str] = []
+        buffer = ""
+        for char in answer:
+            buffer += char
+            if char in {"。", "！", "？", "\n"} or len(buffer) >= chunk_size:
+                chunks.append(buffer)
+                buffer = ""
+        if buffer:
+            chunks.append(buffer)
+        return chunks
+
+    async def _emit_text_deltas(self, answer: str, on_delta: AnswerDeltaCallback) -> None:
+        for chunk in self._chunk_answer(answer):
+            await on_delta(chunk)
+            await asyncio.sleep(0.018)
+
+    async def _generate_direct_llm_answer(
+        self,
+        *,
+        tenant_id: str,
+        message: str,
+        short_memory: Conversation,
+        on_delta: AnswerDeltaCallback | None = None,
+    ) -> tuple[str, bool]:
         config, api_key = await self._llm_config.get(tenant_id=tenant_id)
         if not config.enabled:
             return (
                 "LLM Runtime 未启用，当前无法生成日常对话回答。请先在系统设置中配置 OpenAI-compatible base_url、model 和 api_key。",
                 False,
             )
+        if on_delta is not None:
+            try:
+                answer = await self._stream_llm_answer(
+                    config=config,
+                    api_key=api_key,
+                    user_message=message,
+                    context_blocks=self._conversation_context_blocks(short_memory),
+                    on_delta=on_delta,
+                )
+                return answer, True
+            except (AttributeError, NotImplementedError):
+                pass
         answer = self._llm_client.complete(
             config=config,
             api_key=api_key,
             user_message=message,
-            context_blocks=[],
+            context_blocks=self._conversation_context_blocks(short_memory),
         )
         return answer, True
 
@@ -975,11 +1428,65 @@ class ChatService:
         tenant_id: str,
         message: str,
         sources: list[SourceReference],
+        short_memory: Conversation,
+        on_delta: AnswerDeltaCallback | None = None,
     ) -> str | None:
         config, api_key = await self._llm_config.get(tenant_id=tenant_id)
-        if not config.enabled or not sources:
+        if not config.enabled:
             return None
-        context_blocks = [f"{item.title}: {item.snippet}" for item in sources]
+        context_blocks = self._conversation_context_blocks(short_memory)
+        if not sources:
+            # 空召回兜底：给 LLM 一段说明，让它给开放回答 + 引导上传文档
+            context_blocks.append(
+                "[空召回提示]\n"
+                "未在已发布知识库中检索到与该问题直接相关的资料。\n"
+                "请按以下要求回答：\n"
+                "1. 先用一句话坦诚说明\"目前知识库未收录直接相关资料\"。\n"
+                "2. 基于通用专业经验给出 3-5 条可参考的方向或建议。\n"
+                "3. 结尾用一句话引导用户：\"如需更精准的答案，请在「设置 → 知识库」中上传相关文档。\""
+            )
+            if on_delta is not None:
+                try:
+                    return await self._stream_llm_answer(
+                        config=config,
+                        api_key=api_key,
+                        user_message=message,
+                        context_blocks=context_blocks,
+                        on_delta=on_delta,
+                    )
+                except (AttributeError, NotImplementedError):
+                    pass
+            try:
+                return self._llm_client.complete(
+                    config=config,
+                    api_key=api_key,
+                    user_message=message,
+                    context_blocks=context_blocks,
+                )
+            except Exception:
+                return None
+        for index, item in enumerate(sources, start=1):
+            parts = [
+                f"[{index}] 文档《{item.title}》",
+                f"来源ID: {item.source_id or item.id}",
+            ]
+            if item.locator:
+                parts.append(f"章节: {item.locator}")
+            # 优先使用完整 chunk 正文；snippet 仅做兜底（旧数据 / Wiki 路径）。
+            body = (item.content or item.snippet or "").strip()
+            parts.append("正文:\n" + body)
+            context_blocks.append("\n".join(parts))
+        if on_delta is not None:
+            try:
+                return await self._stream_llm_answer(
+                    config=config,
+                    api_key=api_key,
+                    user_message=message,
+                    context_blocks=context_blocks,
+                    on_delta=on_delta,
+                )
+            except (AttributeError, NotImplementedError):
+                pass
         return self._llm_client.complete(
             config=config,
             api_key=api_key,
@@ -993,11 +1500,14 @@ class ChatService:
         tenant_id: str,
         message: str,
         sources: list[SourceReference],
+        short_memory: Conversation,
+        on_delta: AnswerDeltaCallback | None = None,
     ) -> str | None:
         config, api_key = await self._llm_config.get(tenant_id=tenant_id)
         if not config.enabled or not sources:
             return None
-        context_blocks = [
+        context_blocks = self._conversation_context_blocks(short_memory)
+        context_blocks.extend([
             "\n".join(
                 part
                 for part in (
@@ -1009,13 +1519,58 @@ class ChatService:
                 if part
             )
             for item in sources
-        ]
+        ])
+        if on_delta is not None:
+            try:
+                return await self._stream_llm_answer(
+                    config=config,
+                    api_key=api_key,
+                    user_message=message,
+                    context_blocks=context_blocks,
+                    on_delta=on_delta,
+                )
+            except (AttributeError, NotImplementedError):
+                pass
         return self._llm_client.complete(
             config=config,
             api_key=api_key,
             user_message=message,
             context_blocks=context_blocks,
         )
+
+    async def _stream_llm_answer(
+        self,
+        *,
+        config: LLMRuntimeConfig,
+        api_key: str,
+        user_message: str,
+        context_blocks: list[str],
+        on_delta: AnswerDeltaCallback,
+    ) -> str:
+        stream = self._llm_client.stream_complete(
+            config=config,
+            api_key=api_key,
+            user_message=user_message,
+            context_blocks=context_blocks,
+        )
+        answer_parts: list[str] = []
+        while True:
+            chunk = await asyncio.to_thread(self._next_chunk, stream)
+            if chunk is None:
+                break
+            answer_parts.append(chunk)
+            await on_delta(chunk)
+        answer = "".join(answer_parts)
+        if not answer:
+            raise ValueError("LLM response content is empty")
+        return answer
+
+    @staticmethod
+    def _next_chunk(stream) -> str | None:
+        try:
+            return next(stream)
+        except StopIteration:
+            return None
 
     @staticmethod
     def _serialize_draft(draft: DraftAction) -> dict[str, object]:

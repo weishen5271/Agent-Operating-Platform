@@ -24,14 +24,14 @@ def create_real_source(*, knowledge_base_code: str | None = None, name: str = "�
         "/api/v1/admin/knowledge-bases",
         json={
           "knowledge_base_code": resolved_knowledge_base_code,
-          "name": f"{name}知识库",
+          "name": f"{name}知识库-{resolved_knowledge_base_code}",
           "description": "测试期间动态创建的真实知识库。",
         },
     )
     assert create_kb_response.status_code == 200
 
     ingest_response = client.post(
-        "/api/v1/admin/knowledge/ingest",
+        "/api/v1/admin/wiki/sources/ingest",
         json={
             "knowledge_base_code": resolved_knowledge_base_code,
             "name": name,
@@ -135,7 +135,7 @@ def test_knowledge_base_crud_and_filtered_sources() -> None:
         "/api/v1/admin/knowledge-bases",
         json={
             "knowledge_base_code": knowledge_base_code,
-            "name": "运维知识库",
+            "name": f"运维知识库-{knowledge_base_code}",
             "description": "用于验证知识库隔离与 CRUD。",
         },
     )
@@ -158,3 +158,11 @@ def test_knowledge_base_crud_and_filtered_sources() -> None:
     list_response = client.get(f"/api/v1/admin/knowledge?knowledge_base_code={knowledge_base_code}")
     assert list_response.status_code == 200
     assert any(item["knowledge_base_code"] == knowledge_base_code for item in list_response.json()["sources"])
+
+    delete_response = client.delete(f"/api/v1/admin/knowledge-bases/{knowledge_base_code}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] is True
+
+    deleted_source_response = client.get(f"/api/v1/admin/knowledge?knowledge_base_code={knowledge_base_code}")
+    assert deleted_source_response.status_code == 200
+    assert deleted_source_response.json()["sources"] == []

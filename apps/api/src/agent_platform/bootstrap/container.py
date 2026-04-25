@@ -1,4 +1,5 @@
 from agent_platform.infrastructure.db import db_runtime
+from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 from agent_platform.infrastructure.repositories import (
     PostgresConversationRepository,
@@ -20,6 +21,7 @@ from agent_platform.wiki.repository import PostgresWikiRepository
 
 llm_config_repository = PostgresLLMConfigRepository(db_runtime)
 llm_client = OpenAICompatibleLLMClient()
+embedding_client = OpenAICompatibleEmbeddingClient()
 capability_registry = CapabilityRegistry()
 security_repository = PostgresSecurityRepository(db_runtime)
 conversation_repository = PostgresConversationRepository(db_runtime)
@@ -27,9 +29,21 @@ trace_repository = PostgresTraceRepository(db_runtime)
 tenant_repository = PostgresTenantRepository(db_runtime)
 user_repository = PostgresUserRepository(db_runtime)
 draft_repository = PostgresDraftRepository(db_runtime)
-knowledge_repository = PostgresKnowledgeRepository(db_runtime)
-knowledge_base_repository = PostgresKnowledgeBaseRepository(db_runtime)
-wiki_repository = PostgresWikiRepository(db_runtime)
+knowledge_repository = PostgresKnowledgeRepository(
+    db_runtime,
+    llm_config=llm_config_repository,
+    embedding_client=embedding_client,
+)
+knowledge_base_repository = PostgresKnowledgeBaseRepository(
+    db_runtime,
+    llm_config=llm_config_repository,
+    embedding_client=embedding_client,
+)
+wiki_repository = PostgresWikiRepository(
+    db_runtime,
+    llm_config=llm_config_repository,
+    embedding_client=embedding_client,
+)
 wiki_service = WikiService(repository=wiki_repository, users=user_repository, knowledge_bases=knowledge_base_repository)
 
 chat_service = ChatService(

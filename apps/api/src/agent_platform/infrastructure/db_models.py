@@ -39,6 +39,7 @@ class ConversationRecord(Base):
 
     conversation_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     messages: Mapped[list["ConversationMessageRecord"]] = relationship(back_populates="conversation")
@@ -140,6 +141,8 @@ class KnowledgeChunkRecord(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="published", index=True)
+    embedding_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     document: Mapped["KnowledgeDocumentRecord"] = relationship(back_populates="chunks")
 
@@ -172,6 +175,8 @@ class KnowledgeWikiSourceChunkRecord(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="published", index=True)
+    embedding_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     document: Mapped["KnowledgeWikiSourceRecord"] = relationship(back_populates="chunks")
 
@@ -324,6 +329,12 @@ class LLMRuntimeConfigRecord(Base):
     temperature: Mapped[float] = mapped_column(nullable=False, default=0.2)
     system_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    embedding_provider: Mapped[str] = mapped_column(String(64), default="openai-compatible", nullable=False)
+    embedding_base_url: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    embedding_api_key: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=1536, nullable=False)
+    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 

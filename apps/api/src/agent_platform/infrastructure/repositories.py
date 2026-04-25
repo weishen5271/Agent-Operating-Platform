@@ -30,6 +30,7 @@ from agent_platform.domain.models import (
 )
 from agent_platform.infrastructure.auth import get_password_hash
 from agent_platform.infrastructure.db import DatabaseRuntime
+from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
 from agent_platform.infrastructure.db_models import (
     ApprovalRequestRecord,
     ConversationMessageRecord,
@@ -37,6 +38,14 @@ from agent_platform.infrastructure.db_models import (
     KnowledgeDocumentRecord,
     KnowledgeChunkRecord,
     KnowledgeBaseRecord,
+    KnowledgeWikiCitationRecord,
+    KnowledgeWikiCompileRunRecord,
+    KnowledgeWikiFeedbackRecord,
+    KnowledgeWikiLinkRecord,
+    KnowledgeWikiPageRecord,
+    KnowledgeWikiPageRevisionRecord,
+    KnowledgeWikiSourceChunkRecord,
+    KnowledgeWikiSourceRecord,
     LLMRuntimeConfigRecord,
     RequestTraceRecord,
     SecurityEventRecord,
@@ -58,13 +67,14 @@ DEFAULT_ADMIN_PASSWORD = "Aa111111"
 
 
 class ConversationRepository(Protocol):
-    async def list_recent(self, tenant_id: str, limit: int = 5) -> list[Conversation]: ...
+    async def list_recent(self, tenant_id: str, user_id: str, limit: int = 5) -> list[Conversation]: ...
 
-    async def get(self, tenant_id: str, conversation_id: str) -> Conversation | None: ...
+    async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None: ...
 
     async def append_message(
         self,
         tenant_id: str,
+        user_id: str,
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
@@ -149,6 +159,12 @@ class SecurityRepository(Protocol):
 class LLMConfigRepository(Protocol):
     async def get(self, tenant_id: str | None = None) -> tuple[LLMRuntimeConfig, str]: ...
 
+    async def get_embedding_credentials(
+        self, tenant_id: str | None = None
+    ) -> tuple[LLMRuntimeConfig, str]:
+        """与 ``get`` 类似，但返回 (config, embedding_api_key)。"""
+        ...
+
     async def update(
         self,
         tenant_id: str | None,
@@ -158,6 +174,12 @@ class LLMConfigRepository(Protocol):
         api_key: str,
         temperature: float,
         system_prompt: str,
+        embedding_provider: str | None = None,
+        embedding_base_url: str | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_dimensions: int | None = None,
+        embedding_enabled: bool | None = None,
     ) -> tuple[LLMRuntimeConfig, str]: ...
 
     async def create_or_update_for_tenant(
@@ -170,6 +192,12 @@ class LLMConfigRepository(Protocol):
         api_key: str,
         temperature: float,
         system_prompt: str,
+        embedding_provider: str | None = None,
+        embedding_base_url: str | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_dimensions: int | None = None,
+        embedding_enabled: bool | None = None,
     ) -> tuple[LLMRuntimeConfig, str]: ...
 
 
@@ -179,7 +207,11 @@ def _conversation_from_record(record: ConversationRecord) -> Conversation:
         conversation_id=record.conversation_id,
         title=record.title,
         tenant_id=record.tenant_id,
-        messages=[ConversationMessage(role=item.role, content=item.content) for item in ordered_messages],
+        user_id=record.user_id,
+        messages=[
+            ConversationMessage(role=item.role, content=item.content, created_at=item.created_at)
+            for item in ordered_messages
+        ],
         updated_at=record.updated_at,
     )
 
@@ -299,40 +331,51 @@ def _runtime_from_record(record: LLMRuntimeConfigRecord) -> tuple[LLMRuntimeConf
             temperature=record.temperature,
             system_prompt=record.system_prompt,
             enabled=record.enabled,
+            embedding_provider=record.embedding_provider or "openai-compatible",
+            embedding_base_url=record.embedding_base_url or "",
+            embedding_model=record.embedding_model or "",
+            embedding_dimensions=record.embedding_dimensions or 1536,
+            embedding_api_key_configured=bool(record.embedding_api_key),
+            embedding_enabled=record.embedding_enabled and bool(record.embedding_api_key),
         ),
         record.api_key,
     )
+
+
+def _embedding_api_key_from_record(record: LLMRuntimeConfigRecord) -> str:
+    return record.embedding_api_key or ""
 
 
 class PostgresConversationRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:
         self._runtime = runtime
 
-    async def list_recent(self, tenant_id: str, limit: int = 5) -> list[Conversation]:
+    async def list_recent(self, tenant_id: str, user_id: str, limit: int = 5) -> list[Conversation]:
         async with self._runtime.session() as session:
             result = await session.execute(
                 select(ConversationRecord)
                 .options(selectinload(ConversationRecord.messages))
-                .where(ConversationRecord.tenant_id == tenant_id)
+                .where(ConversationRecord.tenant_id == tenant_id, ConversationRecord.user_id == user_id)
                 .order_by(desc(ConversationRecord.updated_at))
                 .limit(limit)
             )
             return [_conversation_from_record(item) for item in result.scalars().unique().all()]
 
-    async def get(self, tenant_id: str, conversation_id: str) -> Conversation | None:
+    async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None:
         async with self._runtime.session() as session:
             conversation = await session.get(
                 ConversationRecord,
                 conversation_id,
                 options=[selectinload(ConversationRecord.messages)],
             )
-            if conversation is None or conversation.tenant_id != tenant_id:
+            if conversation is None or conversation.tenant_id != tenant_id or conversation.user_id != user_id:
                 return None
             return _conversation_from_record(conversation)
 
     async def append_message(
         self,
         tenant_id: str,
+        user_id: str,
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
@@ -349,12 +392,15 @@ class PostgresConversationRepository:
                 conversation = ConversationRecord(
                     conversation_id=resolved_conversation_id,
                     tenant_id=tenant_id,
+                    user_id=user_id,
                     title=user_message[:24] or "新会话",
                     updated_at=now,
                 )
                 session.add(conversation)
                 await session.flush()
             else:
+                if conversation.tenant_id != tenant_id or conversation.user_id != user_id:
+                    raise ValueError("Conversation not found")
                 conversation.updated_at = now
 
             session.add_all(
@@ -680,8 +726,41 @@ class PostgresSecurityRepository:
 
 
 class PostgresKnowledgeRepository:
-    def __init__(self, runtime: DatabaseRuntime) -> None:
+    def __init__(
+        self,
+        runtime: DatabaseRuntime,
+        *,
+        llm_config: "LLMConfigRepository | None" = None,
+        embedding_client: "OpenAICompatibleEmbeddingClient | None" = None,
+    ) -> None:
         self._runtime = runtime
+        self._llm_config = llm_config
+        self._embedding_client = embedding_client
+
+    async def _embed_texts(
+        self, *, tenant_id: str | None, texts: list[str]
+    ) -> tuple[list[list[float]], str | None]:
+        """Return (vectors, model_name); empty vectors when embedding 未启用/未配置。
+
+        失败时降级为空向量，调用方应将 chunk 标记 pending 并继续走关键词路径。
+        """
+        if not texts:
+            return [], None
+        if self._llm_config is None or self._embedding_client is None:
+            return [[] for _ in texts], None
+        try:
+            config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
+        except Exception:
+            return [[] for _ in texts], None
+        if not config.embedding_enabled or not api_key:
+            return [[] for _ in texts], None
+        try:
+            vectors = self._embedding_client.embed(
+                config=config, api_key=api_key, texts=texts
+            )
+        except Exception:
+            return [[] for _ in texts], None
+        return vectors, config.embedding_model
 
     async def list_recent(self, tenant_id: str, knowledge_base_code: str | None = None) -> list[KnowledgeSource]:
         async with self._runtime.session() as session:
@@ -729,9 +808,19 @@ class PostgresKnowledgeRepository:
         owner: str,
         knowledge_base_code: str,
     ) -> KnowledgeSource:
-        chunks = chunk_text(content)
-        if not chunks:
+        chunked = chunk_text(content)
+        if not chunked:
             raise ValueError("Knowledge content is empty after parsing")
+
+        # 兼容旧版（list[str]）与新版（list[ChunkPiece]）；后者带标题路径。
+        normalized = [
+            piece if isinstance(piece, dict) else {"content": piece, "parents": [], "locator": ""}
+            for piece in chunked
+        ]
+        contents = [item["content"] for item in normalized]
+
+        vectors, embedding_model = await self._embed_texts(tenant_id=tenant_id, texts=contents)
+        embedding_status = "ready" if any(vec for vec in vectors) else "pending"
 
         source_id = f"ks-{uuid4().hex[:12]}"
         async with self._runtime.session() as session:
@@ -742,11 +831,18 @@ class PostgresKnowledgeRepository:
                 name=name,
                 source_type=source_type,
                 owner=owner,
-                chunk_count=len(chunks),
+                chunk_count=len(contents),
                 status="运行中",
             )
             session.add(document)
-            for index, chunk in enumerate(chunks):
+            for index, item in enumerate(normalized):
+                vec = vectors[index] if index < len(vectors) else []
+                metadata_payload = {
+                    "version": "v1",
+                    "classification": "internal",
+                    "locator": item.get("locator") or f"chunk:{index + 1}",
+                    "parents": item.get("parents") or [],
+                }
                 session.add(
                     KnowledgeChunkRecord(
                         chunk_id=f"kc-{uuid4().hex[:12]}",
@@ -754,26 +850,112 @@ class PostgresKnowledgeRepository:
                         tenant_id=tenant_id,
                         chunk_index=index,
                         title=name,
-                        content=chunk,
-                        content_hash=content_hash(chunk),
-                        embedding=embed_text(chunk),
-                        metadata_json={
-                            "version": "v1",
-                            "classification": "internal",
-                            "locator": f"chunk:{index + 1}",
-                        },
-                        token_count=len(tokenize(chunk)),
+                        content=item["content"],
+                        content_hash=content_hash(item["content"]),
+                        embedding=vec or [],
+                        metadata_json=metadata_payload,
+                        token_count=len(tokenize(item["content"])),
                         status="published",
+                        embedding_status="ready" if vec else "pending",
+                        embedding_model=embedding_model or "",
                     )
                 )
             await session.commit()
             await session.refresh(document)
+            _ = embedding_status  # 保留以便日后写入 trace
             return _knowledge_from_record(document)
+
+    async def reembed_pending(
+        self,
+        *,
+        tenant_id: str,
+        batch_size: int = 32,
+        limit: int | None = None,
+    ) -> dict[str, int]:
+        """回填 status='pending' 的 chunk embedding。
+
+        - 仅当 embedding 已启用且 client 配置就绪时才执行真实调用；
+        - 失败 chunk 保持 pending 不动，已成功的标记 ready 并写入 model 名。
+        """
+        async with self._runtime.session() as session:
+            stmt = (
+                select(KnowledgeChunkRecord)
+                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
+                .where(KnowledgeChunkRecord.embedding_status == "pending")
+                .order_by(KnowledgeChunkRecord.chunk_index)
+            )
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            pending_records = list(result.scalars().all())
+
+        total = len(pending_records)
+        updated = 0
+        failed = 0
+        if total == 0:
+            return {"total": 0, "updated": 0, "failed": 0}
+
+        for start in range(0, total, batch_size):
+            batch = pending_records[start : start + batch_size]
+            texts = [record.content for record in batch]
+            vectors, embedding_model = await self._embed_texts(tenant_id=tenant_id, texts=texts)
+            if not any(vec for vec in vectors):
+                failed += len(batch)
+                continue
+            chunk_ids = [record.chunk_id for record in batch]
+            async with self._runtime.session() as session:
+                refresh = await session.execute(
+                    select(KnowledgeChunkRecord).where(
+                        KnowledgeChunkRecord.chunk_id.in_(chunk_ids)
+                    )
+                )
+                live_records = {item.chunk_id: item for item in refresh.scalars().all()}
+                for record, vec in zip(batch, vectors, strict=True):
+                    live = live_records.get(record.chunk_id)
+                    if live is None:
+                        continue
+                    if vec:
+                        live.embedding = vec
+                        live.embedding_status = "ready"
+                        live.embedding_model = embedding_model or live.embedding_model
+                        updated += 1
+                    else:
+                        failed += 1
+                await session.commit()
+        return {"total": total, "updated": updated, "failed": failed}
 
 
 class PostgresKnowledgeBaseRepository:
-    def __init__(self, runtime: DatabaseRuntime) -> None:
+    def __init__(
+        self,
+        runtime: DatabaseRuntime,
+        *,
+        llm_config: "LLMConfigRepository | None" = None,
+        embedding_client: "OpenAICompatibleEmbeddingClient | None" = None,
+    ) -> None:
         self._runtime = runtime
+        self._llm_config = llm_config
+        self._embedding_client = embedding_client
+
+    async def _embed_query(self, *, tenant_id: str | None, query: str) -> list[float]:
+        """Embed query via real provider when 启用; 否则回退 hash embedding。"""
+        if not query:
+            return []
+        if self._llm_config is None or self._embedding_client is None:
+            return embed_text(query)
+        try:
+            config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
+        except Exception:
+            return embed_text(query)
+        if not config.embedding_enabled or not api_key:
+            return embed_text(query)
+        try:
+            vectors = self._embedding_client.embed(
+                config=config, api_key=api_key, texts=[query]
+            )
+        except Exception:
+            return embed_text(query)
+        return vectors[0] if vectors else embed_text(query)
 
     async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]:
         async with self._runtime.session() as session:
@@ -817,13 +999,6 @@ class PostgresKnowledgeBaseRepository:
 
     async def delete(self, tenant_id: str, knowledge_base_code: str) -> bool:
         async with self._runtime.session() as session:
-            source_result = await session.execute(
-                select(KnowledgeDocumentRecord.source_id)
-                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
-                .where(KnowledgeDocumentRecord.knowledge_base_code == knowledge_base_code)
-            )
-            if source_result.scalars().first() is not None:
-                raise ValueError("Knowledge base still has sources")
             result = await session.execute(
                 select(KnowledgeBaseRecord)
                 .where(KnowledgeBaseRecord.tenant_id == tenant_id)
@@ -832,13 +1007,121 @@ class PostgresKnowledgeBaseRepository:
             record = result.scalar_one_or_none()
             if record is None:
                 return False
+
+            source_result = await session.execute(
+                select(KnowledgeDocumentRecord.source_id)
+                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
+                .where(KnowledgeDocumentRecord.knowledge_base_code == knowledge_base_code)
+            )
+            rag_source_ids = list(source_result.scalars().all())
+
+            wiki_source_result = await session.execute(
+                select(KnowledgeWikiSourceRecord.source_id)
+                .where(KnowledgeWikiSourceRecord.tenant_id == tenant_id)
+                .where(KnowledgeWikiSourceRecord.knowledge_base_code == knowledge_base_code)
+            )
+            wiki_source_ids = list(wiki_source_result.scalars().all())
+
+            page_result = await session.execute(
+                select(KnowledgeWikiPageRecord.page_id)
+                .where(KnowledgeWikiPageRecord.tenant_id == tenant_id)
+                .where(KnowledgeWikiPageRecord.space_code == knowledge_base_code)
+            )
+            page_ids = list(page_result.scalars().all())
+            page_id_set = set(page_ids)
+            wiki_source_id_set = set(wiki_source_ids)
+
+            if page_ids or wiki_source_ids:
+                compile_run_result = await session.execute(
+                    select(KnowledgeWikiCompileRunRecord)
+                    .where(KnowledgeWikiCompileRunRecord.tenant_id == tenant_id)
+                )
+                compile_runs_to_delete = [
+                    item
+                    for item in compile_run_result.scalars().all()
+                    if wiki_source_id_set.intersection(item.input_source_ids)
+                    or page_id_set.intersection(item.affected_page_ids)
+                ]
+
+                feedback_result = await session.execute(
+                    select(KnowledgeWikiFeedbackRecord)
+                    .where(KnowledgeWikiFeedbackRecord.tenant_id == tenant_id)
+                )
+                feedbacks_to_delete = [
+                    item for item in feedback_result.scalars().all() if page_id_set.intersection(item.page_ids)
+                ]
+
+                citation_stmt = delete(KnowledgeWikiCitationRecord).where(
+                    KnowledgeWikiCitationRecord.tenant_id == tenant_id
+                )
+                if page_ids and wiki_source_ids:
+                    citation_stmt = citation_stmt.where(
+                        (KnowledgeWikiCitationRecord.page_id.in_(page_ids))
+                        | (KnowledgeWikiCitationRecord.source_id.in_(wiki_source_ids))
+                    )
+                elif page_ids:
+                    citation_stmt = citation_stmt.where(KnowledgeWikiCitationRecord.page_id.in_(page_ids))
+                else:
+                    citation_stmt = citation_stmt.where(KnowledgeWikiCitationRecord.source_id.in_(wiki_source_ids))
+                await session.execute(citation_stmt)
+
+                if page_ids:
+                    await session.execute(
+                        delete(KnowledgeWikiLinkRecord)
+                        .where(KnowledgeWikiLinkRecord.tenant_id == tenant_id)
+                        .where(
+                            (KnowledgeWikiLinkRecord.from_page_id.in_(page_ids))
+                            | (KnowledgeWikiLinkRecord.to_page_id.in_(page_ids))
+                        )
+                    )
+                    await session.execute(
+                        delete(KnowledgeWikiPageRevisionRecord)
+                        .where(KnowledgeWikiPageRevisionRecord.tenant_id == tenant_id)
+                        .where(KnowledgeWikiPageRevisionRecord.page_id.in_(page_ids))
+                    )
+                    await session.execute(
+                        delete(KnowledgeWikiPageRecord)
+                        .where(KnowledgeWikiPageRecord.tenant_id == tenant_id)
+                        .where(KnowledgeWikiPageRecord.page_id.in_(page_ids))
+                    )
+
+                for feedback in feedbacks_to_delete:
+                    await session.delete(feedback)
+
+                for compile_run in compile_runs_to_delete:
+                    await session.delete(compile_run)
+
+            if wiki_source_ids:
+                await session.execute(
+                    delete(KnowledgeWikiSourceChunkRecord)
+                    .where(KnowledgeWikiSourceChunkRecord.tenant_id == tenant_id)
+                    .where(KnowledgeWikiSourceChunkRecord.source_id.in_(wiki_source_ids))
+                )
+                await session.execute(
+                    delete(KnowledgeWikiSourceRecord)
+                    .where(KnowledgeWikiSourceRecord.tenant_id == tenant_id)
+                    .where(KnowledgeWikiSourceRecord.source_id.in_(wiki_source_ids))
+                )
+
+            if rag_source_ids:
+                await session.execute(
+                    delete(KnowledgeChunkRecord)
+                    .where(KnowledgeChunkRecord.tenant_id == tenant_id)
+                    .where(KnowledgeChunkRecord.source_id.in_(rag_source_ids))
+                )
+                await session.execute(
+                    delete(KnowledgeDocumentRecord)
+                    .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
+                    .where(KnowledgeDocumentRecord.source_id.in_(rag_source_ids))
+                )
+
             await session.delete(record)
             await session.commit()
             return True
 
     async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
         terms = tokenize(query)
-        query_vector = embed_text(query)
+        query_vector = await self._embed_query(tenant_id=tenant_id, query=query)
         async with self._runtime.session() as session:
             result = await session.execute(
                 select(KnowledgeChunkRecord, KnowledgeDocumentRecord)
@@ -919,11 +1202,21 @@ class PostgresKnowledgeBaseRepository:
         terms: list[str],
     ) -> SourceReference:
         snippet = PostgresKnowledgeRepository._build_snippet(chunk.content, query=query, terms=terms)
+        metadata = chunk.metadata_json or {}
+        parents = metadata.get("parents") or []
+        if parents:
+            locator = " / ".join([document.name, *parents])
+        else:
+            locator = metadata.get("locator") or f"chunk:{chunk.chunk_index + 1}"
         return SourceReference(
             id=chunk.chunk_id,
             title=document.name,
             snippet=snippet,
             source_type="knowledge",
+            source_id=chunk.source_id,
+            chunk_id=chunk.chunk_id,
+            locator=locator,
+            content=chunk.content,
         )
 
     @staticmethod
@@ -964,6 +1257,30 @@ class PostgresLLMConfigRepository:
                 raise RuntimeError("LLM runtime config is not initialized")
             return _runtime_from_record(record)
 
+    async def get_embedding_credentials(
+        self, tenant_id: str | None = None
+    ) -> tuple[LLMRuntimeConfig, str]:
+        async with self._runtime.session() as session:
+            record = await self._resolve_record(session, tenant_id)
+            if record is None:
+                raise RuntimeError("LLM runtime config is not initialized")
+            config, _ = _runtime_from_record(record)
+            return config, _embedding_api_key_from_record(record)
+
+    @staticmethod
+    async def _resolve_record(session, tenant_id: str | None):
+        if tenant_id:
+            result = await session.execute(
+                select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.tenant_id == tenant_id)
+            )
+            record = result.scalar_one_or_none()
+            if record is not None:
+                return record
+        result = await session.execute(
+            select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.config_key == "default")
+        )
+        return result.scalar_one_or_none()
+
     async def update(
         self,
         tenant_id: str | None,
@@ -973,23 +1290,15 @@ class PostgresLLMConfigRepository:
         api_key: str,
         temperature: float,
         system_prompt: str,
+        embedding_provider: str | None = None,
+        embedding_base_url: str | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_dimensions: int | None = None,
+        embedding_enabled: bool | None = None,
     ) -> tuple[LLMRuntimeConfig, str]:
         async with self._runtime.session() as session:
-            if tenant_id:
-                result = await session.execute(
-                    select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.tenant_id == tenant_id)
-                )
-                record = result.scalar_one_or_none()
-                if record is None:
-                    result = await session.execute(
-                        select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.config_key == "default")
-                    )
-                    record = result.scalar_one_or_none()
-            else:
-                result = await session.execute(
-                    select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.config_key == "default")
-                )
-                record = result.scalar_one_or_none()
+            record = await self._resolve_record(session, tenant_id)
             if record is None:
                 raise RuntimeError("LLM runtime config is not initialized")
             record.base_url = base_url
@@ -999,9 +1308,49 @@ class PostgresLLMConfigRepository:
             record.temperature = temperature
             record.system_prompt = system_prompt
             record.enabled = bool(base_url and model and record.api_key)
+            self._apply_embedding_fields(
+                record,
+                embedding_provider=embedding_provider,
+                embedding_base_url=embedding_base_url,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+                embedding_dimensions=embedding_dimensions,
+                embedding_enabled=embedding_enabled,
+            )
             await session.commit()
             await session.refresh(record)
             return _runtime_from_record(record)
+
+    @staticmethod
+    def _apply_embedding_fields(
+        record: LLMRuntimeConfigRecord,
+        *,
+        embedding_provider: str | None,
+        embedding_base_url: str | None,
+        embedding_model: str | None,
+        embedding_api_key: str | None,
+        embedding_dimensions: int | None,
+        embedding_enabled: bool | None,
+    ) -> None:
+        if embedding_provider is not None:
+            record.embedding_provider = embedding_provider or "openai-compatible"
+        if embedding_base_url is not None:
+            record.embedding_base_url = embedding_base_url
+        if embedding_model is not None:
+            record.embedding_model = embedding_model
+        if embedding_api_key:
+            record.embedding_api_key = embedding_api_key
+        if embedding_dimensions is not None and embedding_dimensions > 0:
+            record.embedding_dimensions = embedding_dimensions
+        # 自动启用规则：若调用方未显式指定，但三要素齐备则启用；显式 False 则禁用。
+        if embedding_enabled is None:
+            record.embedding_enabled = bool(
+                record.embedding_base_url
+                and record.embedding_model
+                and record.embedding_api_key
+            )
+        else:
+            record.embedding_enabled = bool(embedding_enabled) and bool(record.embedding_api_key)
 
     async def create_or_update_for_tenant(
         self,
@@ -1013,6 +1362,12 @@ class PostgresLLMConfigRepository:
         api_key: str,
         temperature: float,
         system_prompt: str,
+        embedding_provider: str | None = None,
+        embedding_base_url: str | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_dimensions: int | None = None,
+        embedding_enabled: bool | None = None,
     ) -> tuple[LLMRuntimeConfig, str]:
         async with self._runtime.session() as session:
             if tenant_id:
@@ -1026,12 +1381,17 @@ class PostgresLLMConfigRepository:
             record = result.scalar_one_or_none()
             if record is None:
                 effective_api_key = api_key
-                if tenant_id and not effective_api_key:
+                effective_embedding_api_key = embedding_api_key or ""
+                if tenant_id and (not effective_api_key or not effective_embedding_api_key):
                     result = await session.execute(
                         select(LLMRuntimeConfigRecord).where(LLMRuntimeConfigRecord.config_key == "default")
                     )
                     default_record = result.scalar_one_or_none()
-                    effective_api_key = default_record.api_key if default_record else ""
+                    if default_record is not None:
+                        effective_api_key = effective_api_key or default_record.api_key
+                        effective_embedding_api_key = (
+                            effective_embedding_api_key or default_record.embedding_api_key
+                        )
                 config_key = f"tenant-{tenant_id}" if tenant_id else "default"
                 record = LLMRuntimeConfigRecord(
                     config_key=config_key,
@@ -1043,6 +1403,17 @@ class PostgresLLMConfigRepository:
                     temperature=temperature,
                     system_prompt=system_prompt,
                     enabled=bool(base_url and model and effective_api_key),
+                    embedding_provider=embedding_provider or "openai-compatible",
+                    embedding_base_url=embedding_base_url or "",
+                    embedding_model=embedding_model or "",
+                    embedding_api_key=effective_embedding_api_key,
+                    embedding_dimensions=embedding_dimensions or 1536,
+                    embedding_enabled=bool(
+                        (embedding_enabled if embedding_enabled is not None else True)
+                        and embedding_base_url
+                        and embedding_model
+                        and effective_embedding_api_key
+                    ),
                 )
                 session.add(record)
             else:
@@ -1054,12 +1425,26 @@ class PostgresLLMConfigRepository:
                 record.temperature = temperature
                 record.system_prompt = system_prompt
                 record.enabled = bool(base_url and model and record.api_key)
+                self._apply_embedding_fields(
+                    record,
+                    embedding_provider=embedding_provider,
+                    embedding_base_url=embedding_base_url,
+                    embedding_model=embedding_model,
+                    embedding_api_key=embedding_api_key,
+                    embedding_dimensions=embedding_dimensions,
+                    embedding_enabled=embedding_enabled,
+                )
             await session.commit()
             await session.refresh(record)
             return _runtime_from_record(record)
 
 
 async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
+    """Initialize only runtime essentials.
+
+    Do not create or mutate knowledge-base data here; knowledge bases and
+    sources must come from explicit admin actions or migrations.
+    """
     async with runtime.session() as session:
         tenant_result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == DEFAULT_TENANT_ID))
         if tenant_result.scalar_one_or_none() is None:
@@ -1125,11 +1510,6 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
                     owner="权限治理组",
                 )
             )
-
-        source_records = (await session.execute(select(KnowledgeDocumentRecord))).scalars().all()
-        for record in source_records:
-            if not getattr(record, "knowledge_base_code", None):
-                record.knowledge_base_code = "knowledge"
 
         if await session.get(LLMRuntimeConfigRecord, "default") is None:
             session.add(

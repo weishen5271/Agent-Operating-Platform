@@ -13,6 +13,9 @@ import type {
   AdminWikiSearchResponse,
   AuthResponse,
   ChatCompletionResponse,
+  ChatStreamEvent,
+  ConversationListResponse,
+  ConversationResponse,
   DraftActionResponse,
   HomeSnapshot,
   LLMRuntimeConfig,
@@ -152,23 +155,11 @@ function withAuthContext(path: string): string {
   return url.toString();
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const requiresBrowserAuth =
-    path.startsWith("/admin") || path.startsWith("/workspace") || path.startsWith("/chat/actions");
-  if (typeof window === "undefined" && requiresBrowserAuth) {
-    throw new Error("Authenticated requests require browser context.");
-  }
-
-  const target = path.startsWith("/admin") || path.startsWith("/workspace") || path.startsWith("/chat/actions")
-    ? withAuthContext(path)
-    : `${API_BASE_URL}${path}`;
-
+function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(init?.headers as Record<string, string> ?? {}),
+    ...(extra ?? {}),
   };
 
-  // Add auth token if available
   if (typeof window !== "undefined") {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
     if (token) {
@@ -180,6 +171,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers["Authorization"] = `Bearer ${token}`;
     }
   }
+
+  return headers;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const requiresBrowserAuth =
+    path.startsWith("/admin") ||
+    path.startsWith("/workspace") ||
+    path.startsWith("/chat/actions") ||
+    path.startsWith("/chat/conversations") ||
+    path.startsWith("/chat/traces");
+  if (typeof window === "undefined" && requiresBrowserAuth) {
+    throw new Error("Authenticated requests require browser context.");
+  }
+
+  const target =
+    path.startsWith("/admin") ||
+    path.startsWith("/workspace") ||
+    path.startsWith("/chat/actions") ||
+    path.startsWith("/chat/conversations") ||
+    path.startsWith("/chat/traces")
+      ? withAuthContext(path)
+      : `${API_BASE_URL}${path}`;
+
+  const headers = buildAuthHeaders({
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> ?? {}),
+  });
 
   const response = await fetch(target, {
     ...init,
@@ -229,6 +248,67 @@ export function createChatCompletion(
   });
 }
 
+export function getChatConversations(): Promise<ConversationListResponse> {
+  return request<ConversationListResponse>("/chat/conversations");
+}
+
+export function getChatConversation(conversationId: string): Promise<ConversationResponse> {
+  return request<ConversationResponse>(`/chat/conversations/${encodeURIComponent(conversationId)}`);
+}
+
+export async function streamChatCompletion(
+  message: string,
+  retrievalMode: "auto" | "rag" | "wiki",
+  onEvent: (event: ChatStreamEvent) => void,
+  conversationId?: string,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/chat/completions/stream`, {
+    method: "POST",
+    headers: buildAuthHeaders({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    }),
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId,
+      retrieval_mode: retrievalMode,
+    }),
+    cache: "no-store",
+  });
+
+  if (!response.ok || !response.body) {
+    const detail = await response.text();
+    if (response.status === 401) {
+      clearStoredAuth();
+      redirectToLogin();
+      throw new Error(AUTH_EXPIRED_MESSAGE);
+    }
+    throw new Error(detail || `API request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+
+    for (const block of blocks) {
+      const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
+      if (!dataLine) continue;
+      const event = JSON.parse(dataLine.slice(6)) as ChatStreamEvent;
+      onEvent(event);
+      if (event.event === "error") {
+        throw new Error(event.message);
+      }
+    }
+  }
+}
+
 export function getTrace(traceId: string): Promise<TraceResponse> {
   return request<TraceResponse>(`/chat/traces/${traceId}`);
 }
@@ -273,14 +353,14 @@ export function updateKnowledgeBase(
   knowledgeBaseCode: string,
   payload: { name: string; description: string; status: string },
 ): Promise<AdminKnowledgeBasesResponse["items"][number]> {
-  return request<AdminKnowledgeBasesResponse["items"][number]>(`/admin/knowledge-bases/${knowledgeBaseCode}`, {
+  return request<AdminKnowledgeBasesResponse["items"][number]>(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseCode)}`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
 }
 
 export function deleteKnowledgeBase(knowledgeBaseCode: string): Promise<{ deleted: boolean }> {
-  return request<{ deleted: boolean }>(`/admin/knowledge-bases/${knowledgeBaseCode}`, {
+  return request<{ deleted: boolean }>(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseCode)}`, {
     method: "DELETE",
   });
 }
@@ -429,6 +509,12 @@ export function updateLLMRuntime(payload: {
   api_key: string;
   temperature: number;
   system_prompt: string;
+  embedding_provider?: string | null;
+  embedding_base_url?: string | null;
+  embedding_model?: string | null;
+  embedding_api_key?: string | null;
+  embedding_dimensions?: number | null;
+  embedding_enabled?: boolean | null;
 }): Promise<LLMRuntimeConfig> {
   return request<LLMRuntimeConfig>("/admin/llm-runtime", {
     method: "POST",
