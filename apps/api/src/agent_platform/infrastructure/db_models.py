@@ -11,7 +11,8 @@ from agent_platform.infrastructure.db import Base
 class TenantRecord(Base):
     __tablename__ = "tenant"
 
-    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     package: Mapped[str] = mapped_column(String(255), nullable=False)
     environment: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -23,7 +24,8 @@ class TenantRecord(Base):
 class UserAccountRecord(Base):
     __tablename__ = "user_account"
 
-    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -261,7 +263,8 @@ class KnowledgeWikiFeedbackRecord(Base):
 class KnowledgeBaseRecord(Base):
     __tablename__ = "knowledge_base"
 
-    knowledge_base_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    knowledge_base_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")

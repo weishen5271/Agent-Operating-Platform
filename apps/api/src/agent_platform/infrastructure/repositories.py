@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from sqlalchemy import delete, desc, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from agent_platform.bootstrap.settings import settings
@@ -14,7 +15,9 @@ from agent_platform.domain.models import (
     ConversationMessage,
     DraftAction,
     KnowledgeBase,
+    KnowledgeChunk,
     KnowledgeSource,
+    KnowledgeSourceDetail,
     KnowledgeSearchResult,
     LLMRuntimeConfig,
     SecurityEvent,
@@ -25,6 +28,7 @@ from agent_platform.domain.models import (
     UserContext,
     utc_now,
 )
+from agent_platform.infrastructure.auth import get_password_hash
 from agent_platform.infrastructure.db import DatabaseRuntime
 from agent_platform.infrastructure.db_models import (
     ApprovalRequestRecord,
@@ -41,6 +45,16 @@ from agent_platform.infrastructure.db_models import (
     UserAccountRecord,
 )
 from agent_platform.retrieval.text import chunk_text, content_hash, cosine_similarity, embed_text, tokenize
+
+
+DEFAULT_TENANT_ID = "sw"
+DEFAULT_TENANT_NAME = "SW 默认租户"
+DEFAULT_TENANT_PACKAGE = "通用业务包"
+DEFAULT_TENANT_ENVIRONMENT = "生产"
+DEFAULT_TENANT_BUDGET = "¥ 0"
+DEFAULT_ADMIN_USER_ID = "admin"
+DEFAULT_ADMIN_EMAIL = "admin@sw.com"
+DEFAULT_ADMIN_PASSWORD = "Aa111111"
 
 
 class ConversationRepository(Protocol):
@@ -67,6 +81,8 @@ class TraceRepository(Protocol):
 
 class KnowledgeRepository(Protocol):
     async def list_recent(self, tenant_id: str, knowledge_base_code: str | None = None) -> list[KnowledgeSource]: ...
+
+    async def get_detail(self, tenant_id: str, source_id: str) -> KnowledgeSourceDetail | None: ...
 
     async def ingest_text(
         self,
@@ -242,8 +258,25 @@ def _knowledge_from_record(record: KnowledgeDocumentRecord) -> KnowledgeSource:
     )
 
 
+def _knowledge_chunk_from_record(record: KnowledgeChunkRecord) -> KnowledgeChunk:
+    return KnowledgeChunk(
+        chunk_id=record.chunk_id,
+        source_id=record.source_id,
+        tenant_id=record.tenant_id,
+        chunk_index=record.chunk_index,
+        title=record.title,
+        content=record.content,
+        content_hash=record.content_hash,
+        metadata_json=dict(record.metadata_json),
+        token_count=record.token_count,
+        status=record.status,
+        created_at=record.created_at,
+    )
+
+
 def _knowledge_base_from_record(record: KnowledgeBaseRecord) -> KnowledgeBase:
     return KnowledgeBase(
+        knowledge_base_id=record.knowledge_base_id,
         knowledge_base_code=record.knowledge_base_code,
         tenant_id=record.tenant_id,
         name=record.name,
@@ -404,7 +437,8 @@ class PostgresTenantRepository:
 
     async def get(self, tenant_id: str) -> TenantProfile | None:
         async with self._runtime.session() as session:
-            record = await session.get(TenantRecord, tenant_id)
+            result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == tenant_id))
+            record = result.scalar_one_or_none()
             if record is None:
                 return None
             return TenantProfile(
@@ -434,6 +468,7 @@ class PostgresTenantRepository:
     async def create(self, tenant: TenantProfile) -> TenantProfile:
         async with self._runtime.session() as session:
             record = TenantRecord(
+                tenant_record_id=f"tn-{uuid4().hex[:12]}",
                 tenant_id=tenant.tenant_id,
                 name=tenant.name,
                 package=tenant.package,
@@ -442,12 +477,17 @@ class PostgresTenantRepository:
                 active=tenant.active,
             )
             session.add(record)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError("租户名称或租户 ID 已存在，请更换后重试") from exc
             return tenant
 
     async def update(self, tenant: TenantProfile) -> TenantProfile:
         async with self._runtime.session() as session:
-            record = await session.get(TenantRecord, tenant.tenant_id)
+            result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == tenant.tenant_id))
+            record = result.scalar_one_or_none()
             if record is None:
                 raise ValueError(f"Tenant {tenant.tenant_id} not found")
             record.name = tenant.name
@@ -468,7 +508,8 @@ class PostgresTenantRepository:
 
     async def delete(self, tenant_id: str) -> bool:
         async with self._runtime.session() as session:
-            record = await session.get(TenantRecord, tenant_id)
+            result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == tenant_id))
+            record = result.scalar_one_or_none()
             if record is None:
                 return False
             await session.delete(record)
@@ -482,7 +523,8 @@ class PostgresUserRepository:
 
     async def get(self, tenant_id: str, user_id: str) -> UserContext | None:
         async with self._runtime.session() as session:
-            record = await session.get(UserAccountRecord, user_id)
+            result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == user_id))
+            record = result.scalar_one_or_none()
             if record is None or record.tenant_id != tenant_id:
                 return None
             return UserContext(
@@ -523,6 +565,7 @@ class PostgresUserRepository:
                     tenant_id=item.tenant_id,
                     role=item.role,
                     scopes=list(item.scopes),
+                    email=item.email,
                 )
                 for item in result.scalars().all()
             ]
@@ -530,6 +573,7 @@ class PostgresUserRepository:
     async def create(self, user: UserContext, password_hash: str) -> UserContext:
         async with self._runtime.session() as session:
             record = UserAccountRecord(
+                user_account_id=f"usr-{uuid4().hex[:12]}",
                 user_id=user.user_id,
                 tenant_id=user.tenant_id,
                 email=user.email,
@@ -538,12 +582,17 @@ class PostgresUserRepository:
                 scopes=user.scopes,
             )
             session.add(record)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError("用户邮箱或用户 ID 已存在，请更换后重试") from exc
             return user
 
     async def update(self, user: UserContext) -> UserContext:
         async with self._runtime.session() as session:
-            record = await session.get(UserAccountRecord, user.user_id)
+            result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == user.user_id))
+            record = result.scalar_one_or_none()
             if record is None or record.tenant_id != user.tenant_id:
                 raise ValueError(f"User {user.user_id} not found")
             record.role = user.role
@@ -555,11 +604,13 @@ class PostgresUserRepository:
                 tenant_id=record.tenant_id,
                 role=record.role,
                 scopes=list(record.scopes),
+                email=record.email,
             )
 
     async def delete(self, tenant_id: str, user_id: str) -> bool:
         async with self._runtime.session() as session:
-            record = await session.get(UserAccountRecord, user_id)
+            result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == user_id))
+            record = result.scalar_one_or_none()
             if record is None or record.tenant_id != tenant_id:
                 return False
             await session.delete(record)
@@ -644,6 +695,30 @@ class PostgresKnowledgeRepository:
             result = await session.execute(stmt)
             return [_knowledge_from_record(item) for item in result.scalars().all()]
 
+    async def get_detail(self, tenant_id: str, source_id: str) -> KnowledgeSourceDetail | None:
+        async with self._runtime.session() as session:
+            document_result = await session.execute(
+                select(KnowledgeDocumentRecord)
+                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
+                .where(KnowledgeDocumentRecord.source_id == source_id)
+            )
+            document = document_result.scalar_one_or_none()
+            if document is None:
+                return None
+
+            chunks_result = await session.execute(
+                select(KnowledgeChunkRecord)
+                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
+                .where(KnowledgeChunkRecord.source_id == source_id)
+                .order_by(KnowledgeChunkRecord.chunk_index)
+            )
+            chunks = [_knowledge_chunk_from_record(item) for item in chunks_result.scalars().all()]
+            return KnowledgeSourceDetail(
+                source=_knowledge_from_record(document),
+                chunks=chunks,
+                content="\n\n".join(chunk.content for chunk in chunks),
+            )
+
     async def ingest_text(
         self,
         *,
@@ -712,7 +787,11 @@ class PostgresKnowledgeBaseRepository:
     async def create(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
         async with self._runtime.session() as session:
             session.add(KnowledgeBaseRecord(**asdict(knowledge_base)))
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError("知识库编码已存在，请更换后重试") from exc
             result = await session.execute(
                 select(KnowledgeBaseRecord).where(
                     KnowledgeBaseRecord.knowledge_base_code == knowledge_base.knowledge_base_code
@@ -982,65 +1061,39 @@ class PostgresLLMConfigRepository:
 
 async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
     async with runtime.session() as session:
-        if await session.get(TenantRecord, "tenant-demo") is None:
-            session.add_all(
-                [
-                    TenantRecord(
-                        tenant_id="tenant-demo",
-                        name="默认企业",
-                        package="通用业务包",
-                        environment="生产",
-                        budget="¥ 420k",
-                        active=True,
-                    ),
-                    TenantRecord(
-                        tenant_id="tenant-east",
-                        name="华东试点租户",
-                        package="财务业务包",
-                        environment="试点",
-                        budget="¥ 95k",
-                        active=True,
-                    ),
-                    TenantRecord(
-                        tenant_id="tenant-industrial",
-                        name="工业沙箱租户",
-                        package="工业业务包",
-                        environment="沙箱",
-                        budget="¥ 18k",
-                        active=True,
-                    ),
-                ]
+        tenant_result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == DEFAULT_TENANT_ID))
+        if tenant_result.scalar_one_or_none() is None:
+            session.add(
+                TenantRecord(
+                    tenant_record_id="tn-default-sw",
+                    tenant_id=DEFAULT_TENANT_ID,
+                    name=DEFAULT_TENANT_NAME,
+                    package=DEFAULT_TENANT_PACKAGE,
+                    environment=DEFAULT_TENANT_ENVIRONMENT,
+                    budget=DEFAULT_TENANT_BUDGET,
+                    active=True,
+                )
             )
 
-        if await session.get(UserAccountRecord, "user-demo") is None:
-            # Default password is "password123" - hash generated with bcrypt
-            default_password_hash = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4grwcuhVHhphnetC"
-            session.add_all(
-                [
-                    UserAccountRecord(
-                        user_id="user-demo",
-                        tenant_id="tenant-demo",
-                        email="user-demo@example.com",
-                        password_hash=default_password_hash,
-                        role="platform_admin",
-                        scopes=[
-                            "chat:read",
-                            "knowledge:read",
-                            "hr:read",
-                            "workflow:draft",
-                            "draft:confirm",
-                            "admin:read",
-                        ],
-                    ),
-                    UserAccountRecord(
-                        user_id="auditor-east",
-                        tenant_id="tenant-east",
-                        email="auditor-east@example.com",
-                        password_hash=default_password_hash,
-                        role="auditor",
-                        scopes=["chat:read", "knowledge:read", "admin:read"],
-                    ),
-                ]
+        user_result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == DEFAULT_ADMIN_USER_ID))
+        if user_result.scalar_one_or_none() is None:
+            session.add(
+                UserAccountRecord(
+                    user_account_id="usr-default-admin",
+                    user_id=DEFAULT_ADMIN_USER_ID,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    email=DEFAULT_ADMIN_EMAIL,
+                    password_hash=get_password_hash(DEFAULT_ADMIN_PASSWORD),
+                    role="platform_admin",
+                    scopes=[
+                        "chat:read",
+                        "knowledge:read",
+                        "hr:read",
+                        "workflow:draft",
+                        "draft:confirm",
+                        "admin:read",
+                    ],
+                )
             )
 
         existing_event_ids = set((await session.execute(select(SecurityEventRecord.event_id))).scalars().all())
@@ -1048,7 +1101,7 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
             session.add(
                 SecurityEventRecord(
                     event_id="sec-001",
-                    tenant_id="tenant-demo",
+                    tenant_id=DEFAULT_TENANT_ID,
                     category="approval",
                     severity="high",
                     title="报销提交草稿确认",
@@ -1060,7 +1113,7 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
             session.add(
                 SecurityEventRecord(
                     event_id="sec-002",
-                    tenant_id="tenant-demo",
+                    tenant_id=DEFAULT_TENANT_ID,
                     category="governance",
                     severity="critical",
                     title="跨租户访问已拦截",

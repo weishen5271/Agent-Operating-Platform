@@ -47,7 +47,7 @@ export default async function SecurityPage() {
     ? drafts.map((item) => ({
         id: item.draft_id,
         title: item.title,
-        applicant: "user-demo",
+        applicant: "admin",
         risk: item.risk_level,
         status: item.status,
       }))

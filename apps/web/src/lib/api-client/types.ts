@@ -138,6 +138,33 @@ export type DraftActionResponse = {
   created_at: string;
 };
 
+export type AdminKnowledgeSourceDetailResponse = {
+  source: {
+    source_id: string;
+    tenant_id: string;
+    knowledge_base_code: string;
+    name: string;
+    source_type: string;
+    owner: string;
+    chunk_count: number;
+    status: string;
+  };
+  chunks: Array<{
+    chunk_id: string;
+    source_id: string;
+    tenant_id: string;
+    chunk_index: number;
+    title: string;
+    content: string;
+    content_hash: string;
+    metadata_json: Record<string, unknown>;
+    token_count: number;
+    status: string;
+    created_at: string;
+  }>;
+  content: string;
+};
+
 export type LLMRuntimeConfig = {
   provider: string;
   base_url: string;
@@ -204,6 +231,7 @@ export type AdminKnowledgeResponse = {
 
 export type AdminKnowledgeBasesResponse = {
   items: Array<{
+    knowledge_base_id: string;
     knowledge_base_code: string;
     tenant_id: string;
     name: string;

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from agent_platform.api.routes.admin import router as admin_router
 from agent_platform.api.routes.auth import router as auth_router
@@ -12,6 +14,12 @@ from agent_platform.api.routes.workspace import router as workspace_router
 from agent_platform.bootstrap.container import initialize_runtime_state
 from agent_platform.bootstrap.settings import settings
 from agent_platform.infrastructure.db import db_runtime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("agent_platform.api")
 
 
 @asynccontextmanager
@@ -34,6 +42,23 @@ app.include_router(chat_router, prefix=settings.api_prefix)
 app.include_router(workspace_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
+
+
+@app.exception_handler(ValueError)
+async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+    logger.warning("ValueError on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{exc.__class__.__name__}: {exc}"},
+    )
 
 
 @app.get("/healthz")

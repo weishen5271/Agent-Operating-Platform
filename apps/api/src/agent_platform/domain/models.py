@@ -132,7 +132,30 @@ class KnowledgeSource:
 
 
 @dataclass(slots=True)
+class KnowledgeChunk:
+    chunk_id: str
+    source_id: str
+    tenant_id: str
+    chunk_index: int
+    title: str
+    content: str
+    content_hash: str
+    metadata_json: dict[str, Any]
+    token_count: int
+    status: str
+    created_at: datetime
+
+
+@dataclass(slots=True)
+class KnowledgeSourceDetail:
+    source: KnowledgeSource
+    chunks: list[KnowledgeChunk]
+    content: str
+
+
+@dataclass(slots=True)
 class KnowledgeBase:
+    knowledge_base_id: str
     knowledge_base_code: str
     tenant_id: str
     name: str

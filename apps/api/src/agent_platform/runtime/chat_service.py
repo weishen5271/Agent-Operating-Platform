@@ -405,6 +405,23 @@ class ChatService:
             ]
         }
 
+    async def get_knowledge_source_detail(
+        self,
+        source_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        detail = await self._knowledge_sources.get_detail(context.tenant_id, source_id)
+        if detail is None:
+            raise ValueError("Knowledge source not found")
+        return {
+            "source": asdict(detail.source),
+            "chunks": [asdict(item) for item in detail.chunks],
+            "content": detail.content,
+        }
+
     async def list_knowledge_bases(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
@@ -444,10 +461,18 @@ class ChatService:
     ) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
+        existing_items = await self._knowledge_bases.list_by_tenant(context.tenant_id)
+        normalized_code = knowledge_base_code.strip()
+        normalized_name = name.strip()
+        if any(item.knowledge_base_code == normalized_code for item in existing_items):
+            raise ValueError("知识库编码已存在，请更换后重试")
+        if any(item.name == normalized_name for item in existing_items):
+            raise ValueError("知识库名称已存在，请更换后重试")
         entity = KnowledgeBase(
-            knowledge_base_code=knowledge_base_code,
+            knowledge_base_id=f"kb-{uuid4().hex[:12]}",
+            knowledge_base_code=normalized_code,
             tenant_id=context.tenant_id,
-            name=name,
+            name=normalized_name,
             description=description,
             status="active",
             created_by=context.user_id,
@@ -548,18 +573,28 @@ class ChatService:
     # Tenant CRUD
     async def create_tenant(
         self,
-        tenant_id: str,
         name: str,
         package: str,
         environment: str,
         budget: str,
     ) -> TenantProfile:
+        normalized_name = name.strip()
+        normalized_package = package.strip()
+        normalized_environment = environment.strip()
+        normalized_budget = budget.strip()
+        if not normalized_name or not normalized_package:
+            raise ValueError("租户名称和业务包不能为空")
+
+        existing_tenants = await self._tenants.list_all()
+        if any(item.name == normalized_name for item in existing_tenants):
+            raise ValueError("租户名称已存在，请更换后重试")
+
         tenant = TenantProfile(
-            tenant_id=tenant_id,
-            name=name,
-            package=package,
-            environment=environment,
-            budget=budget,
+            tenant_id=f"tenant-{uuid4().hex[:12]}",
+            name=normalized_name,
+            package=normalized_package,
+            environment=normalized_environment,
+            budget=normalized_budget,
             active=True,
         )
         return await self._tenants.create(tenant)
@@ -573,12 +608,23 @@ class ChatService:
         budget: str,
         active: bool,
     ) -> TenantProfile:
+        normalized_name = name.strip()
+        normalized_package = package.strip()
+        normalized_environment = environment.strip()
+        normalized_budget = budget.strip()
+        if not normalized_name or not normalized_package:
+            raise ValueError("租户名称和业务包不能为空")
+
+        existing_tenants = await self._tenants.list_all()
+        if any(item.tenant_id != tenant_id and item.name == normalized_name for item in existing_tenants):
+            raise ValueError("租户名称已存在，请更换后重试")
+
         tenant = TenantProfile(
             tenant_id=tenant_id,
-            name=name,
-            package=package,
-            environment=environment,
-            budget=budget,
+            name=normalized_name,
+            package=normalized_package,
+            environment=normalized_environment,
+            budget=normalized_budget,
             active=active,
         )
         return await self._tenants.update(tenant)
@@ -596,18 +642,27 @@ class ChatService:
     async def create_user(
         self,
         tenant_id: str,
-        user_id: str,
+        email: str,
+        password: str,
         role: str,
         scopes: list[str],
-        password_hash: str = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4grwcuhVHhphnetC",
     ) -> UserContext:
+        normalized_email = email.strip().lower()
+        if not normalized_email:
+            raise ValueError("用户邮箱不能为空")
+        if await self._tenants.get(tenant_id) is None:
+            raise ValueError("租户不存在")
+        if await self._users.get_by_email(normalized_email) is not None:
+            raise ValueError("用户邮箱已存在，请更换后重试")
+
         user = UserContext(
-            user_id=user_id,
+            user_id=f"user-{uuid4().hex[:12]}",
             tenant_id=tenant_id,
             role=role,
             scopes=scopes,
+            email=normalized_email,
         )
-        return await self._users.create(user, password_hash)
+        return await self._users.create(user, get_password_hash(password))
 
     async def authenticate_user(
         self,

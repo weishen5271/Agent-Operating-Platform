@@ -6,13 +6,13 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from agent_platform.api.deps import AuthContext
 from agent_platform.bootstrap.container import chat_service, wiki_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 class LLMRuntimeUpdateRequest(BaseModel):
-    tenant_id: str | None = Field(default=None)
     provider: Literal["openai-compatible", "openai", "azure", "anthropic"] = Field(default="openai-compatible")
     base_url: str = Field(default="")
     model: str = Field(default="")
@@ -22,7 +22,6 @@ class LLMRuntimeUpdateRequest(BaseModel):
 
 
 class TenantCreateRequest(BaseModel):
-    tenant_id: str = Field(..., max_length=64)
     name: str = Field(..., max_length=255)
     package: str = Field(..., max_length=255)
     environment: str = Field(..., max_length=64)
@@ -38,7 +37,8 @@ class TenantUpdateRequest(BaseModel):
 
 
 class UserCreateRequest(BaseModel):
-    user_id: str = Field(..., max_length=64)
+    email: str = Field(..., max_length=255)
+    password: str = Field(default="Aa111111", min_length=6, max_length=128)
     role: str = Field(..., max_length=64)
     scopes: list[str] = Field(default_factory=list)
 
@@ -49,8 +49,6 @@ class UserUpdateRequest(BaseModel):
 
 
 class KnowledgeIngestRequest(BaseModel):
-    tenant_id: str | None = Field(default=None)
-    user_id: str | None = Field(default=None)
     knowledge_base_code: str = Field(default="knowledge", max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
     content: str = Field(..., min_length=1)
@@ -59,33 +57,25 @@ class KnowledgeIngestRequest(BaseModel):
 
 
 class WikiCompileRequest(BaseModel):
-    tenant_id: str | None = Field(default=None)
-    user_id: str | None = Field(default=None)
     source_id: str | None = Field(default=None, max_length=64)
     space_code: str = Field(default="knowledge", max_length=64)
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
-    tenant_id: str | None = Field(default=None)
-    user_id: str | None = Field(default=None)
     knowledge_base_code: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
     description: str = Field(default="")
 
 
 class KnowledgeBaseUpdateRequest(BaseModel):
-    tenant_id: str | None = Field(default=None)
-    user_id: str | None = Field(default=None)
     name: str = Field(..., min_length=1, max_length=255)
     description: str = Field(default="")
     status: str = Field(default="active", max_length=32)
 
 
 @router.get("/packages")
-async def list_packages(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def list_packages(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.list_admin_packages(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -93,10 +83,8 @@ async def list_packages(
 
 
 @router.get("/system")
-async def system_overview(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def system_overview(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.list_system_overview(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -104,14 +92,16 @@ async def system_overview(
 
 
 @router.get("/llm-runtime")
-async def llm_runtime(tenant_id: str | None = Query(default=None)) -> dict[str, object]:
+async def llm_runtime(auth: AuthContext) -> dict[str, object]:
+    tenant_id, _ = auth
     return await chat_service.get_llm_runtime(tenant_id=tenant_id)
 
 
 @router.post("/llm-runtime")
-async def update_llm_runtime(payload: LLMRuntimeUpdateRequest) -> dict[str, object]:
+async def update_llm_runtime(payload: LLMRuntimeUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, _ = auth
     return await chat_service.update_llm_runtime(
-        tenant_id=payload.tenant_id,
+        tenant_id=tenant_id,
         provider=payload.provider,
         base_url=payload.base_url,
         model=payload.model,
@@ -131,7 +121,6 @@ async def list_tenants() -> dict[str, object]:
 async def create_tenant(payload: TenantCreateRequest) -> dict[str, object]:
     try:
         tenant = await chat_service.create_tenant(
-            tenant_id=payload.tenant_id,
             name=payload.name,
             package=payload.package,
             environment=payload.environment,
@@ -155,7 +144,8 @@ async def update_tenant(tenant_id: str, payload: TenantUpdateRequest) -> dict[st
         )
         return asdict(tenant)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.delete("/tenants/{tenant_id}")
@@ -178,7 +168,8 @@ async def create_user(tenant_id: str, payload: UserCreateRequest) -> dict[str, o
     try:
         user = await chat_service.create_user(
             tenant_id=tenant_id,
-            user_id=payload.user_id,
+            email=payload.email,
+            password=payload.password,
             role=payload.role,
             scopes=payload.scopes,
         )
@@ -210,10 +201,8 @@ async def delete_user(tenant_id: str, user_id: str) -> dict[str, object]:
 
 
 @router.get("/security")
-async def security_overview(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def security_overview(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.list_security_overview(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -222,10 +211,10 @@ async def security_overview(
 
 @router.get("/knowledge")
 async def knowledge_sources(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
+    auth: AuthContext,
     knowledge_base_code: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.list_knowledge_sources(
             tenant_id=tenant_id,
@@ -236,26 +225,42 @@ async def knowledge_sources(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@router.get("/knowledge/{source_id}")
+async def knowledge_source_detail(source_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.get_knowledge_source_detail(
+            source_id=source_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/knowledge-bases")
-async def list_knowledge_bases(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def list_knowledge_bases(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.list_knowledge_bases(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/knowledge-bases")
-async def create_knowledge_base(payload: KnowledgeBaseCreateRequest) -> dict[str, object]:
+async def create_knowledge_base(payload: KnowledgeBaseCreateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.create_knowledge_base(
             knowledge_base_code=payload.knowledge_base_code,
             name=payload.name,
             description=payload.description,
-            tenant_id=payload.tenant_id,
-            user_id=payload.user_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -265,26 +270,25 @@ async def create_knowledge_base(payload: KnowledgeBaseCreateRequest) -> dict[str
 async def update_knowledge_base(
     knowledge_base_code: str,
     payload: KnowledgeBaseUpdateRequest,
+    auth: AuthContext,
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.update_knowledge_base(
             knowledge_base_code=knowledge_base_code,
             name=payload.name,
             description=payload.description,
             status=payload.status,
-            tenant_id=payload.tenant_id,
-            user_id=payload.user_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.delete("/knowledge-bases/{knowledge_base_code}")
-async def delete_knowledge_base(
-    knowledge_base_code: str,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def delete_knowledge_base(knowledge_base_code: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.delete_knowledge_base(
             knowledge_base_code=knowledge_base_code,
@@ -297,12 +301,12 @@ async def delete_knowledge_base(
 
 @router.get("/wiki/pages")
 async def list_wiki_pages(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
+    auth: AuthContext,
     status: str | None = Query(default=None),
     page_type: str | None = Query(default=None),
     space_code: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.list_pages(
             tenant_id=tenant_id,
@@ -316,11 +320,8 @@ async def list_wiki_pages(
 
 
 @router.get("/wiki/pages/{page_id}")
-async def get_wiki_page(
-    page_id: str,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def get_wiki_page(page_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.get_page_detail(page_id=page_id, tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -330,11 +331,8 @@ async def get_wiki_page(
 
 
 @router.get("/wiki/pages/{page_id}/revisions")
-async def get_wiki_page_revisions(
-    page_id: str,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def get_wiki_page_revisions(page_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.list_page_revisions(page_id=page_id, tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -343,12 +341,12 @@ async def get_wiki_page_revisions(
 
 @router.get("/wiki/search")
 async def search_wiki(
+    auth: AuthContext,
     query: str = Query(..., min_length=1),
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
     top_k: int = Query(default=5, ge=1, le=20),
     space_code: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.search(
             query=query,
@@ -363,11 +361,12 @@ async def search_wiki(
 
 
 @router.post("/wiki/compile")
-async def compile_wiki(payload: WikiCompileRequest) -> dict[str, object]:
+async def compile_wiki(payload: WikiCompileRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.compile_sources(
-            tenant_id=payload.tenant_id,
-            user_id=payload.user_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
             source_id=payload.source_id,
             space_code=payload.space_code,
         )
@@ -378,10 +377,8 @@ async def compile_wiki(payload: WikiCompileRequest) -> dict[str, object]:
 
 
 @router.get("/wiki/compile-runs")
-async def list_wiki_compile_runs(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def list_wiki_compile_runs(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.list_compile_runs(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
@@ -389,11 +386,8 @@ async def list_wiki_compile_runs(
 
 
 @router.get("/wiki/compile-runs/{compile_run_id}")
-async def get_wiki_compile_run(
-    compile_run_id: str,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def get_wiki_compile_run(compile_run_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.get_compile_run(
             compile_run_id=compile_run_id,
@@ -408,10 +402,10 @@ async def get_wiki_compile_run(
 
 @router.get("/wiki/file-distribution/overview")
 async def get_wiki_file_distribution_overview(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
+    auth: AuthContext,
     space_code: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.get_file_distribution_overview(
             tenant_id=tenant_id,
@@ -424,8 +418,7 @@ async def get_wiki_file_distribution_overview(
 
 @router.get("/wiki/file-distribution")
 async def list_wiki_file_distribution(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
+    auth: AuthContext,
     space_code: str | None = Query(default=None),
     group_by: str = Query(default="source_type"),
     coverage_status: str | None = Query(default=None),
@@ -433,6 +426,7 @@ async def list_wiki_file_distribution(
     owner: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.list_file_distribution(
             tenant_id=tenant_id,
@@ -451,10 +445,10 @@ async def list_wiki_file_distribution(
 @router.get("/wiki/file-distribution/{source_id}")
 async def get_wiki_file_distribution_detail(
     source_id: str,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
+    auth: AuthContext,
     space_code: str | None = Query(default=None),
 ) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await wiki_service.get_file_distribution_detail(
             source_id=source_id,
@@ -469,15 +463,12 @@ async def get_wiki_file_distribution_detail(
 
 
 @router.post("/knowledge/ingest")
-async def ingest_knowledge_source(
-    payload: KnowledgeIngestRequest,
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def ingest_knowledge_source(payload: KnowledgeIngestRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return await chat_service.ingest_knowledge_source(
-            tenant_id=payload.tenant_id or tenant_id,
-            user_id=payload.user_id or user_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
             knowledge_base_code=payload.knowledge_base_code,
             name=payload.name,
             content=payload.content,
@@ -491,10 +482,8 @@ async def ingest_knowledge_source(
 
 
 @router.get("/traces")
-async def list_traces(
-    tenant_id: str | None = Query(default=None),
-    user_id: str | None = Query(default=None),
-) -> dict[str, object]:
+async def list_traces(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         return {"items": await chat_service.list_traces(tenant_id=tenant_id, user_id=user_id)}
     except PermissionError as exc:

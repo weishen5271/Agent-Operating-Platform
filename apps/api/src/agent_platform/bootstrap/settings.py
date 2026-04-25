@@ -18,8 +18,8 @@ def _load_config() -> dict:
 class Settings(BaseSettings):
     app_name: str = "Agent Operating Platform API"
     api_prefix: str = "/api/v1"
-    default_tenant_id: str = "tenant-demo"
-    default_user_id: str = "user-demo"
+    default_tenant_id: str = "sw"
+    default_user_id: str = "admin"
     database_url: str | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = None

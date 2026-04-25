@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+
 import { KnowledgeConsole } from "@/components/knowledge/knowledge-console";
 import {
   getAdminKnowledge,
@@ -6,47 +11,95 @@ import {
   getAdminWikiFileDistribution,
   getAdminWikiPages,
 } from "@/lib/api-client";
+import type {
+  AdminKnowledgeResponse,
+  AdminKnowledgeBasesResponse,
+  AdminWikiCompileRunsResponse,
+  AdminWikiFileDistributionResponse,
+  AdminWikiPagesResponse,
+} from "@/lib/api-client/types";
 
-type SearchParams = {
-  tab?: string;
-  knowledgeBase?: string;
-};
-
-type KnowledgePageProps = {
-  searchParams?: Promise<SearchParams>;
-};
-
-export default async function KnowledgePage({ searchParams }: KnowledgePageProps) {
-  const resolvedSearchParams = (await searchParams) ?? {};
-  const initialActiveTab = resolvedSearchParams.tab === "wiki" ? "wiki" : "rag";
-  const explicitKnowledgeBase = resolvedSearchParams.knowledgeBase;
+export default function KnowledgePage() {
+  const searchParams = useSearchParams();
+  const initialActiveTab = searchParams.get("tab") === "wiki" ? "wiki" : "rag";
+  const explicitKnowledgeBase = searchParams.get("knowledgeBase");
   const selectedKnowledgeBase = explicitKnowledgeBase ?? "knowledge";
   const isWikiDetailView = initialActiveTab === "wiki" && Boolean(explicitKnowledgeBase);
+  const isRagDetailView = initialActiveTab === "rag" && Boolean(explicitKnowledgeBase);
+  const needsDetailData = isRagDetailView || isWikiDetailView;
 
-  const knowledgeBasesResponse = await getAdminKnowledgeBases().catch(() => null);
+  const [knowledgeBases, setKnowledgeBases] = useState<AdminKnowledgeBasesResponse["items"]>([]);
+  const [sources, setSources] = useState<AdminKnowledgeResponse["sources"]>([]);
+  const [wikiPages, setWikiPages] = useState<AdminWikiPagesResponse["pages"]>([]);
+  const [wikiRuns, setWikiRuns] = useState<AdminWikiCompileRunsResponse["items"]>([]);
+  const [wikiDistribution, setWikiDistribution] = useState<AdminWikiFileDistributionResponse | null>(null);
 
-  // Wiki 列表视图只需要知识库列表，详情视图才加载其他面板数据
-  const needsDetailData = initialActiveTab === "rag" || isWikiDetailView;
+  useEffect(() => {
+    let cancelled = false;
 
-  const [knowledgeResponse, wikiPagesResponse, wikiRunsResponse, wikiDistributionResponse] = needsDetailData
-    ? await Promise.all([
-        getAdminKnowledge(selectedKnowledgeBase).catch(() => null),
-        getAdminWikiPages({ spaceCode: selectedKnowledgeBase }).catch(() => null),
-        getAdminWikiCompileRuns().catch(() => null),
-        getAdminWikiFileDistribution({ spaceCode: selectedKnowledgeBase }).catch(() => null),
-      ])
-    : [null, null, null, null];
+    void getAdminKnowledgeBases()
+      .then((response) => {
+        if (!cancelled) {
+          setKnowledgeBases(response.items ?? []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setKnowledgeBases([]);
+        }
+      });
+
+    if (!needsDetailData) {
+      setSources([]);
+      setWikiPages([]);
+      setWikiRuns([]);
+      setWikiDistribution(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const ragPromise = isRagDetailView
+      ? getAdminKnowledge(selectedKnowledgeBase).catch(() => null)
+      : Promise.resolve(null);
+    const wikiPagesPromise = isWikiDetailView
+      ? getAdminWikiPages({ spaceCode: selectedKnowledgeBase }).catch(() => null)
+      : Promise.resolve(null);
+    const wikiRunsPromise = isWikiDetailView
+      ? getAdminWikiCompileRuns().catch(() => null)
+      : Promise.resolve(null);
+    const wikiDistributionPromise = isWikiDetailView
+      ? getAdminWikiFileDistribution({ spaceCode: selectedKnowledgeBase }).catch(() => null)
+      : Promise.resolve(null);
+
+    void Promise.all([ragPromise, wikiPagesPromise, wikiRunsPromise, wikiDistributionPromise]).then(
+      ([knowledgeResponse, wikiPagesResponse, wikiRunsResponse, wikiDistributionResponse]) => {
+        if (cancelled) {
+          return;
+        }
+        setSources(knowledgeResponse?.sources ?? []);
+        setWikiPages(wikiPagesResponse?.pages ?? []);
+        setWikiRuns(wikiRunsResponse?.items ?? []);
+        setWikiDistribution(wikiDistributionResponse);
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [needsDetailData, isRagDetailView, isWikiDetailView, selectedKnowledgeBase]);
 
   return (
     <KnowledgeConsole
       initialActiveTab={initialActiveTab}
-      knowledgeBases={knowledgeBasesResponse?.items ?? []}
+      knowledgeBases={knowledgeBases}
       selectedKnowledgeBase={selectedKnowledgeBase}
       isWikiDetailView={isWikiDetailView}
-      sources={knowledgeResponse?.sources ?? []}
-      wikiPages={wikiPagesResponse?.pages ?? []}
-      wikiRuns={wikiRunsResponse?.items ?? []}
-      wikiDistribution={wikiDistributionResponse}
+      isRagDetailView={isRagDetailView}
+      sources={sources}
+      wikiPages={wikiPages}
+      wikiRuns={wikiRuns}
+      wikiDistribution={wikiDistribution}
     />
   );
 }

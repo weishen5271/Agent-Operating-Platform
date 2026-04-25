@@ -24,7 +24,6 @@ export function TenantManagement() {
   const [editForm, setEditForm] = useState<TenantProfile | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [createForm, setCreateForm] = useState({
-    tenant_id: "",
     name: "",
     package: "",
     environment: "生产",
@@ -69,7 +68,7 @@ export function TenantManagement() {
   }
 
   async function handleCreateTenant() {
-    if (!createForm.tenant_id || !createForm.name || !createForm.package) {
+    if (!createForm.name || !createForm.package) {
       setFeedback("请填写必填字段");
       return;
     }
@@ -77,10 +76,10 @@ export function TenantManagement() {
       const newTenant = await createTenant(createForm);
       setTenants((prev) => [...prev, newTenant]);
       setIsCreateModalOpen(false);
-      setCreateForm({ tenant_id: "", name: "", package: "", environment: "生产", budget: "" });
+      setCreateForm({ name: "", package: "", environment: "生产", budget: "" });
       setFeedback(`租户 ${newTenant.name} 创建成功`);
-    } catch {
-      setFeedback("创建租户失败");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "创建租户失败");
     }
   }
 
@@ -98,8 +97,8 @@ export function TenantManagement() {
       setSelectedTenant(updated);
       setIsEditModalOpen(false);
       setFeedback(`租户 ${updated.name} 更新成功`);
-    } catch {
-      setFeedback("更新租户失败");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "更新租户失败");
     }
   }
 
@@ -113,8 +112,8 @@ export function TenantManagement() {
         setTenantUsers([]);
       }
       setFeedback("租户已删除");
-    } catch {
-      setFeedback("删除租户失败");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "删除租户失败");
     }
   }
 
@@ -193,15 +192,6 @@ export function TenantManagement() {
         <div className="form-section">
           <div className="form-grid">
             <div className="form-field">
-              <label>租户 ID *</label>
-              <input
-                type="text"
-                value={createForm.tenant_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, tenant_id: e.target.value }))}
-                placeholder="如: tenant-xxx"
-              />
-            </div>
-            <div className="form-field">
               <label>租户名称 *</label>
               <input
                 type="text"
@@ -209,6 +199,7 @@ export function TenantManagement() {
                 onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
                 placeholder="如: 华东试点租户"
               />
+              <p className="row-meta">系统会自动生成租户 ID</p>
             </div>
             <div className="form-field">
               <label>业务包 *</label>

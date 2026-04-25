@@ -1,5 +1,6 @@
 import type {
   AdminKnowledgeResponse,
+  AdminKnowledgeSourceDetailResponse,
   AdminKnowledgeBasesResponse,
   AdminPackagesResponse,
   AdminSecurityResponse,
@@ -33,12 +34,87 @@ type AuthUserContext = {
   tenant_name?: string;
 };
 
+const AUTH_TOKEN_KEY = "auth_token";
+const AUTH_USER_KEY = "auth_user";
+const AUTH_EXPIRED_MESSAGE = "登录状态已失效，请重新登录。";
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const segments = token.split(".");
+  if (segments.length !== 3) {
+    return null;
+  }
+
+  try {
+    const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const json = window.atob(padded);
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function isTokenExpired(token: string): boolean {
+  const payload = decodeJwtPayload(token);
+  if (!payload) {
+    return true;
+  }
+
+  const exp = payload.exp;
+  if (typeof exp !== "number") {
+    return true;
+  }
+
+  return exp * 1000 <= Date.now();
+}
+
+export function clearStoredAuth(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+}
+
+function redirectToLogin(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (window.location.pathname !== "/login") {
+    window.location.replace("/login");
+  }
+}
+
+export function hasValidStoredAuth(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) {
+    return false;
+  }
+
+  if (isTokenExpired(token)) {
+    clearStoredAuth();
+    return false;
+  }
+
+  return true;
+}
+
 function getAuthUserContext(): AuthUserContext | null {
   if (typeof window === "undefined") {
     return null;
   }
 
-  const rawUser = localStorage.getItem("auth_user");
+  const rawUser = localStorage.getItem(AUTH_USER_KEY);
   if (!rawUser) {
     return null;
   }
@@ -76,6 +152,12 @@ function withAuthContext(path: string): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const requiresBrowserAuth =
+    path.startsWith("/admin") || path.startsWith("/workspace") || path.startsWith("/chat/actions");
+  if (typeof window === "undefined" && requiresBrowserAuth) {
+    throw new Error("Authenticated requests require browser context.");
+  }
+
   const target = path.startsWith("/admin") || path.startsWith("/workspace") || path.startsWith("/chat/actions")
     ? withAuthContext(path)
     : `${API_BASE_URL}${path}`;
@@ -87,8 +169,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   // Add auth token if available
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("auth_token");
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
     if (token) {
+      if (isTokenExpired(token)) {
+        clearStoredAuth();
+        redirectToLogin();
+        throw new Error(AUTH_EXPIRED_MESSAGE);
+      }
       headers["Authorization"] = `Bearer ${token}`;
     }
   }
@@ -108,6 +195,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       }
     } catch {
       detail = await response.text();
+    }
+    if (response.status === 401) {
+      clearStoredAuth();
+      if (!detail || detail.includes("认证令牌")) {
+        redirectToLogin();
+        throw new Error(AUTH_EXPIRED_MESSAGE);
+      }
     }
     throw new Error(detail || `API request failed: ${response.status}`);
   }
@@ -153,6 +247,10 @@ export function getAdminSecurity(): Promise<AdminSecurityResponse> {
 export function getAdminKnowledge(knowledgeBaseCode?: string): Promise<AdminKnowledgeResponse> {
   const suffix = knowledgeBaseCode ? `?knowledge_base_code=${encodeURIComponent(knowledgeBaseCode)}` : "";
   return request<AdminKnowledgeResponse>(`/admin/knowledge${suffix}`);
+}
+
+export function getAdminKnowledgeSourceDetail(sourceId: string): Promise<AdminKnowledgeSourceDetailResponse> {
+  return request<AdminKnowledgeSourceDetailResponse>(`/admin/knowledge/${encodeURIComponent(sourceId)}`);
 }
 
 export function getAdminKnowledgeBases(): Promise<AdminKnowledgeBasesResponse> {
@@ -322,7 +420,6 @@ export function updateLLMRuntime(payload: {
 
 // Tenant CRUD
 export function createTenant(payload: {
-  tenant_id: string;
   name: string;
   package: string;
   environment: string;
@@ -364,7 +461,8 @@ export function listTenantUsers(tenantId: string): Promise<{ users: UserProfile[
 export function createUser(
   tenantId: string,
   payload: {
-    user_id: string;
+    email: string;
+    password: string;
     role: string;
     scopes: string[];
   },

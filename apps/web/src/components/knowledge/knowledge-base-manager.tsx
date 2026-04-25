@@ -9,17 +9,21 @@ import type { AdminKnowledgeBasesResponse } from "@/lib/api-client/types";
 type KnowledgeBaseManagerProps = {
   knowledgeBases: AdminKnowledgeBasesResponse["items"];
   selectedKnowledgeBase: string;
+  tab?: "rag" | "wiki";
 };
 
 export function KnowledgeBaseManager({
   knowledgeBases,
   selectedKnowledgeBase,
+  tab = "wiki",
 }: KnowledgeBaseManagerProps) {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [createError, setCreateError] = useState("");
+  const [createSubmitting, setCreateSubmitting] = useState(false);
 
   const editingItem = useMemo(
     () => knowledgeBases.find((item) => item.knowledge_base_code === editingCode) ?? null,
@@ -30,6 +34,7 @@ export function KnowledgeBaseManager({
     setCode("");
     setName("");
     setDescription("");
+    setCreateError("");
     setIsCreateOpen(true);
   }
 
@@ -41,18 +46,26 @@ export function KnowledgeBaseManager({
   }
 
   function gotoKnowledgeBase(knowledgeBaseCode: string) {
-    window.location.href = `/knowledge?tab=wiki&knowledgeBase=${encodeURIComponent(knowledgeBaseCode)}`;
+    window.location.href = `/knowledge?tab=${tab}&knowledgeBase=${encodeURIComponent(knowledgeBaseCode)}`;
   }
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await createKnowledgeBase({
-      knowledge_base_code: code.trim(),
-      name: name.trim(),
-      description: description.trim(),
-    });
-    setIsCreateOpen(false);
-    gotoKnowledgeBase(code.trim());
+    setCreateSubmitting(true);
+    setCreateError("");
+    try {
+      await createKnowledgeBase({
+        knowledge_base_code: code.trim(),
+        name: name.trim(),
+        description: description.trim(),
+      });
+      setIsCreateOpen(false);
+      gotoKnowledgeBase(code.trim());
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "创建知识库失败");
+    } finally {
+      setCreateSubmitting(false);
+    }
   }
 
   async function handleEdit(event: FormEvent<HTMLFormElement>) {
@@ -80,7 +93,7 @@ export function KnowledgeBaseManager({
 
   async function handleDelete(item: AdminKnowledgeBasesResponse["items"][number]) {
     await deleteKnowledgeBase(item.knowledge_base_code);
-    window.location.href = "/knowledge?tab=wiki&knowledgeBase=knowledge";
+    window.location.href = `/knowledge?tab=${tab}`;
   }
 
   return (
@@ -88,7 +101,11 @@ export function KnowledgeBaseManager({
       <div className="panel-header">
         <div>
           <h3>知识库管理</h3>
-          <p>点击知识库可直接进入该知识库详情，查看对应的 Wiki 文件空间与分布状态。</p>
+          <p>
+            {tab === "rag"
+              ? "点击知识库可进入该知识库的 RAG 详情，查看数据源、切片与索引情况。"
+              : "点击知识库可直接进入该知识库详情，查看对应的 Wiki 文件空间与分布状态。"}
+          </p>
         </div>
         <button type="button" className="primary-button" onClick={openCreateModal}>
           <span className="material-symbols-outlined">library_add</span>
@@ -96,56 +113,66 @@ export function KnowledgeBaseManager({
         </button>
       </div>
       <div className="stack-list">
-        {knowledgeBases.map((item) => (
-          <article
-            key={item.knowledge_base_code}
-            className={`stack-item stack-button ${item.knowledge_base_code === selectedKnowledgeBase ? "active" : ""}`}
-            onClick={() => gotoKnowledgeBase(item.knowledge_base_code)}
-          >
-            <div>
-              <strong>{item.name}</strong>
-              <p>{item.knowledge_base_code}</p>
-              <p className="stack-subtle">{item.description || "暂无描述"}</p>
-            </div>
-            <div className="stack-meta">
-              <span className={`status-chip ${item.knowledge_base_code === selectedKnowledgeBase ? "success" : ""}`}>
-                {item.status}
-              </span>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openEditModal(item);
-                }}
-              >
-                编辑
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void handleToggle(item);
-                }}
-              >
-                {item.status === "active" ? "归档" : "启用"}
-              </button>
-              {item.knowledge_base_code !== "knowledge" ? (
+        {knowledgeBases.length ? (
+          knowledgeBases.map((item) => (
+            <article
+              key={item.knowledge_base_code}
+              className={`stack-item stack-button ${item.knowledge_base_code === selectedKnowledgeBase ? "active" : ""}`}
+              onClick={() => gotoKnowledgeBase(item.knowledge_base_code)}
+            >
+              <div>
+                <strong>{item.name}</strong>
+                <p>{item.knowledge_base_code}</p>
+                <p className="stack-subtle">{item.description || "暂无描述"}</p>
+              </div>
+              <div className="stack-meta">
+                <span className={`status-chip ${item.knowledge_base_code === selectedKnowledgeBase ? "success" : ""}`}>
+                  {item.status}
+                </span>
                 <button
                   type="button"
-                  className="secondary-button danger-lite"
+                  className="secondary-button"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void handleDelete(item);
+                    openEditModal(item);
                   }}
                 >
-                  删除
+                  编辑
                 </button>
-              ) : null}
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleToggle(item);
+                  }}
+                >
+                  {item.status === "active" ? "归档" : "启用"}
+                </button>
+                {item.knowledge_base_code !== "knowledge" ? (
+                  <button
+                    type="button"
+                    className="secondary-button danger-lite"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleDelete(item);
+                    }}
+                  >
+                    删除
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          ))
+        ) : (
+          <article className="stack-item">
+            <div>
+              <strong>暂无知识库</strong>
+              <p>当前租户下还没有任何知识库，先新建一个再进入详情。</p>
             </div>
+            <span className="status-chip plain">empty</span>
           </article>
-        ))}
+        )}
       </div>
 
       <Modal isOpen={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="新建知识库">
@@ -163,8 +190,12 @@ export function KnowledgeBaseManager({
             <textarea value={description} rows={4} onChange={(event) => setDescription(event.target.value)} />
           </label>
           <div className="knowledge-ingest-footer">
-            <span className="stack-subtle">创建后会进入该知识库详情页。</span>
-            <button type="submit" className="primary-button">创建知识库</button>
+            <span className={`stack-subtle ${createError ? "form-status error" : ""}`}>
+              {createError || "创建后会进入该知识库详情页。"}
+            </span>
+            <button type="submit" className="primary-button" disabled={createSubmitting}>
+              {createSubmitting ? "创建中" : "创建知识库"}
+            </button>
           </div>
         </form>
       </Modal>

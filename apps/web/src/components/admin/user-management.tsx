@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { createUser, deleteUser, updateUser } from "@/lib/api-client";
 import type { UserProfile } from "@/lib/api-client/types";
+import { Modal } from "@/components/shared/modal";
 
 type UserManagementProps = {
   tenantId: string;
@@ -23,10 +24,11 @@ const AVAILABLE_SCOPES = [
 export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }: UserManagementProps) {
   const [users, setUsers] = useState(initialUsers);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const [isCreating, setIsCreating] = useState(false);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editUser, setEditUser] = useState<UserProfile | null>(null);
   const [createForm, setCreateForm] = useState({
-    user_id: "",
+    email: "",
+    password: "Aa111111",
     role: "platform_admin",
     scopes: ["chat:read", "knowledge:read"],
   });
@@ -37,18 +39,23 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
   }, [initialUsers]);
 
   async function handleCreateUser() {
-    if (!createForm.user_id) {
-      setFeedback("请填写用户 ID");
+    if (!createForm.email) {
+      setFeedback("请填写用户邮箱");
       return;
     }
     try {
       const newUser = await createUser(tenantId, createForm);
       setUsers((prev) => [...prev, newUser]);
-      setIsCreating(false);
-      setCreateForm({ user_id: "", role: "platform_admin", scopes: ["chat:read", "knowledge:read"] });
-      setFeedback(`用户 ${newUser.user_id} 创建成功`);
-    } catch {
-      setFeedback("创建用户失败");
+      setIsCreateModalOpen(false);
+      setCreateForm({
+        email: "",
+        password: "Aa111111",
+        role: "platform_admin",
+        scopes: ["chat:read", "knowledge:read"],
+      });
+      setFeedback(`用户 ${newUser.email || newUser.user_id} 创建成功`);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "创建用户失败");
     }
   }
 
@@ -62,8 +69,8 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
       setUsers((prev) => prev.map((u) => (u.user_id === updated.user_id ? updated : u)));
       setEditUser(null);
       setFeedback(`用户 ${updated.user_id} 更新成功`);
-    } catch {
-      setFeedback("更新用户失败");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "更新用户失败");
     }
   }
 
@@ -73,8 +80,8 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
       await deleteUser(tenantId, userId);
       setUsers((prev) => prev.filter((u) => u.user_id !== userId));
       setFeedback("用户已删除");
-    } catch {
-      setFeedback("删除用户失败");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "删除用户失败");
     }
   }
 
@@ -117,22 +124,31 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
           <h3>用户列表 - {tenantName}</h3>
           <p>管理租户下的用户账号与权限范围。</p>
         </div>
-        <button type="button" className="primary-button" onClick={() => setIsCreating(true)}>
+        <button type="button" className="primary-button" onClick={() => setIsCreateModalOpen(true)}>
           添加用户
         </button>
       </div>
 
-      {isCreating && (
+      <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title={`添加用户 - ${tenantName}`}>
         <div className="form-section">
-          <h4>添加用户</h4>
           <div className="form-grid">
             <div className="form-field">
-              <label>用户 ID *</label>
+              <label>用户邮箱 *</label>
+              <input
+                type="email"
+                value={createForm.email}
+                onChange={(e) => setCreateForm((f) => ({ ...f, email: e.target.value }))}
+                placeholder="如: admin@sw.com"
+              />
+              <p className="row-meta">系统会自动生成用户 ID</p>
+            </div>
+            <div className="form-field">
+              <label>初始密码</label>
               <input
                 type="text"
-                value={createForm.user_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, user_id: e.target.value }))}
-                placeholder="如: user-xxx"
+                value={createForm.password}
+                onChange={(e) => setCreateForm((f) => ({ ...f, password: e.target.value }))}
+                placeholder="默认 Aa111111"
               />
             </div>
             <div className="form-field">
@@ -164,7 +180,7 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
             </div>
           </div>
           <div className="form-actions">
-            <button type="button" className="ghost-button" onClick={() => setIsCreating(false)}>
+            <button type="button" className="ghost-button" onClick={() => setIsCreateModalOpen(false)}>
               取消
             </button>
             <button type="button" className="primary-button" onClick={handleCreateUser}>
@@ -172,7 +188,7 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
             </button>
           </div>
         </div>
-      )}
+      </Modal>
 
       {editUser && (
         <div className="form-section">

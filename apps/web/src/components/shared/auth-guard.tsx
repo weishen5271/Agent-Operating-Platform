@@ -2,19 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { hasValidStoredAuth } from "@/lib/api-client";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [isClient, setIsClient] = useState(false);
-  const [hasToken, setHasToken] = useState(false);
+  const [hasSession, setHasSession] = useState(false);
 
   useEffect(() => {
     setIsClient(true);
-    const token = localStorage.getItem("auth_token");
-    if (!token) {
-      router.push("/login");
+    if (!hasValidStoredAuth()) {
+      router.replace("/login");
     } else {
-      setHasToken(true);
+      setHasSession(true);
     }
   }, [router]);
 
@@ -23,8 +23,8 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     return null;
   }
 
-  // If no token, will redirect in useEffect
-  if (!hasToken) {
+  // If no valid session, will redirect in useEffect
+  if (!hasSession) {
     return null;
   }
 

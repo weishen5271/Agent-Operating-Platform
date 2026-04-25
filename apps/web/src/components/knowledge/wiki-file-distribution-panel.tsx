@@ -2,10 +2,15 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 
-import { getAdminWikiFileDistribution, getAdminWikiFileDistributionDetail } from "@/lib/api-client";
+import {
+  getAdminKnowledgeSourceDetail,
+  getAdminWikiFileDistribution,
+  getAdminWikiFileDistributionDetail,
+} from "@/lib/api-client";
 import type {
   AdminKnowledgeResponse,
   AdminKnowledgeBasesResponse,
+  AdminKnowledgeSourceDetailResponse,
   AdminWikiCompileRunsResponse,
   AdminWikiFileDistributionDetailResponse,
   AdminWikiFileDistributionResponse,
@@ -77,6 +82,10 @@ export function WikiFileDistributionPanel({
   });
   const [data, setData] = useState<AdminWikiFileDistributionResponse>(initialData ?? EMPTY_DATA);
   const [detail, setDetail] = useState<AdminWikiFileDistributionDetailResponse | null>(null);
+  const [sourceDetail, setSourceDetail] = useState<AdminKnowledgeSourceDetailResponse | null>(null);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [detailStatus, setDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [detailError, setDetailError] = useState("");
   const [status, setStatus] = useState("");
   const [isPending, startTransition] = useTransition();
   const [isDetailPending, startDetailTransition] = useTransition();
@@ -96,23 +105,32 @@ export function WikiFileDistributionPanel({
             ? `已加载 ${response.items.length} 个原始文件节点，并映射到 Wiki 文件空间。`
             : "当前没有符合筛选条件的文件节点。",
         );
-        if (response.items.length) {
-          const preferredSourceId =
-            detail && response.items.some((item) => item.source_id === detail.item.source_id)
-              ? detail.item.source_id
-              : response.items[0].source_id;
-          const detailResponse = await getAdminWikiFileDistributionDetail(preferredSourceId, selectedKnowledgeBase);
-          setDetail(detailResponse);
-        } else {
-          setDetail(null);
-        }
       } catch (error) {
         setStatus(error instanceof Error ? error.message : "加载文件空间失败");
         setData(EMPTY_DATA);
         setDetail(null);
+        setSourceDetail(null);
+        setDetailStatus("idle");
+        setDetailError("");
       }
     });
   }, [filters.coverageStatus, filters.keyword, selectedKnowledgeBase]);
+
+  useEffect(() => {
+    const availableSources = sources.filter((source) => source.knowledge_base_code === selectedKnowledgeBase);
+    setSelectedSourceId((current) => {
+      if (!current) {
+        return null;
+      }
+      return availableSources.some((item) => item.source_id === current) ? current : null;
+    });
+    if (!availableSources.length) {
+      setSourceDetail(null);
+      setDetail(null);
+      setDetailStatus("idle");
+      setDetailError("");
+    }
+  }, [selectedKnowledgeBase, sources]);
 
   const rawSourceFiles = useMemo(
     () =>
@@ -158,15 +176,52 @@ export function WikiFileDistributionPanel({
     [knowledgeBaseSourceIds, wikiRuns],
   );
 
-  function handleSelectSource(sourceId: string) {
+  useEffect(() => {
+    if (!selectedSourceId) {
+      setSourceDetail(null);
+      setDetail(null);
+      setDetailStatus("idle");
+      setDetailError("");
+      return;
+    }
+
+    setDetailStatus("loading");
+    setDetailError("");
     startDetailTransition(async () => {
       try {
-        const response = await getAdminWikiFileDistributionDetail(sourceId, selectedKnowledgeBase);
-        setDetail(response);
+        const [sourceResponse, distributionResponse] = await Promise.all([
+          getAdminKnowledgeSourceDetail(selectedSourceId),
+          getAdminWikiFileDistributionDetail(selectedSourceId, selectedKnowledgeBase).catch(() => null),
+        ]);
+        setSourceDetail(sourceResponse);
+        setDetail(distributionResponse);
+        setDetailStatus("ready");
+        setStatus((current) =>
+          distributionResponse ? current : "该 Raw Source 已入库，但当前还没有生成任何 Wiki 页面映射。"
+        );
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : "加载文件详情失败");
+        setSourceDetail(null);
+        setDetail(null);
+        setDetailStatus("error");
+        setDetailError(error instanceof Error ? error.message : "加载原始文件详情失败");
+        setStatus(error instanceof Error ? error.message : "加载原始文件详情失败");
       }
     });
+  }, [selectedKnowledgeBase, selectedSourceId]);
+
+  function handleSelectSource(sourceId: string) {
+    if (sourceId === selectedSourceId && detailStatus === "ready") {
+      return;
+    }
+    setSelectedSourceId(sourceId);
+  }
+
+  function handleCloseDrawer() {
+    setSelectedSourceId(null);
+    setSourceDetail(null);
+    setDetail(null);
+    setDetailStatus("idle");
+    setDetailError("");
   }
 
   return (
@@ -265,7 +320,7 @@ export function WikiFileDistributionPanel({
                 <button
                   key={file.sourceId}
                   type="button"
-                  className={`stack-item stack-button ${detail?.item.source_id === file.sourceId ? "active" : ""}`}
+                  className={`stack-item stack-button ${selectedSourceId === file.sourceId ? "active" : ""}`}
                   onClick={() => handleSelectSource(file.sourceId)}
                 >
                   <div>
@@ -364,80 +419,121 @@ export function WikiFileDistributionPanel({
         </section>
       </div>
 
-      <div className="distribution-layout single">
-        <section className="panel-card">
-          <div className="panel-header">
-            <div>
-              <h3>Source to Wiki 映射</h3>
-              <p>查看某个 Raw Source 在 Wiki 文件空间里触发了哪些页面更新。</p>
-            </div>
-          </div>
-          {detail ? (
-            <div className="distribution-detail">
-              <article className="detail-summary-card">
-                <strong>{`raw/${detail.item.source_type.toLowerCase()}/${normalizeFileName(detail.item.source_name)}`}</strong>
-                <p>
-                  {detail.item.source_type} / {detail.item.owner}
-                </p>
-                <p className="stack-subtle">
-                  状态 {detail.item.coverage_status} / 最近编译 {formatTime(detail.item.latest_compile_finished_at)}
-                </p>
-                <div className="detail-chip-row">
-                  {detail.diagnostic_tags.length ? (
-                    detail.diagnostic_tags.map((tag) => (
-                      <span key={tag} className="status-chip plain">
-                        {tag}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="status-chip plain">no-tags</span>
-                  )}
+      {selectedSourceId ? (
+        <div className="knowledge-detail-drawer-backdrop" onClick={handleCloseDrawer}>
+          <aside className="knowledge-detail-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="knowledge-detail-drawer-header">
+              <div>
+                <div className="knowledge-detail-drawer-title-row">
+                  <h3>Raw Source 详情</h3>
+                  {sourceDetail ? <span className="status-chip success">{sourceDetail.source.source_id}</span> : null}
                 </div>
-              </article>
-
-              <div className="wiki-flow-grid">
-                <article className="wiki-flow-card">
-                  <span className="wiki-flow-label">Raw</span>
-                  <strong>{detail.item.chunk_count} 个 chunk</strong>
-                  <p>{detail.item.citation_count} 次引用进入 wiki layer</p>
-                </article>
-                <article className="wiki-flow-card accent">
-                  <span className="wiki-flow-label">Wiki</span>
-                  <strong>{detail.item.page_count} 个页面</strong>
-                  <p>通过页面文件把原始内容重新组织为长期知识</p>
-                </article>
+                <p>{sourceDetail ? "原始文件正文与 Wiki 投影关系" : "正在读取所选条目的入库内容"}</p>
               </div>
-
-              <div className="stack-list">
-                {detail.related_pages.length ? (
-                  detail.related_pages.map((page) => (
-                    <article key={page.page_id} className="stack-item">
-                      <div>
-                        <strong>{`wiki/pages/${page.slug}.md`}</strong>
-                        <p>{page.title}</p>
-                      </div>
-                      <div className="stack-meta">
-                        <span className="mono">{page.citation_count} 引用</span>
-                        <span className="status-chip plain">{Math.round(page.contribution_score * 100)}%</span>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <article className="stack-item">
-                    <div>
-                      <strong>{isDetailPending ? "加载中" : "暂无映射"}</strong>
-                      <p>该 Raw Source 目前还没有生成任何 Wiki 页面映射。</p>
-                    </div>
-                    <span className="status-chip plain">empty</span>
-                  </article>
-                )}
-              </div>
+              <button type="button" className="drawer-close-button" onClick={handleCloseDrawer}>
+                <span className="material-symbols-outlined">close</span>
+              </button>
             </div>
-          ) : (
-            <div className="empty-distribution">从左侧选择一个 Raw Source 查看它在 Wiki 文件空间里的投影。</div>
-          )}
-        </section>
-      </div>
+
+            <div className="knowledge-detail-drawer-body">
+              {detailStatus === "loading" ? (
+                <div className="empty-distribution">正在加载所选 Raw Source 的正文内容。</div>
+              ) : detailStatus === "error" ? (
+                <div className="empty-distribution">{detailError || "加载原始文件详情失败。"}</div>
+              ) : sourceDetail ? (
+                <>
+                  <section className="drawer-section">
+                    <h4>基本信息摘要</h4>
+                    <div className="drawer-summary-grid">
+                      <div>
+                        <span>文件名称</span>
+                        <strong>{sourceDetail.source.name}</strong>
+                      </div>
+                      <div>
+                        <span>文件类型</span>
+                        <strong>{sourceDetail.source.source_type}</strong>
+                      </div>
+                      <div>
+                        <span>负责人</span>
+                        <strong>{sourceDetail.source.owner}</strong>
+                      </div>
+                      <div>
+                        <span>Chunk 数量</span>
+                        <strong>{sourceDetail.source.chunk_count}</strong>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="drawer-section">
+                    <div className="drawer-section-head">
+                      <h4>原始文件内容</h4>
+                      <span className="status-chip plain">{sourceDetail.content.length} chars</span>
+                    </div>
+                    <pre className="drawer-code-block">{sourceDetail.content}</pre>
+                  </section>
+
+                  <section className="drawer-section">
+                    <h4>Wiki 映射状态</h4>
+                    {detail ? (
+                      <>
+                        <div className="wiki-flow-grid">
+                          <article className="wiki-flow-card">
+                            <span className="wiki-flow-label">Raw</span>
+                            <strong>{detail.item.chunk_count} 个 chunk</strong>
+                            <p>{detail.item.citation_count} 次引用进入 wiki layer</p>
+                          </article>
+                          <article className="wiki-flow-card accent">
+                            <span className="wiki-flow-label">Wiki</span>
+                            <strong>{detail.item.page_count} 个页面</strong>
+                            <p>通过页面文件把原始内容重新组织为长期知识</p>
+                          </article>
+                        </div>
+                        <div className="detail-chip-row">
+                          {detail.diagnostic_tags.length ? (
+                            detail.diagnostic_tags.map((tag) => (
+                              <span key={tag} className="status-chip plain">
+                                {tag}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="status-chip plain">no-tags</span>
+                          )}
+                        </div>
+                        <div className="stack-list">
+                          {detail.related_pages.length ? (
+                            detail.related_pages.map((page) => (
+                              <article key={page.page_id} className="stack-item">
+                                <div>
+                                  <strong>{`wiki/pages/${page.slug}.md`}</strong>
+                                  <p>{page.title}</p>
+                                </div>
+                                <div className="stack-meta">
+                                  <span className="mono">{page.citation_count} 引用</span>
+                                  <span className="status-chip plain">{Math.round(page.contribution_score * 100)}%</span>
+                                </div>
+                              </article>
+                            ))
+                          ) : null}
+                        </div>
+                      </>
+                    ) : (
+                      <article className="stack-item">
+                        <div>
+                          <strong>{isDetailPending ? "加载中" : "暂无 Wiki 映射"}</strong>
+                          <p>这个 Raw Source 已经入库，但当前还没有可展示的 Wiki 页面映射。</p>
+                        </div>
+                        <span className="status-chip plain">raw-only</span>
+                      </article>
+                    )}
+                  </section>
+                </>
+              ) : (
+                <div className="empty-distribution">从左侧选择一个 Raw Source 查看详情。</div>
+              )}
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </section>
   );
 }
