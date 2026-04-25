@@ -35,6 +35,9 @@ from agent_platform.runtime.registry import CapabilityRegistry
 from agent_platform.wiki.service import WikiService
 
 
+TENANT_MANAGE_SCOPE = "tenant:manage"
+
+
 class ChatService:
     def __init__(
         self,
@@ -369,10 +372,11 @@ class ChatService:
     async def list_system_overview(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
+        self._ensure_tenant_management_scope(context)
         return {
             "tenants": [asdict(item) for item in await self._tenants.list_all()],
             "roles": [
-                {"name": "platform_admin", "scope_count": 6, "member_count": 12},
+                {"name": "platform_admin", "scope_count": 7, "member_count": 12},
                 {"name": "auditor", "scope_count": 3, "member_count": 16},
                 {"name": "business_admin", "scope_count": 4, "member_count": 48},
             ],
@@ -571,13 +575,22 @@ class ChatService:
         }
 
     # Tenant CRUD
+    async def list_tenants(self, tenant_id: str | None = None, user_id: str | None = None) -> list[TenantProfile]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        return await self._tenants.list_all()
+
     async def create_tenant(
         self,
         name: str,
         package: str,
         environment: str,
         budget: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
     ) -> TenantProfile:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
         normalized_name = name.strip()
         normalized_package = package.strip()
         normalized_environment = environment.strip()
@@ -607,7 +620,11 @@ class ChatService:
         environment: str,
         budget: str,
         active: bool,
+        auth_tenant_id: str | None = None,
+        user_id: str | None = None,
     ) -> TenantProfile:
+        context = await self._require_context(tenant_id=auth_tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
         normalized_name = name.strip()
         normalized_package = package.strip()
         normalized_environment = environment.strip()
@@ -629,7 +646,14 @@ class ChatService:
         )
         return await self._tenants.update(tenant)
 
-    async def delete_tenant(self, tenant_id: str) -> bool:
+    async def delete_tenant(
+        self,
+        tenant_id: str,
+        auth_tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        context = await self._require_context(tenant_id=auth_tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
         return await self._tenants.delete(tenant_id)
 
     # User CRUD
@@ -1036,3 +1060,8 @@ class ChatService:
         # 临时关闭现有 scope 校验，后续统一替换为新的权限模型。
         _ = (context, required_scope)
         return None
+
+    @staticmethod
+    def _ensure_tenant_management_scope(context: UserContext) -> None:
+        if TENANT_MANAGE_SCOPE not in context.scopes:
+            raise PermissionError(f"Missing scope: {TENANT_MANAGE_SCOPE}")

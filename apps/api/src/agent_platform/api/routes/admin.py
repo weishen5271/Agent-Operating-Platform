@@ -121,44 +121,67 @@ async def update_llm_runtime(payload: LLMRuntimeUpdateRequest, auth: AuthContext
 
 # Tenant CRUD
 @router.get("/tenants")
-async def list_tenants() -> dict[str, object]:
-    return await chat_service.list_system_overview()
+async def list_tenants(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        tenants = await chat_service.list_tenants(tenant_id=tenant_id, user_id=user_id)
+        return {"tenants": [asdict(item) for item in tenants]}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/tenants")
-async def create_tenant(payload: TenantCreateRequest) -> dict[str, object]:
+async def create_tenant(payload: TenantCreateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
     try:
         tenant = await chat_service.create_tenant(
             name=payload.name,
             package=payload.package,
             environment=payload.environment,
             budget=payload.budget,
+            tenant_id=tenant_id,
+            user_id=user_id,
         )
         return asdict(tenant)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.put("/tenants/{tenant_id}")
-async def update_tenant(tenant_id: str, payload: TenantUpdateRequest) -> dict[str, object]:
+@router.put("/tenants/{target_tenant_id}")
+async def update_tenant(target_tenant_id: str, payload: TenantUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    auth_tenant_id, user_id = auth
     try:
         tenant = await chat_service.update_tenant(
-            tenant_id=tenant_id,
+            tenant_id=target_tenant_id,
             name=payload.name,
             package=payload.package,
             environment=payload.environment,
             budget=payload.budget,
             active=payload.active,
+            auth_tenant_id=auth_tenant_id,
+            user_id=user_id,
         )
         return asdict(tenant)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
-@router.delete("/tenants/{tenant_id}")
-async def delete_tenant(tenant_id: str) -> dict[str, object]:
-    success = await chat_service.delete_tenant(tenant_id)
+@router.delete("/tenants/{target_tenant_id}")
+async def delete_tenant(target_tenant_id: str, auth: AuthContext) -> dict[str, object]:
+    auth_tenant_id, user_id = auth
+    try:
+        success = await chat_service.delete_tenant(
+            target_tenant_id,
+            auth_tenant_id=auth_tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not success:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"deleted": True}

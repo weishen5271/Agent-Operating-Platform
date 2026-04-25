@@ -17,6 +17,7 @@ import type {
   HomeSnapshot,
   LLMRuntimeConfig,
   KnowledgeIngestResponse,
+  TenantListResponse,
   TenantProfile,
   TraceResponse,
   UserProfile,
@@ -432,6 +433,10 @@ export function updateLLMRuntime(payload: {
 }
 
 // Tenant CRUD
+export function listTenants(): Promise<TenantListResponse> {
+  return request<TenantListResponse>("/admin/tenants");
+}
+
 export function createTenant(payload: {
   name: string;
   package: string;

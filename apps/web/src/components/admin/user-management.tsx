@@ -19,6 +19,7 @@ const AVAILABLE_SCOPES = [
   "workflow:draft",
   "draft:confirm",
   "admin:read",
+  "tenant:manage",
 ];
 
 export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }: UserManagementProps) {

@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import {
   createTenant,
   deleteTenant,
-  getAdminSystem,
+  listTenants,
   listTenantUsers,
   updateTenant,
 } from "@/lib/api-client";
@@ -37,7 +37,7 @@ export function TenantManagement() {
   async function loadTenants() {
     setIsLoading(true);
     try {
-      const res = await getAdminSystem();
+      const res = await listTenants();
       setTenants(res.tenants.map((t) => ({
         tenant_id: t.tenant_id,
         name: t.name,

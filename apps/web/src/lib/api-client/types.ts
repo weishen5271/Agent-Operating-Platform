@@ -184,6 +184,10 @@ export type TenantProfile = {
   active: boolean;
 };
 
+export type TenantListResponse = {
+  tenants: TenantProfile[];
+};
+
 export type UserProfile = {
   user_id: string;
   tenant_id: string;

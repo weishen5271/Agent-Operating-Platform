@@ -1076,7 +1076,8 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
             )
 
         user_result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == DEFAULT_ADMIN_USER_ID))
-        if user_result.scalar_one_or_none() is None:
+        default_admin = user_result.scalar_one_or_none()
+        if default_admin is None:
             session.add(
                 UserAccountRecord(
                     user_account_id="usr-default-admin",
@@ -1092,9 +1093,12 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
                         "workflow:draft",
                         "draft:confirm",
                         "admin:read",
+                        "tenant:manage",
                     ],
                 )
             )
+        elif "tenant:manage" not in default_admin.scopes:
+            default_admin.scopes = [*default_admin.scopes, "tenant:manage"]
 
         existing_event_ids = set((await session.execute(select(SecurityEventRecord.event_id))).scalars().all())
         if "sec-001" not in existing_event_ids:
