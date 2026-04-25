@@ -3,12 +3,11 @@
 import { useEffect, useMemo, useState, useTransition } from "react";
 
 import {
-  getAdminKnowledgeSourceDetail,
   getAdminWikiFileDistribution,
   getAdminWikiFileDistributionDetail,
+  getAdminWikiSourceDetail,
 } from "@/lib/api-client";
 import type {
-  AdminKnowledgeResponse,
   AdminKnowledgeBasesResponse,
   AdminKnowledgeSourceDetailResponse,
   AdminWikiCompileRunsResponse,
@@ -21,7 +20,6 @@ type WikiFileDistributionPanelProps = {
   initialData: AdminWikiFileDistributionResponse | null;
   selectedKnowledgeBase: string;
   knowledgeBases: AdminKnowledgeBasesResponse["items"];
-  sources: AdminKnowledgeResponse["sources"];
   wikiPages: AdminWikiPagesResponse["pages"];
   wikiRuns: AdminWikiCompileRunsResponse["items"];
 };
@@ -72,7 +70,6 @@ export function WikiFileDistributionPanel({
   initialData,
   selectedKnowledgeBase,
   knowledgeBases,
-  sources,
   wikiPages,
   wikiRuns,
 }: WikiFileDistributionPanelProps) {
@@ -117,39 +114,33 @@ export function WikiFileDistributionPanel({
   }, [filters.coverageStatus, filters.keyword, selectedKnowledgeBase]);
 
   useEffect(() => {
-    const availableSources = sources.filter((source) => source.knowledge_base_code === selectedKnowledgeBase);
     setSelectedSourceId((current) => {
       if (!current) {
         return null;
       }
-      return availableSources.some((item) => item.source_id === current) ? current : null;
+      return data.items.some((item) => item.source_id === current) ? current : null;
     });
-    if (!availableSources.length) {
+    if (!data.items.length) {
       setSourceDetail(null);
       setDetail(null);
       setDetailStatus("idle");
       setDetailError("");
     }
-  }, [selectedKnowledgeBase, sources]);
+  }, [selectedKnowledgeBase, data.items]);
 
   const rawSourceFiles = useMemo(
     () =>
-      sources
-        .filter((source) => source.knowledge_base_code === selectedKnowledgeBase)
-        .map((source) => {
-        const matched = data.items.find((item) => item.source_id === source.source_id);
-        return {
-          sourceId: source.source_id,
-          path: `raw/${source.source_type.toLowerCase()}/${normalizeFileName(source.name)}`,
-          title: source.name,
-          owner: source.owner,
-          chunkCount: source.chunk_count,
-          coverageStatus: matched?.coverage_status ?? "已入库未编译",
-          pageCount: matched?.page_count ?? 0,
-          citationCount: matched?.citation_count ?? 0,
-        };
-        }),
-    [data.items, selectedKnowledgeBase, sources],
+      data.items.map((item) => ({
+        sourceId: item.source_id,
+        path: `raw/${item.source_type.toLowerCase()}/${normalizeFileName(item.source_name)}`,
+        title: item.source_name,
+        owner: item.owner,
+        chunkCount: item.chunk_count,
+        coverageStatus: item.coverage_status ?? "已入库未编译",
+        pageCount: item.page_count ?? 0,
+        citationCount: item.citation_count ?? 0,
+      })),
+    [data.items],
   );
 
   const wikiMarkdownFiles = useMemo(
@@ -190,7 +181,7 @@ export function WikiFileDistributionPanel({
     startDetailTransition(async () => {
       try {
         const [sourceResponse, distributionResponse] = await Promise.all([
-          getAdminKnowledgeSourceDetail(selectedSourceId),
+          getAdminWikiSourceDetail(selectedSourceId),
           getAdminWikiFileDistributionDetail(selectedSourceId, selectedKnowledgeBase).catch(() => null),
         ]);
         setSourceDetail(sourceResponse);

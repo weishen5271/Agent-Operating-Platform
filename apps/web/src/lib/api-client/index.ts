@@ -311,6 +311,10 @@ export function ingestWikiSource(payload: {
   });
 }
 
+export function getAdminWikiSourceDetail(sourceId: string): Promise<AdminKnowledgeSourceDetailResponse> {
+  return request<AdminKnowledgeSourceDetailResponse>(`/admin/wiki/sources/${encodeURIComponent(sourceId)}`);
+}
+
 export function searchAdminWiki(params: {
   query: string;
   topK?: number;

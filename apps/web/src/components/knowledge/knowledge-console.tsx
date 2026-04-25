@@ -51,7 +51,7 @@ export function KnowledgeConsole({
 }: KnowledgeConsoleProps) {
   const [activeTab, setActiveTab] = useState<"rag" | "wiki">(initialActiveTab);
   const [wikiView, setWikiView] = useState<"overview" | "distribution" | "search">("overview");
-  const [showWikiIngest, setShowWikiIngest] = useState(false);
+  const [showWikiIngestModal, setShowWikiIngestModal] = useState(false);
   const [showRagIngestModal, setShowRagIngestModal] = useState(false);
   const [showRagContent, setShowRagContent] = useState(false);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(sources[0]?.source_id ?? null);
@@ -475,10 +475,10 @@ export function KnowledgeConsole({
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => setShowWikiIngest((value) => !value)}
+                onClick={() => setShowWikiIngestModal(true)}
               >
-                <span className="material-symbols-outlined">upload_file</span>
-                {showWikiIngest ? "收起上传入口" : "上传 Raw Source"}
+                <span className="material-symbols-outlined">cloud_upload</span>
+                知识入库
               </button>
             </div>
           </div>
@@ -507,13 +507,17 @@ export function KnowledgeConsole({
             </button>
           </nav>
 
-          {showWikiIngest ? (
+          <Modal
+            isOpen={showWikiIngestModal}
+            onClose={() => setShowWikiIngestModal(false)}
+            title="知识入库"
+          >
             <KnowledgeIngestPanel
               knowledgeBaseCode={selectedKnowledgeBase}
               knowledgeBases={knowledgeBases}
               target="wiki"
             />
-          ) : null}
+          </Modal>
           {wikiView === "overview" ? (
             <WikiManagementPanel pages={wikiPages} runs={wikiRuns} spaceCode={selectedKnowledgeBase} />
           ) : null}
@@ -522,7 +526,6 @@ export function KnowledgeConsole({
               initialData={wikiDistribution}
               selectedKnowledgeBase={selectedKnowledgeBase}
               knowledgeBases={knowledgeBases}
-              sources={sources}
               wikiPages={wikiPages}
               wikiRuns={wikiRuns}
             />

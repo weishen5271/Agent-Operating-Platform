@@ -234,6 +234,50 @@ class WikiService:
             }
         }
 
+    async def get_source_detail(
+        self,
+        source_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_any_scope(context, {"admin:read", "wiki:compile"})
+        sources = await self._repository.list_sources(tenant_id=context.tenant_id, source_id=source_id)
+        if not sources:
+            raise ValueError("Wiki source not found")
+        source = sources[0]
+        chunks = await self._repository.list_source_chunks(
+            tenant_id=context.tenant_id, source_id=source.source_id
+        )
+        content = "\n\n".join(chunk.content for chunk in chunks)
+        return {
+            "source": {
+                "source_id": source.source_id,
+                "tenant_id": source.tenant_id,
+                "knowledge_base_code": source.knowledge_base_code,
+                "name": source.name,
+                "source_type": source.source_type,
+                "owner": source.owner,
+                "chunk_count": source.chunk_count,
+                "status": source.status,
+            },
+            "chunks": [
+                {
+                    "chunk_id": c.chunk_id,
+                    "source_id": c.source_id,
+                    "tenant_id": c.tenant_id,
+                    "chunk_index": c.chunk_index,
+                    "title": c.title,
+                    "content": c.content,
+                    "content_hash": c.content_hash,
+                    "token_count": c.token_count,
+                    "status": c.status,
+                }
+                for c in chunks
+            ],
+            "content": content,
+        }
+
     async def compile_sources(
         self,
         *,

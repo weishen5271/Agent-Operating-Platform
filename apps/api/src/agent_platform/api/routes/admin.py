@@ -512,6 +512,19 @@ async def ingest_wiki_source(payload: WikiSourceIngestRequest, auth: AuthContext
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/wiki/sources/{source_id}")
+async def get_wiki_source_detail(source_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await wiki_service.get_source_detail(
+            source_id=source_id, tenant_id=tenant_id, user_id=user_id
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/knowledge/ingest")
 async def ingest_knowledge_source(payload: KnowledgeIngestRequest, auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
