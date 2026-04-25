@@ -10,14 +10,14 @@ from sqlalchemy import delete, desc, select
 from agent_platform.domain.models import utc_now
 from agent_platform.infrastructure.db import DatabaseRuntime
 from agent_platform.infrastructure.db_models import (
-    KnowledgeChunkRecord,
-    KnowledgeDocumentRecord,
     KnowledgeWikiCitationRecord,
     KnowledgeWikiCompileRunRecord,
     KnowledgeWikiPageRecord,
     KnowledgeWikiPageRevisionRecord,
+    KnowledgeWikiSourceChunkRecord,
+    KnowledgeWikiSourceRecord,
 )
-from agent_platform.retrieval.text import tokenize
+from agent_platform.retrieval.text import chunk_text, content_hash, embed_text, tokenize
 from agent_platform.wiki.models import (
     WikiCitation,
     WikiCompileRun,
@@ -363,18 +363,69 @@ class PostgresWikiRepository:
             await session.refresh(record)
             return _compile_run_from_record(record)
 
-    async def list_sources(self, *, tenant_id: str, source_id: str | None = None) -> list[KnowledgeDocumentRecord]:
+    async def list_sources(self, *, tenant_id: str, source_id: str | None = None) -> list[KnowledgeWikiSourceRecord]:
         async with self._runtime.session() as session:
             stmt = (
-                select(KnowledgeDocumentRecord)
-                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
-                .where(KnowledgeDocumentRecord.status == "运行中")
-                .order_by(KnowledgeDocumentRecord.source_id)
+                select(KnowledgeWikiSourceRecord)
+                .where(KnowledgeWikiSourceRecord.tenant_id == tenant_id)
+                .where(KnowledgeWikiSourceRecord.status == "运行中")
+                .order_by(KnowledgeWikiSourceRecord.source_id)
             )
             if source_id:
-                stmt = stmt.where(KnowledgeDocumentRecord.source_id == source_id)
+                stmt = stmt.where(KnowledgeWikiSourceRecord.source_id == source_id)
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def ingest_text(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        content: str,
+        source_type: str,
+        owner: str,
+        knowledge_base_code: str,
+    ) -> KnowledgeWikiSourceRecord:
+        chunks = chunk_text(content)
+        if not chunks:
+            raise ValueError("Wiki source content is empty after parsing")
+
+        source_id = f"wks-{uuid4().hex[:12]}"
+        async with self._runtime.session() as session:
+            document = KnowledgeWikiSourceRecord(
+                source_id=source_id,
+                tenant_id=tenant_id,
+                knowledge_base_code=knowledge_base_code,
+                name=name,
+                source_type=source_type,
+                owner=owner,
+                chunk_count=len(chunks),
+                status="运行中",
+            )
+            session.add(document)
+            for index, chunk in enumerate(chunks):
+                session.add(
+                    KnowledgeWikiSourceChunkRecord(
+                        chunk_id=f"wkc-{uuid4().hex[:12]}",
+                        source_id=source_id,
+                        tenant_id=tenant_id,
+                        chunk_index=index,
+                        title=name,
+                        content=chunk,
+                        content_hash=content_hash(chunk),
+                        embedding=embed_text(chunk),
+                        metadata_json={
+                            "version": "v1",
+                            "classification": "internal",
+                            "locator": f"chunk:{index + 1}",
+                        },
+                        token_count=len(tokenize(chunk)),
+                        status="published",
+                    )
+                )
+            await session.commit()
+            await session.refresh(document)
+            return document
 
     async def get_file_distribution_overview(self, *, tenant_id: str, space_code: str | None = None) -> WikiFileDistributionOverview:
         sources, pages, citations, runs = await self._load_distribution_records(tenant_id=tenant_id, space_code=space_code)
@@ -518,14 +569,14 @@ class PostgresWikiRepository:
             diagnostic_tags=diagnostic_tags,
         )
 
-    async def list_source_chunks(self, *, tenant_id: str, source_id: str) -> list[KnowledgeChunkRecord]:
+    async def list_source_chunks(self, *, tenant_id: str, source_id: str) -> list[KnowledgeWikiSourceChunkRecord]:
         async with self._runtime.session() as session:
             result = await session.execute(
-                select(KnowledgeChunkRecord)
-                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
-                .where(KnowledgeChunkRecord.source_id == source_id)
-                .where(KnowledgeChunkRecord.status == "published")
-                .order_by(KnowledgeChunkRecord.chunk_index)
+                select(KnowledgeWikiSourceChunkRecord)
+                .where(KnowledgeWikiSourceChunkRecord.tenant_id == tenant_id)
+                .where(KnowledgeWikiSourceChunkRecord.source_id == source_id)
+                .where(KnowledgeWikiSourceChunkRecord.status == "published")
+                .order_by(KnowledgeWikiSourceChunkRecord.chunk_index)
             )
             return list(result.scalars().all())
 
@@ -714,19 +765,23 @@ class PostgresWikiRepository:
         tenant_id: str,
         space_code: str | None = None,
     ) -> tuple[
-        list[KnowledgeDocumentRecord],
+        list[KnowledgeWikiSourceRecord],
         list[KnowledgeWikiPageRecord],
         list[KnowledgeWikiCitationRecord],
         list[KnowledgeWikiCompileRunRecord],
     ]:
         async with self._runtime.session() as session:
             source_stmt = (
-                select(KnowledgeDocumentRecord)
-                .where(KnowledgeDocumentRecord.tenant_id == tenant_id)
-                .order_by(KnowledgeDocumentRecord.source_type, KnowledgeDocumentRecord.owner, KnowledgeDocumentRecord.name)
+                select(KnowledgeWikiSourceRecord)
+                .where(KnowledgeWikiSourceRecord.tenant_id == tenant_id)
+                .order_by(
+                    KnowledgeWikiSourceRecord.source_type,
+                    KnowledgeWikiSourceRecord.owner,
+                    KnowledgeWikiSourceRecord.name,
+                )
             )
             if space_code:
-                source_stmt = source_stmt.where(KnowledgeDocumentRecord.knowledge_base_code == space_code)
+                source_stmt = source_stmt.where(KnowledgeWikiSourceRecord.knowledge_base_code == space_code)
             source_result = await session.execute(source_stmt)
             page_stmt = (
                 select(KnowledgeWikiPageRecord)
@@ -797,7 +852,7 @@ class PostgresWikiRepository:
     @staticmethod
     def _build_distribution_item(
         *,
-        source: KnowledgeDocumentRecord,
+        source: KnowledgeWikiSourceRecord,
         citation_records: list[KnowledgeWikiCitationRecord],
         compiled_source_ids: set[str],
         latest_run: KnowledgeWikiCompileRunRecord | None,

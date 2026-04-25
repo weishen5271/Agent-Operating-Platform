@@ -2,7 +2,7 @@
 
 import { ChangeEvent, FormEvent, useState } from "react";
 
-import { ingestKnowledgeSource } from "@/lib/api-client";
+import { ingestKnowledgeSource, ingestWikiSource } from "@/lib/api-client";
 import type { AdminKnowledgeBasesResponse } from "@/lib/api-client/types";
 
 type Status = {
@@ -13,11 +13,13 @@ type Status = {
 type KnowledgeIngestPanelProps = {
   knowledgeBaseCode?: string;
   knowledgeBases?: AdminKnowledgeBasesResponse["items"];
+  target?: "rag" | "wiki";
 };
 
 export function KnowledgeIngestPanel({
   knowledgeBaseCode = "knowledge",
   knowledgeBases = [],
+  target = "rag",
 }: KnowledgeIngestPanelProps) {
   const availableKnowledgeBases =
     knowledgeBases.length > 0
@@ -84,7 +86,8 @@ export function KnowledgeIngestPanel({
     setSubmitting(true);
     setStatus({ tone: "idle", message: "" });
     try {
-      const response = await ingestKnowledgeSource({
+      const ingest = target === "wiki" ? ingestWikiSource : ingestKnowledgeSource;
+      const response = await ingest({
         knowledge_base_code: selectedKnowledgeBaseCode,
         name,
         owner,

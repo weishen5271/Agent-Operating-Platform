@@ -144,6 +144,38 @@ class KnowledgeChunkRecord(Base):
     document: Mapped["KnowledgeDocumentRecord"] = relationship(back_populates="chunks")
 
 
+class KnowledgeWikiSourceRecord(Base):
+    __tablename__ = "knowledge_wiki_source"
+
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    knowledge_base_code: Mapped[str] = mapped_column(String(64), nullable=False, default="knowledge", index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner: Mapped[str] = mapped_column(String(255), nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunks: Mapped[list["KnowledgeWikiSourceChunkRecord"]] = relationship(back_populates="document")
+
+
+class KnowledgeWikiSourceChunkRecord(Base):
+    __tablename__ = "knowledge_wiki_source_chunk"
+
+    chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_source.source_id"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    embedding: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="published", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    document: Mapped["KnowledgeWikiSourceRecord"] = relationship(back_populates="chunks")
+
+
 class KnowledgeWikiPageRecord(Base):
     __tablename__ = "knowledge_wiki_page"
 
@@ -208,8 +240,8 @@ class KnowledgeWikiCitationRecord(Base):
     )
     section_key: Mapped[str] = mapped_column(String(128), nullable=False)
     claim_text: Mapped[str] = mapped_column(Text, nullable=False)
-    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_document.source_id"), nullable=False, index=True)
-    chunk_id: Mapped[str] = mapped_column(ForeignKey("knowledge_chunk.chunk_id"), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_source.source_id"), nullable=False, index=True)
+    chunk_id: Mapped[str] = mapped_column(ForeignKey("knowledge_wiki_source_chunk.chunk_id"), nullable=False, index=True)
     evidence_snippet: Mapped[str] = mapped_column(Text, default="", nullable=False)
     support_type: Mapped[str] = mapped_column(String(16), nullable=False, default="direct")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -307,6 +339,8 @@ def import_db_models() -> None:
         SecurityEventRecord,
         KnowledgeDocumentRecord,
         KnowledgeChunkRecord,
+        KnowledgeWikiSourceRecord,
+        KnowledgeWikiSourceChunkRecord,
         KnowledgeWikiPageRecord,
         KnowledgeWikiPageRevisionRecord,
         KnowledgeWikiCitationRecord,

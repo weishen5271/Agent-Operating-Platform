@@ -297,6 +297,19 @@ export function ingestKnowledgeSource(payload: {
   });
 }
 
+export function ingestWikiSource(payload: {
+  knowledge_base_code: string;
+  name: string;
+  content: string;
+  source_type: string;
+  owner: string;
+}): Promise<KnowledgeIngestResponse> {
+  return request<KnowledgeIngestResponse>("/admin/wiki/sources/ingest", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function searchAdminWiki(params: {
   query: string;
   topK?: number;

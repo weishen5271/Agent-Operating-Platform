@@ -508,7 +508,11 @@ export function KnowledgeConsole({
           </nav>
 
           {showWikiIngest ? (
-            <KnowledgeIngestPanel knowledgeBaseCode={selectedKnowledgeBase} knowledgeBases={knowledgeBases} />
+            <KnowledgeIngestPanel
+              knowledgeBaseCode={selectedKnowledgeBase}
+              knowledgeBases={knowledgeBases}
+              target="wiki"
+            />
           ) : null}
           {wikiView === "overview" ? (
             <WikiManagementPanel pages={wikiPages} runs={wikiRuns} spaceCode={selectedKnowledgeBase} />

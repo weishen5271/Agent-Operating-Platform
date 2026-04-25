@@ -61,6 +61,14 @@ class WikiCompileRequest(BaseModel):
     space_code: str = Field(default="knowledge", max_length=64)
 
 
+class WikiSourceIngestRequest(BaseModel):
+    knowledge_base_code: str = Field(default="knowledge", max_length=64)
+    name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    source_type: str = Field(default="Markdown", max_length=64)
+    owner: str = Field(default="知识平台组", max_length=255)
+
+
 class KnowledgeBaseCreateRequest(BaseModel):
     knowledge_base_code: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
@@ -460,6 +468,25 @@ async def get_wiki_file_distribution_detail(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/wiki/sources/ingest")
+async def ingest_wiki_source(payload: WikiSourceIngestRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await wiki_service.ingest_source(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            knowledge_base_code=payload.knowledge_base_code,
+            name=payload.name,
+            content=payload.content,
+            source_type=payload.source_type,
+            owner=payload.owner,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/ingest")

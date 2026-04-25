@@ -59,7 +59,7 @@ export default function KnowledgePage() {
       };
     }
 
-    const ragPromise = isRagDetailView
+    const knowledgePromise = needsDetailData
       ? getAdminKnowledge(selectedKnowledgeBase).catch(() => null)
       : Promise.resolve(null);
     const wikiPagesPromise = isWikiDetailView
@@ -72,7 +72,7 @@ export default function KnowledgePage() {
       ? getAdminWikiFileDistribution({ spaceCode: selectedKnowledgeBase }).catch(() => null)
       : Promise.resolve(null);
 
-    void Promise.all([ragPromise, wikiPagesPromise, wikiRunsPromise, wikiDistributionPromise]).then(
+    void Promise.all([knowledgePromise, wikiPagesPromise, wikiRunsPromise, wikiDistributionPromise]).then(
       ([knowledgeResponse, wikiPagesResponse, wikiRunsResponse, wikiDistributionResponse]) => {
         if (cancelled) {
           return;

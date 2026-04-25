@@ -200,6 +200,40 @@ class WikiService:
             raise ValueError("Wiki file distribution source not found")
         return asdict(detail)
 
+    async def ingest_source(
+        self,
+        *,
+        name: str,
+        content: str,
+        source_type: str,
+        owner: str,
+        knowledge_base_code: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_any_scope(context, {"admin:read", "wiki:compile"})
+        record = await self._repository.ingest_text(
+            tenant_id=context.tenant_id,
+            name=name,
+            content=content,
+            source_type=source_type,
+            owner=owner,
+            knowledge_base_code=knowledge_base_code,
+        )
+        return {
+            "source": {
+                "source_id": record.source_id,
+                "tenant_id": record.tenant_id,
+                "knowledge_base_code": record.knowledge_base_code,
+                "name": record.name,
+                "source_type": record.source_type,
+                "owner": record.owner,
+                "chunk_count": record.chunk_count,
+                "status": record.status,
+            }
+        }
+
     async def compile_sources(
         self,
         *,
