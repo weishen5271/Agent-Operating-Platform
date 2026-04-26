@@ -109,7 +109,16 @@ def _compile_run_from_record(record: KnowledgeWikiCompileRunRecord) -> WikiCompi
         finished_at=record.finished_at,
         created_by=record.created_by,
         created_at=record.created_at,
-    )
+)
+
+
+DEFAULT_CHUNK_ATTRIBUTES_SCHEMA = {
+    "equipment_model": {"type": "string", "indexed": "hot", "filter": "in"},
+    "fault_code_tags": {"type": "array<string>", "indexed": "hot", "filter": "array_contains"},
+    "safety_critical": {"type": "boolean", "indexed": "warm", "filter": "eq"},
+    "sop_step": {"type": "string", "indexed": "cold", "filter": ""},
+    "effective_date": {"type": "date", "indexed": "hot", "filter": "lte"},
+}
 
 
 class PostgresWikiRepository:
@@ -435,6 +444,7 @@ class PostgresWikiRepository:
                 owner=owner,
                 chunk_count=len(contents),
                 status="运行中",
+                chunk_attributes_schema=dict(DEFAULT_CHUNK_ATTRIBUTES_SCHEMA),
             )
             session.add(document)
             for index, item in enumerate(normalized):

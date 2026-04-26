@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Iterator
 from uuid import uuid4
 
 import pytest
@@ -16,6 +17,16 @@ if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
 from agent_platform.main import app
 
 client = TestClient(app)
+_created_knowledge_base_codes: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_created_knowledge_bases() -> Iterator[None]:
+    yield
+    for knowledge_base_code in _created_knowledge_base_codes:
+        response = client.delete(f"/api/v1/admin/knowledge-bases/{knowledge_base_code}")
+        assert response.status_code in {200, 404}
+    _created_knowledge_base_codes.clear()
 
 
 def create_real_source(*, knowledge_base_code: str | None = None, name: str = "测试知识源") -> tuple[str, str]:
@@ -29,6 +40,7 @@ def create_real_source(*, knowledge_base_code: str | None = None, name: str = "�
         },
     )
     assert create_kb_response.status_code == 200
+    _created_knowledge_base_codes.add(resolved_knowledge_base_code)
 
     ingest_response = client.post(
         "/api/v1/admin/wiki/sources/ingest",
@@ -140,6 +152,7 @@ def test_knowledge_base_crud_and_filtered_sources() -> None:
         },
     )
     assert create_response.status_code == 200
+    _created_knowledge_base_codes.add(knowledge_base_code)
     assert create_response.json()["knowledge_base_code"] == knowledge_base_code
 
     ingest_response = client.post(
@@ -162,6 +175,7 @@ def test_knowledge_base_crud_and_filtered_sources() -> None:
     delete_response = client.delete(f"/api/v1/admin/knowledge-bases/{knowledge_base_code}")
     assert delete_response.status_code == 200
     assert delete_response.json()["deleted"] is True
+    _created_knowledge_base_codes.discard(knowledge_base_code)
 
     deleted_source_response = client.get(f"/api/v1/admin/knowledge?knowledge_base_code={knowledge_base_code}")
     assert deleted_source_response.status_code == 200

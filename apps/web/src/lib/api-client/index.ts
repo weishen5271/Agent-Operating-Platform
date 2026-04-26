@@ -1,8 +1,10 @@
 import type {
   AdminKnowledgeResponse,
+  AdminKnowledgeSourceAttributesResponse,
   AdminKnowledgeSourceDetailResponse,
   AdminKnowledgeBasesResponse,
   AdminPackagesResponse,
+  AdminReleasesResponse,
   AdminSecurityResponse,
   AdminSystemResponse,
   AdminTracesResponse,
@@ -12,6 +14,8 @@ import type {
   AdminWikiPagesResponse,
   AdminWikiSearchResponse,
   AuthResponse,
+  BusinessOutput,
+  BusinessOutputListResponse,
   ChatCompletionResponse,
   ChatStreamEvent,
   ConversationListResponse,
@@ -20,7 +24,11 @@ import type {
   HomeSnapshot,
   LLMRuntimeConfig,
   KnowledgeIngestResponse,
+  PackageDetailResponse,
+  PackageImpactResponse,
+  PluginConfigSchemaResponse,
   TenantListResponse,
+  TenantPackagesResponse,
   TenantProfile,
   TraceResponse,
   UserProfile,
@@ -252,8 +260,21 @@ export function getChatConversations(): Promise<ConversationListResponse> {
   return request<ConversationListResponse>("/chat/conversations");
 }
 
+export function createChatConversation(): Promise<ConversationResponse> {
+  return request<ConversationResponse>("/chat/conversations", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export function getChatConversation(conversationId: string): Promise<ConversationResponse> {
   return request<ConversationResponse>(`/chat/conversations/${encodeURIComponent(conversationId)}`);
+}
+
+export function deleteChatConversation(conversationId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`/chat/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "DELETE",
+  });
 }
 
 export async function streamChatCompletion(
@@ -261,6 +282,10 @@ export async function streamChatCompletion(
   retrievalMode: "auto" | "rag" | "wiki",
   onEvent: (event: ChatStreamEvent) => void,
   conversationId?: string,
+  packageContext?: {
+    primary_package?: string;
+    common_packages?: string[];
+  },
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/chat/completions/stream`, {
     method: "POST",
@@ -272,6 +297,8 @@ export async function streamChatCompletion(
       message,
       conversation_id: conversationId,
       retrieval_mode: retrievalMode,
+      primary_package: packageContext?.primary_package,
+      common_packages: packageContext?.common_packages ?? [],
     }),
     cache: "no-store",
   });
@@ -317,12 +344,95 @@ export function getAdminPackages(): Promise<AdminPackagesResponse> {
   return request<AdminPackagesResponse>("/admin/packages");
 }
 
+export function getPackageDetail(packageId: string): Promise<PackageDetailResponse> {
+  return request<PackageDetailResponse>(`/admin/packages/${encodeURIComponent(packageId)}`);
+}
+
+export function getPackageImpact(target: string): Promise<PackageImpactResponse> {
+  return request<PackageImpactResponse>(`/admin/packages/impact?target=${encodeURIComponent(target)}`);
+}
+
+export function getPluginConfigSchema(pluginName: string): Promise<PluginConfigSchemaResponse> {
+  return request<PluginConfigSchemaResponse>(`/admin/plugins/${encodeURIComponent(pluginName)}/config-schema`);
+}
+
+export function updatePluginConfig(
+  pluginName: string,
+  config: Record<string, unknown>,
+): Promise<{ plugin_name: string; config: Record<string, unknown> }> {
+  return request<{ plugin_name: string; config: Record<string, unknown> }>(
+    `/admin/plugins/${encodeURIComponent(pluginName)}/config`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ config }),
+    },
+  );
+}
+
+export function getTenantPackages(tenantId: string): Promise<TenantPackagesResponse> {
+  return request<TenantPackagesResponse>(`/admin/tenants/${encodeURIComponent(tenantId)}/packages`);
+}
+
+export function updateTenantPackages(
+  tenantId: string,
+  payload: {
+    primary_package: string;
+    common_packages: string[];
+  },
+): Promise<TenantPackagesResponse> {
+  return request<TenantPackagesResponse>(`/admin/tenants/${encodeURIComponent(tenantId)}/packages`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getAdminSystem(): Promise<AdminSystemResponse> {
   return request<AdminSystemResponse>("/admin/system");
 }
 
+export function getAdminReleases(): Promise<AdminReleasesResponse> {
+  return request<AdminReleasesResponse>("/admin/releases");
+}
+
+export function updateReleasePlan(
+  releaseId: string,
+  payload: { status: string; rollout_percent: number },
+): Promise<AdminReleasesResponse["releases"][number]> {
+  return request<AdminReleasesResponse["releases"][number]>(`/admin/releases/${encodeURIComponent(releaseId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getAdminSecurity(): Promise<AdminSecurityResponse> {
   return request<AdminSecurityResponse>("/admin/security");
+}
+
+export function updateToolOverride(payload: {
+  tenant_id: string;
+  tool_name: string;
+  quota?: number | null;
+  timeout?: number | null;
+  disabled: boolean;
+}): Promise<NonNullable<AdminSecurityResponse["tool_overrides"]>[number]> {
+  return request<NonNullable<AdminSecurityResponse["tool_overrides"]>[number]>("/admin/security/tool-overrides", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateOutputGuardRule(payload: {
+  rule_id: string;
+  package_id: string;
+  pattern: string;
+  action: string;
+  source: string;
+  enabled: boolean;
+}): Promise<NonNullable<AdminSecurityResponse["redlines"]>[number]> {
+  return request<NonNullable<AdminSecurityResponse["redlines"]>[number]>("/admin/security/redlines", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getAdminKnowledge(knowledgeBaseCode?: string): Promise<AdminKnowledgeResponse> {
@@ -332,6 +442,12 @@ export function getAdminKnowledge(knowledgeBaseCode?: string): Promise<AdminKnow
 
 export function getAdminKnowledgeSourceDetail(sourceId: string): Promise<AdminKnowledgeSourceDetailResponse> {
   return request<AdminKnowledgeSourceDetailResponse>(`/admin/knowledge/${encodeURIComponent(sourceId)}`);
+}
+
+export function getAdminKnowledgeSourceAttributes(sourceId: string): Promise<AdminKnowledgeSourceAttributesResponse> {
+  return request<AdminKnowledgeSourceAttributesResponse>(
+    `/admin/knowledge/sources/${encodeURIComponent(sourceId)}/attributes`,
+  );
 }
 
 export function getAdminKnowledgeBases(): Promise<AdminKnowledgeBasesResponse> {
@@ -623,4 +739,54 @@ export function register(payload: {
 
 export function getCurrentUser(): Promise<AuthResponse["user"]> {
   return request<AuthResponse["user"]>("/auth/me");
+}
+
+export function listBusinessOutputs(filters?: {
+  type?: string;
+  package?: string;
+  status?: string;
+}): Promise<BusinessOutputListResponse> {
+  const params = new URLSearchParams();
+  if (filters?.type) params.set("type", filters.type);
+  if (filters?.package) params.set("package", filters.package);
+  if (filters?.status) params.set("status", filters.status);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<BusinessOutputListResponse>(`/outputs${suffix}`);
+}
+
+export function getBusinessOutput(outputId: string): Promise<BusinessOutput> {
+  return request<BusinessOutput>(`/outputs/${encodeURIComponent(outputId)}`);
+}
+
+export function createBusinessOutput(payload: {
+  type: string;
+  title: string;
+  package_id: string;
+  payload?: Record<string, unknown>;
+  citations?: string[];
+  conversation_id?: string | null;
+  trace_id?: string | null;
+  summary?: string;
+}): Promise<BusinessOutput> {
+  return request<BusinessOutput>("/outputs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateBusinessOutput(
+  outputId: string,
+  payload: Partial<{
+    title: string;
+    status: string;
+    payload: Record<string, unknown>;
+    citations: string[];
+    summary: string;
+    linked_draft_group_id: string | null;
+  }>,
+): Promise<BusinessOutput> {
+  return request<BusinessOutput>(`/outputs/${encodeURIComponent(outputId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }

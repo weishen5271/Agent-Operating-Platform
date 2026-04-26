@@ -4,8 +4,20 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { getChatConversation, getChatConversations, streamChatCompletion } from "@/lib/api-client";
-import type { ChatCompletionResponse, ChatStreamEvent, ConversationResponse, TraceResponse } from "@/lib/api-client/types";
+import {
+  createChatConversation,
+  deleteChatConversation,
+  getChatConversation,
+  getChatConversations,
+  streamChatCompletion,
+} from "@/lib/api-client";
+import type {
+  ChatCompletionResponse,
+  ChatStreamEvent,
+  ConversationListResponse,
+  ConversationResponse,
+  TraceResponse,
+} from "@/lib/api-client/types";
 import { chatData } from "@/lib/workspace-fixtures";
 
 type RenderMessage = {
@@ -20,7 +32,66 @@ type RenderTraceStep = {
   summary: string;
   status: string;
   timestamp: string;
+  node_type?: string | null;
+  ref?: string | null;
+  ref_source?: string | null;
+  ref_version?: string | null;
 };
+
+type ConversationSummary = ConversationListResponse["items"][number];
+
+const NODE_TYPE_META: Record<string, { icon: string; label: string }> = {
+  capability: { icon: "extension", label: "Capability" },
+  tool: { icon: "build", label: "Tool" },
+  skill: { icon: "auto_awesome", label: "Skill" },
+  retrieval: { icon: "search", label: "检索" },
+  guard: { icon: "shield", label: "Guard" },
+  runtime: { icon: "play_circle", label: "Runtime" },
+};
+
+function nodeTypeMeta(type: string | null | undefined): { icon: string; label: string } {
+  if (type && NODE_TYPE_META[type]) return NODE_TYPE_META[type];
+  return { icon: "radio_button_checked", label: "Step" };
+}
+
+type UsedRef = {
+  ref: string;
+  ref_source: string | null;
+  ref_version: string | null;
+  count: number;
+};
+
+function aggregateUsedRefs(steps: RenderTraceStep[], type: "skill" | "tool"): UsedRef[] {
+  const map = new Map<string, UsedRef>();
+  for (const step of steps) {
+    if (step.node_type !== type || !step.ref) continue;
+    const key = step.ref;
+    const existing = map.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      map.set(key, {
+        ref: step.ref,
+        ref_source: step.ref_source ?? null,
+        ref_version: step.ref_version ?? null,
+        count: 1,
+      });
+    }
+  }
+  return [...map.values()];
+}
+
+function readPackageContext() {
+  if (typeof window === "undefined") return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const primary = params.get("primary") || undefined;
+  const commons = params.get("commons")?.split(",").filter(Boolean) ?? [];
+  if (!primary && commons.length === 0) return undefined;
+  return {
+    primary_package: primary,
+    common_packages: commons,
+  };
+}
 
 type RetrievalMode = "auto" | "rag" | "wiki";
 
@@ -196,6 +267,8 @@ export function ChatWorkbench() {
   const [messages, setMessages] = useState<RenderMessage[]>([]);
   const [trace, setTrace] = useState<TraceResponse | null>(null);
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [isConversationListCollapsed, setIsConversationListCollapsed] = useState(false);
   const [input, setInput] = useState("");
   const [latestResponse, setLatestResponse] = useState<ChatCompletionResponse | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("auto");
@@ -212,6 +285,8 @@ export function ChatWorkbench() {
     async function loadLatestConversation() {
       try {
         const conversations = await getChatConversations();
+        if (cancelled) return;
+        setConversations(conversations.items);
         const latestConversation = conversations.items[0];
         if (!latestConversation || cancelled) return;
         const conversation = await getChatConversation(latestConversation.conversation_id);
@@ -234,6 +309,78 @@ export function ChatWorkbench() {
     };
   }, []);
 
+  async function refreshConversations() {
+    const next = await getChatConversations();
+    setConversations(next.items);
+  }
+
+  function resetConversationState(nextConversationId?: string) {
+    setConversationId(nextConversationId);
+    setMessages([]);
+    setTrace(null);
+    setLatestResponse(null);
+    setError(null);
+    deltaBuffersRef.current = {};
+    finalContentRef.current = {};
+    Object.values(typewriterTimersRef.current).forEach((timer) => window.clearInterval(timer));
+    typewriterTimersRef.current = {};
+  }
+
+  async function createConversation() {
+    if (isStreaming) return;
+    try {
+      const conversation = await createChatConversation();
+      hasStartedLocalConversationRef.current = true;
+      resetConversationState(conversation.conversation_id);
+      setConversations((prev) => [
+        {
+          conversation_id: conversation.conversation_id,
+          title: conversation.title,
+          updated_at: conversation.updated_at,
+        },
+        ...prev,
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "新建会话失败。";
+      setError(`新建会话失败：${message}`);
+    }
+  }
+
+  async function selectConversation(nextConversationId: string) {
+    if (isStreaming || nextConversationId === conversationId) return;
+    try {
+      const conversation = await getChatConversation(nextConversationId);
+      hasStartedLocalConversationRef.current = true;
+      setConversationId(conversation.conversation_id);
+      setMessages(conversationToMessages(conversation));
+      setTrace(null);
+      setLatestResponse(null);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "会话加载失败。";
+      setError(`会话加载失败：${message}`);
+    }
+  }
+
+  async function removeConversation(targetConversationId: string) {
+    if (isStreaming) return;
+    try {
+      await deleteChatConversation(targetConversationId);
+      const remaining = conversations.filter((item) => item.conversation_id !== targetConversationId);
+      setConversations(remaining);
+      if (targetConversationId !== conversationId) return;
+      const next = remaining[0];
+      if (next) {
+        await selectConversation(next.conversation_id);
+      } else {
+        resetConversationState(undefined);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "删除会话失败。";
+      setError(`删除会话失败：${message}`);
+    }
+  }
+
   const references =
     latestResponse?.sources.map((item) => ({
       title: item.title,
@@ -253,7 +400,15 @@ export function ChatWorkbench() {
       summary: item.summary,
       status: item.status,
       timestamp: item.timestamp ?? item.name,
+      node_type: item.node_type ?? null,
+      ref: item.ref ?? null,
+      ref_source: item.ref_source ?? null,
+      ref_version: item.ref_version ?? null,
     })) ?? [];
+
+  const usedSkills = aggregateUsedRefs(traceSteps, "skill");
+  const usedTools = aggregateUsedRefs(traceSteps, "tool");
+  const routing = latestResponse?.routing ?? null;
 
   async function submitMessage(message: string) {
     const trimmed = message.trim();
@@ -286,9 +441,15 @@ export function ChatWorkbench() {
 
     let failed = false;
     try {
-      await streamChatCompletion(trimmed, retrievalMode, (event) => {
-        handleStreamEvent(event, assistantMessageId, trimmed);
-      }, conversationId);
+      await streamChatCompletion(
+        trimmed,
+        retrievalMode,
+        (event) => {
+          handleStreamEvent(event, assistantMessageId, trimmed);
+        },
+        conversationId,
+        readPackageContext(),
+      );
     } catch (err) {
       failed = true;
       const message = err instanceof Error ? err.message : "请确认后端 API 已启动。";
@@ -306,6 +467,15 @@ export function ChatWorkbench() {
         setIsStreaming(false);
       }
     }
+  }
+
+  function switchPackageAndResend(packageId: string) {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      params.set("primary", packageId);
+      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+    }
+    void submitMessage(trace?.message || input);
   }
 
   function clearTypewriterState(messageId: string) {
@@ -417,6 +587,7 @@ export function ChatWorkbench() {
         sources: event.sources,
         warnings: event.warnings,
         draft_action: event.draft_action ?? null,
+        routing: event.routing ?? null,
       });
       return;
     }
@@ -440,11 +611,90 @@ export function ChatWorkbench() {
           : prev,
       );
       setTrace((prev) => (prev ? { ...prev, answer: event.content } : prev));
+      void refreshConversations();
     }
   }
 
   return (
-    <section className="chat-debug-layout">
+    <section className={`chat-debug-layout ${isConversationListCollapsed ? "conversation-list-collapsed" : ""}`}>
+      <aside className="panel-card conversation-panel">
+        <div className="conversation-panel-header">
+          {!isConversationListCollapsed ? (
+            <>
+              <div>
+                <h3>会话</h3>
+                <p>按最近更新时间排序</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="收起会话列表"
+                onClick={() => setIsConversationListCollapsed(true)}
+              >
+                <span className="material-symbols-outlined">left_panel_close</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="展开会话列表"
+              onClick={() => setIsConversationListCollapsed(false)}
+            >
+              <span className="material-symbols-outlined">left_panel_open</span>
+            </button>
+          )}
+        </div>
+
+        {!isConversationListCollapsed ? (
+          <>
+            <button
+              type="button"
+              className="primary-button conversation-new-button"
+              disabled={isStreaming}
+              onClick={createConversation}
+            >
+              <span className="material-symbols-outlined">add</span>
+              新增会话
+            </button>
+            <div className="conversation-list">
+              {conversations.length > 0 ? (
+                conversations.map((item) => (
+                  <article
+                    key={item.conversation_id}
+                    className={`conversation-item ${conversationId === item.conversation_id ? "active" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      className="conversation-select"
+                      disabled={isStreaming}
+                      onClick={() => selectConversation(item.conversation_id)}
+                    >
+                      <span className="material-symbols-outlined">chat_bubble</span>
+                      <span>{item.title || "新会话"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      aria-label={`删除会话 ${item.title || "新会话"}`}
+                      disabled={isStreaming}
+                      onClick={() => removeConversation(item.conversation_id)}
+                    >
+                      <span className="material-symbols-outlined">delete</span>
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="conversation-empty">
+                  <span className="material-symbols-outlined">forum</span>
+                  <p>暂无会话</p>
+                </div>
+              )}
+            </div>
+          </>
+        ) : null}
+      </aside>
+
       <section className="panel-card chat-panel">
         <div className="panel-header">
           <div>
@@ -598,23 +848,75 @@ export function ChatWorkbench() {
           </button>
         </div>
 
+        {routing ? (
+          <div className="panel-subsection">
+            <h4>路由解释</h4>
+            <article className="stack-item">
+              <div>
+                <strong>{routing.matched_package_id}</strong>
+                <p>
+                  置信度 {(routing.confidence * 100).toFixed(0)}%
+                  {routing.signals.length ? ` · ${routing.signals.join(" · ")}` : ""}
+                </p>
+              </div>
+              <span className="status-chip plain">routing</span>
+            </article>
+            {routing.candidates.length ? (
+              <div className="routing-candidates">
+                {routing.candidates.map((candidate) => (
+                  <article key={candidate.package_id} className="routing-candidate">
+                    <div>
+                      <strong>{candidate.package_id}</strong>
+                      <div className="routing-confidence" aria-label={`置信度 ${(candidate.confidence * 100).toFixed(0)}%`}>
+                        <span style={{ width: `${Math.round(candidate.confidence * 100)}%` }} />
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost-button compact"
+                      disabled={isStreaming}
+                      onClick={() => switchPackageAndResend(candidate.package_id)}
+                    >
+                      <span className="material-symbols-outlined">replay</span>
+                      切换重发
+                    </button>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="trace-list">
           {traceSteps.length > 0 ? (
-            traceSteps.map((item, index) => (
-              <article
-                key={`${item.name}-${item.timestamp}-${index}`}
-                className={`trace-item ${item.status === "completed" ? "completed" : ""}`}
-              >
-                <div className="trace-dot">{String(index + 1).padStart(2, "0")}</div>
-                <div>
-                  <strong>{item.name}</strong>
-                  <p>{item.summary}</p>
-                </div>
-                <span className={`status-chip ${item.status === "completed" ? "success" : "warning"}`}>
-                  {item.status}
-                </span>
-              </article>
-            ))
+            traceSteps.map((item, index) => {
+              const meta = nodeTypeMeta(item.node_type);
+              return (
+                <article
+                  key={`${item.name}-${item.timestamp}-${index}`}
+                  className={`trace-item ${item.status === "completed" ? "completed" : ""}`}
+                >
+                  <div className="trace-dot" title={meta.label}>
+                    <span className="material-symbols-outlined">{meta.icon}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {item.name}
+                      {item.ref ? (
+                        <span className="mono" style={{ marginLeft: 8, opacity: 0.7 }}>
+                          {item.ref}
+                          {item.ref_source ? ` @${item.ref_source}` : ""}
+                        </span>
+                      ) : null}
+                    </strong>
+                    <p>{item.summary}</p>
+                  </div>
+                  <span className={`status-chip ${item.status === "completed" ? "success" : "warning"}`}>
+                    {item.status}
+                  </span>
+                </article>
+              );
+            })
           ) : (
             <div className="trace-empty-state">
               <span className="material-symbols-outlined">timeline</span>
@@ -622,6 +924,48 @@ export function ChatWorkbench() {
             </div>
           )}
         </div>
+
+        {usedSkills.length > 0 ? (
+          <div className="panel-subsection">
+            <h4>已用 Skill</h4>
+            <div className="stack-list">
+              {usedSkills.map((item) => (
+                <article key={`skill-${item.ref}`} className="stack-item">
+                  <div>
+                    <strong>{item.ref}</strong>
+                    <p>
+                      {item.ref_source ?? "package"}
+                      {item.ref_version ? ` · ${item.ref_version}` : ""}
+                      {item.count > 1 ? ` · 调用 ${item.count} 次` : ""}
+                    </p>
+                  </div>
+                  <span className="status-chip plain">skill</span>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {usedTools.length > 0 ? (
+          <div className="panel-subsection">
+            <h4>已用 Tool</h4>
+            <div className="stack-list">
+              {usedTools.map((item) => (
+                <article key={`tool-${item.ref}`} className="stack-item">
+                  <div>
+                    <strong>{item.ref}</strong>
+                    <p>
+                      {item.ref_source ?? "_platform"}
+                      {item.ref_version ? ` · ${item.ref_version}` : ""}
+                      {item.count > 1 ? ` · 调用 ${item.count} 次` : ""}
+                    </p>
+                  </div>
+                  <span className="status-chip plain">tool</span>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="panel-subsection">
           <h4>引用依据</h4>

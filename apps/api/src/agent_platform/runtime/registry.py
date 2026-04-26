@@ -23,6 +23,12 @@ class CapabilityRegistry:
     def list_capabilities(self) -> list[CapabilityDefinition]:
         return [plugin.capability for plugin in self._plugins.values()]
 
+    def list_plugins(self) -> list[CapabilityPlugin]:
+        return list(self._plugins.values())
+
+    def get_plugin(self, plugin_name: str) -> CapabilityPlugin:
+        return self._plugins[plugin_name]
+
     def get(self, capability_name: str) -> CapabilityDefinition:
         return self._plugins[capability_name].capability
 

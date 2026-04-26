@@ -18,6 +18,16 @@ export type HomeSnapshot = {
   }>;
 };
 
+export type TraceNodeType = "capability" | "tool" | "skill" | "retrieval" | "guard" | "runtime";
+export type TraceNodeSource = "package" | "_platform" | "_common";
+
+export type RoutingDecision = {
+  matched_package_id: string;
+  confidence: number;
+  candidates: Array<{ package_id: string; confidence: number }>;
+  signals: string[];
+};
+
 export type ChatCompletionResponse = {
   trace_id: string;
   conversation_id: string;
@@ -52,6 +62,7 @@ export type ChatCompletionResponse = {
     created_at: string;
   } | null;
   warnings?: string[];
+  routing?: RoutingDecision | null;
 };
 
 export type ConversationListResponse = {
@@ -87,6 +98,11 @@ export type TraceResponse = {
     status: string;
     summary: string;
     timestamp: string;
+    node_type?: TraceNodeType | null;
+    ref?: string | null;
+    ref_source?: TraceNodeSource | null;
+    ref_version?: string | null;
+    duration_ms?: number | null;
   }>;
   sources: ChatCompletionResponse["sources"];
 };
@@ -106,6 +122,7 @@ export type ChatStreamEvent =
       sources: ChatCompletionResponse["sources"];
       warnings?: string[];
       draft_action?: ChatCompletionResponse["draft_action"];
+      routing?: RoutingDecision | null;
     }
   | {
       event: "message_delta";
@@ -124,12 +141,42 @@ export type ChatStreamEvent =
       status?: number;
     };
 
+export type PackageDependency = {
+  kind: "platform_skill" | "common_package" | "plugin" | "platform_tool";
+  name: string;
+  version_range: string;
+  current_version: string;
+  compatible: boolean;
+};
+
+export type SkillSummary = {
+  name: string;
+  description: string;
+  version: string;
+  source: TraceNodeSource;
+  package_id?: string | null;
+  depends_on_capabilities: string[];
+  depends_on_tools: string[];
+};
+
+export type ToolSummary = {
+  name: string;
+  description: string;
+  version: string;
+  source: TraceNodeSource;
+  timeout_ms: number;
+  quota_per_minute: number;
+};
+
 export type AdminPackagesResponse = {
   packages: Array<{
+    package_id?: string;
     name: string;
     version: string;
     owner: string;
     status: string;
+    domain?: "industry" | "common" | "platform";
+    dependencies?: PackageDependency[];
   }>;
   capabilities: Array<{
     name: string;
@@ -137,6 +184,94 @@ export type AdminPackagesResponse = {
     side_effect_level: string;
     required_scope: string;
   }>;
+  skills?: SkillSummary[];
+  tools?: ToolSummary[];
+};
+
+export type PackageDetailResponse = {
+  package_id: string;
+  name: string;
+  version: string;
+  owner: string;
+  status: string;
+  domain: "industry" | "common" | "platform";
+  dependencies: PackageDependency[];
+  dependency_summary: {
+    platform_skills: number;
+    common_packages: number;
+    plugins: number;
+    tools: number;
+  };
+};
+
+export type PackageImpactResponse = {
+  target: {
+    name: string;
+    version: string;
+  };
+  affected_packages: Array<{
+    package_id: string;
+    name: string;
+    version: string;
+    dependency: PackageDependency;
+    risk: "low" | "medium" | "high";
+    compatible: boolean;
+    reason: string;
+  }>;
+};
+
+export type ReleasePlan = {
+  release_id: string;
+  package_id: string;
+  package_name: string;
+  skill: string;
+  version: string;
+  status: string;
+  rollout_percent: number;
+  metric_delta: string;
+  started_at: string;
+};
+
+export type AdminReleasesResponse = {
+  releases: ReleasePlan[];
+};
+
+export type PluginConfigSchemaResponse = {
+  plugin_name: string;
+  capability: {
+    name: string;
+    description: string;
+    risk_level: string;
+    side_effect_level: string;
+    required_scope: string;
+  };
+  config_schema: {
+    type: "object";
+    properties: Record<string, {
+      type?: string;
+      format?: string;
+      default?: unknown;
+      items?: { type?: string };
+    }>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
+  config: Record<string, unknown>;
+  auth_refs: string[];
+};
+
+export type TenantPackageOption = {
+  package_id: string;
+  name: string;
+  domain: "industry" | "common" | "platform";
+  version?: string;
+  status?: string;
+};
+
+export type TenantPackagesResponse = {
+  primary_package: string;
+  common_packages: string[];
+  available_packages: TenantPackageOption[];
 };
 
 export type AdminSystemResponse = {
@@ -177,6 +312,25 @@ export type AdminSecurityResponse = {
     payload: Record<string, unknown>;
     created_at: string;
   }>;
+  tool_overrides?: Array<{
+    tool_name: string;
+    tenant_id: string;
+    quota?: number;
+    timeout?: number;
+    disabled?: boolean;
+    overridden?: boolean;
+    default_quota?: number;
+    default_timeout?: number;
+  }>;
+  redlines?: Array<{
+    rule_id: string;
+    package_id?: string;
+    pattern: string;
+    action: string;
+    source: string;
+    enabled?: boolean;
+    recent_triggers: number;
+  }>;
 };
 
 export type DraftActionResponse = {
@@ -201,6 +355,11 @@ export type AdminKnowledgeSourceDetailResponse = {
     owner: string;
     chunk_count: number;
     status: string;
+    chunk_attributes_schema?: Record<string, {
+      type: string;
+      indexed: "hot" | "warm" | "cold";
+      filter?: string;
+    }>;
   };
   chunks: Array<{
     chunk_id: string;
@@ -216,6 +375,24 @@ export type AdminKnowledgeSourceDetailResponse = {
     created_at: string;
   }>;
   content: string;
+};
+
+export type AdminKnowledgeSourceAttributesResponse = {
+  source_id: string;
+  schema: Record<string, {
+    type: string;
+    indexed: "hot" | "warm" | "cold";
+    filter?: string;
+  }>;
+  fields: Array<{
+    field: string;
+    type: string;
+    indexed: "hot" | "warm" | "cold";
+    filter: string;
+    hit_count: number;
+    chunk_count: number;
+    hit_rate: number;
+  }>;
 };
 
 export type LLMRuntimeConfig = {
@@ -240,6 +417,7 @@ export type TenantProfile = {
   package: string;
   environment: string;
   budget: string;
+  enabled_common_packages?: string[];
   active: boolean;
 };
 
@@ -485,3 +663,29 @@ export type AdminTracesResponse = {
     created_at: string;
   }>;
 };
+
+export type BusinessOutputType = "report" | "chart" | "recommendation" | "action_plan";
+export type BusinessOutputStatus = "draft" | "reviewing" | "approved" | "exported" | "archived";
+
+export type BusinessOutput = {
+  output_id: string;
+  tenant_id: string;
+  package_id: string;
+  type: BusinessOutputType;
+  title: string;
+  status: BusinessOutputStatus;
+  payload: Record<string, unknown>;
+  citations: string[];
+  conversation_id: string | null;
+  trace_id: string | null;
+  linked_draft_group_id: string | null;
+  summary: string;
+  created_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type BusinessOutputListResponse = {
+  items: BusinessOutput[];
+};
+

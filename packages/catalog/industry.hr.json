@@ -1,0 +1,24 @@
+{
+  "package_id": "industry.hr",
+  "name": "HR 业务包",
+  "version": "v1.2.0",
+  "owner": "人力共享中心",
+  "status": "运行中",
+  "domain": "industry",
+  "intents": [
+    {
+      "name": "hr_query",
+      "score": 0.92,
+      "keywords": ["假期", "请假", "余额", "员工", "人事"]
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "plugin",
+      "name": "hr",
+      "version_range": "~0.6.0",
+      "current_version": "0.6.3",
+      "compatible": true
+    }
+  ]
+}

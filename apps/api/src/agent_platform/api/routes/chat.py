@@ -37,6 +37,8 @@ async def create_completion(payload: ChatCompletionRequest, auth: AuthContext) -
             tenant_id=tenant_id,
             user_id=user_id,
             retrieval_mode=payload.retrieval_mode,
+            primary_package=payload.primary_package,
+            common_packages=payload.common_packages,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -56,6 +58,8 @@ async def stream_completion(payload: ChatCompletionRequest, auth: AuthContext) -
                 tenant_id=tenant_id,
                 user_id=user_id,
                 retrieval_mode=payload.retrieval_mode,
+                primary_package=payload.primary_package,
+                common_packages=payload.common_packages,
             ):
                 yield _sse(event)
         except PermissionError as exc:
@@ -78,6 +82,13 @@ async def stream_completion(payload: ChatCompletionRequest, auth: AuthContext) -
 async def list_conversations(auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
     return {"items": await chat_service.list_conversations(tenant_id=tenant_id, user_id=user_id)}
+
+
+@router.post("/conversations", response_model=ConversationResponse)
+async def create_conversation(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    conversation = await chat_service.create_conversation(tenant_id=tenant_id, user_id=user_id)
+    return {**conversation, "messages": []}
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse)
@@ -103,6 +114,19 @@ async def get_conversation(conversation_id: str, auth: AuthContext) -> dict[str,
             for message in conversation.messages
         ],
     }
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    deleted = await chat_service.delete_conversation(
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"deleted": True}
 
 
 @router.get("/traces/{trace_id}", response_model=TraceResponse)

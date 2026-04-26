@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from agent_platform.bootstrap.settings import settings
 from agent_platform.domain.models import (
+    BusinessOutput,
     Conversation,
     ConversationMessage,
     DraftAction,
@@ -20,9 +21,13 @@ from agent_platform.domain.models import (
     KnowledgeSourceDetail,
     KnowledgeSearchResult,
     LLMRuntimeConfig,
+    OutputGuardRule,
+    PluginConfig,
+    ReleasePlan,
     SecurityEvent,
     SourceReference,
     TenantProfile,
+    ToolOverride,
     TraceRecord,
     TraceStep,
     UserContext,
@@ -33,6 +38,7 @@ from agent_platform.infrastructure.db import DatabaseRuntime
 from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
 from agent_platform.infrastructure.db_models import (
     ApprovalRequestRecord,
+    BusinessOutputRecord,
     ConversationMessageRecord,
     ConversationRecord,
     KnowledgeDocumentRecord,
@@ -47,9 +53,13 @@ from agent_platform.infrastructure.db_models import (
     KnowledgeWikiSourceChunkRecord,
     KnowledgeWikiSourceRecord,
     LLMRuntimeConfigRecord,
+    OutputGuardRuleRecord,
+    PluginConfigRecord,
+    ReleasePlanRecord,
     RequestTraceRecord,
     SecurityEventRecord,
     TenantRecord,
+    ToolOverrideRecord,
     TraceStepRecord,
     UserAccountRecord,
 )
@@ -64,12 +74,23 @@ DEFAULT_TENANT_BUDGET = "¥ 0"
 DEFAULT_ADMIN_USER_ID = "admin"
 DEFAULT_ADMIN_EMAIL = "admin@sw.com"
 DEFAULT_ADMIN_PASSWORD = "Aa111111"
+DEFAULT_CHUNK_ATTRIBUTES_SCHEMA = {
+    "equipment_model": {"type": "string", "indexed": "hot", "filter": "in"},
+    "fault_code_tags": {"type": "array<string>", "indexed": "hot", "filter": "array_contains"},
+    "safety_critical": {"type": "boolean", "indexed": "warm", "filter": "eq"},
+    "sop_step": {"type": "string", "indexed": "cold", "filter": ""},
+    "effective_date": {"type": "date", "indexed": "hot", "filter": "lte"},
+}
 
 
 class ConversationRepository(Protocol):
     async def list_recent(self, tenant_id: str, user_id: str, limit: int = 5) -> list[Conversation]: ...
 
+    async def create(self, tenant_id: str, user_id: str, title: str = "新会话") -> Conversation: ...
+
     async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None: ...
+
+    async def delete(self, tenant_id: str, user_id: str, conversation_id: str) -> bool: ...
 
     async def append_message(
         self,
@@ -78,6 +99,7 @@ class ConversationRepository(Protocol):
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
+        title: str | None = None,
     ) -> Conversation: ...
 
 
@@ -144,6 +166,49 @@ class UserRepository(Protocol):
     async def delete(self, tenant_id: str, user_id: str) -> bool: ...
 
 
+class ToolOverrideRepository(Protocol):
+    async def list_all(self) -> list[ToolOverride]: ...
+
+    async def upsert(self, override: ToolOverride) -> ToolOverride: ...
+
+
+class OutputGuardRuleRepository(Protocol):
+    async def list_all(self) -> list[OutputGuardRule]: ...
+
+    async def list_enabled(self) -> list[OutputGuardRule]: ...
+
+    async def upsert(self, rule: OutputGuardRule) -> OutputGuardRule: ...
+
+
+class PluginConfigRepository(Protocol):
+    async def get(self, tenant_id: str, plugin_name: str) -> PluginConfig | None: ...
+
+    async def upsert(self, plugin_config: PluginConfig) -> PluginConfig: ...
+
+
+class ReleasePlanRepository(Protocol):
+    async def list_recent(self) -> list[ReleasePlan]: ...
+
+    async def update_status(self, release_id: str, *, status: str, rollout_percent: int) -> ReleasePlan | None: ...
+
+
+class BusinessOutputRepository(Protocol):
+    async def list_for_tenant(
+        self,
+        tenant_id: str,
+        *,
+        type_filter: str | None = None,
+        package_id: str | None = None,
+        status: str | None = None,
+    ) -> list[BusinessOutput]: ...
+
+    async def get(self, tenant_id: str, output_id: str) -> BusinessOutput | None: ...
+
+    async def create(self, output: BusinessOutput) -> BusinessOutput: ...
+
+    async def update(self, output: BusinessOutput) -> BusinessOutput: ...
+
+
 class DraftRepository(Protocol):
     async def save(self, draft: DraftAction) -> DraftAction: ...
 
@@ -154,6 +219,8 @@ class DraftRepository(Protocol):
 
 class SecurityRepository(Protocol):
     async def list_recent(self, tenant_id: str) -> list[SecurityEvent]: ...
+
+    async def save(self, event: SecurityEvent) -> SecurityEvent: ...
 
 
 class LLMConfigRepository(Protocol):
@@ -241,6 +308,11 @@ def _trace_from_record(record: RequestTraceRecord) -> TraceRecord:
                 status=item.status,
                 summary=item.summary,
                 timestamp=item.timestamp,
+                node_type=item.node_type,
+                ref=item.ref,
+                ref_source=item.ref_source,
+                ref_version=item.ref_version,
+                duration_ms=item.duration_ms,
             )
             for item in ordered_steps
         ],
@@ -287,6 +359,7 @@ def _knowledge_from_record(record: KnowledgeDocumentRecord) -> KnowledgeSource:
         owner=record.owner,
         chunk_count=record.chunk_count,
         status=record.status,
+        chunk_attributes_schema=dict(record.chunk_attributes_schema or {}),
     )
 
 
@@ -361,6 +434,21 @@ class PostgresConversationRepository:
             )
             return [_conversation_from_record(item) for item in result.scalars().unique().all()]
 
+    async def create(self, tenant_id: str, user_id: str, title: str = "新会话") -> Conversation:
+        async with self._runtime.session() as session:
+            now = utc_now()
+            conversation = ConversationRecord(
+                conversation_id=str(uuid4()),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                title=title.strip()[:255] or "新会话",
+                updated_at=now,
+            )
+            session.add(conversation)
+            await session.commit()
+            await session.refresh(conversation, attribute_names=["messages"])
+            return _conversation_from_record(conversation)
+
     async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None:
         async with self._runtime.session() as session:
             conversation = await session.get(
@@ -372,6 +460,21 @@ class PostgresConversationRepository:
                 return None
             return _conversation_from_record(conversation)
 
+    async def delete(self, tenant_id: str, user_id: str, conversation_id: str) -> bool:
+        async with self._runtime.session() as session:
+            conversation = await session.get(
+                ConversationRecord,
+                conversation_id,
+                options=[selectinload(ConversationRecord.messages)],
+            )
+            if conversation is None or conversation.tenant_id != tenant_id or conversation.user_id != user_id:
+                return False
+            for message in list(conversation.messages):
+                await session.delete(message)
+            await session.delete(conversation)
+            await session.commit()
+            return True
+
     async def append_message(
         self,
         tenant_id: str,
@@ -379,6 +482,7 @@ class PostgresConversationRepository:
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
+        title: str | None = None,
     ) -> Conversation:
         resolved_conversation_id = conversation_id or str(uuid4())
         async with self._runtime.session() as session:
@@ -393,7 +497,7 @@ class PostgresConversationRepository:
                     conversation_id=resolved_conversation_id,
                     tenant_id=tenant_id,
                     user_id=user_id,
-                    title=user_message[:24] or "新会话",
+                    title=(title or user_message[:24] or "新会话")[:255],
                     updated_at=now,
                 )
                 session.add(conversation)
@@ -401,6 +505,8 @@ class PostgresConversationRepository:
             else:
                 if conversation.tenant_id != tenant_id or conversation.user_id != user_id:
                     raise ValueError("Conversation not found")
+                if title and not conversation.messages:
+                    conversation.title = title[:255]
                 conversation.updated_at = now
 
             session.add_all(
@@ -447,6 +553,11 @@ class PostgresTraceRepository:
                             status=item.status,
                             summary=item.summary,
                             timestamp=item.timestamp,
+                            node_type=item.node_type,
+                            ref=item.ref,
+                            ref_source=item.ref_source,
+                            ref_version=item.ref_version,
+                            duration_ms=item.duration_ms,
                         )
                         for item in trace.steps
                     ],
@@ -493,6 +604,7 @@ class PostgresTenantRepository:
                 package=record.package,
                 environment=record.environment,
                 budget=record.budget,
+                enabled_common_packages=list(record.enabled_common_packages or []),
                 active=record.active,
             )
 
@@ -506,6 +618,7 @@ class PostgresTenantRepository:
                     package=item.package,
                     environment=item.environment,
                     budget=item.budget,
+                    enabled_common_packages=list(item.enabled_common_packages or []),
                     active=item.active,
                 )
                 for item in result.scalars().all()
@@ -518,6 +631,7 @@ class PostgresTenantRepository:
                 tenant_id=tenant.tenant_id,
                 name=tenant.name,
                 package=tenant.package,
+                enabled_common_packages=list(tenant.enabled_common_packages),
                 environment=tenant.environment,
                 budget=tenant.budget,
                 active=tenant.active,
@@ -538,6 +652,7 @@ class PostgresTenantRepository:
                 raise ValueError(f"Tenant {tenant.tenant_id} not found")
             record.name = tenant.name
             record.package = tenant.package
+            record.enabled_common_packages = list(tenant.enabled_common_packages)
             record.environment = tenant.environment
             record.budget = tenant.budget
             record.active = tenant.active
@@ -549,6 +664,7 @@ class PostgresTenantRepository:
                 package=record.package,
                 environment=record.environment,
                 budget=record.budget,
+                enabled_common_packages=list(record.enabled_common_packages or []),
                 active=record.active,
             )
 
@@ -561,6 +677,187 @@ class PostgresTenantRepository:
             await session.delete(record)
             await session.commit()
             return True
+
+
+class PostgresToolOverrideRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_all(self) -> list[ToolOverride]:
+        async with self._runtime.session() as session:
+            result = await session.execute(select(ToolOverrideRecord).order_by(ToolOverrideRecord.tenant_id, ToolOverrideRecord.tool_name))
+            return [
+                ToolOverride(
+                    tenant_id=item.tenant_id,
+                    tool_name=item.tool_name,
+                    quota=item.quota,
+                    timeout=item.timeout,
+                    disabled=item.disabled,
+                )
+                for item in result.scalars().all()
+            ]
+
+    async def upsert(self, override: ToolOverride) -> ToolOverride:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(ToolOverrideRecord)
+                .where(ToolOverrideRecord.tenant_id == override.tenant_id)
+                .where(ToolOverrideRecord.tool_name == override.tool_name)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                record = ToolOverrideRecord(
+                    override_id=f"tov-{uuid4().hex[:12]}",
+                    tenant_id=override.tenant_id,
+                    tool_name=override.tool_name,
+                    quota=override.quota,
+                    timeout=override.timeout,
+                    disabled=override.disabled,
+                )
+                session.add(record)
+            else:
+                record.quota = override.quota
+                record.timeout = override.timeout
+                record.disabled = override.disabled
+            await session.commit()
+            return override
+
+
+class PostgresOutputGuardRuleRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_all(self) -> list[OutputGuardRule]:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(OutputGuardRuleRecord).order_by(OutputGuardRuleRecord.package_id, OutputGuardRuleRecord.rule_id)
+            )
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    async def list_enabled(self) -> list[OutputGuardRule]:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(OutputGuardRuleRecord)
+                .where(OutputGuardRuleRecord.enabled.is_(True))
+                .order_by(OutputGuardRuleRecord.package_id, OutputGuardRuleRecord.rule_id)
+            )
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    async def upsert(self, rule: OutputGuardRule) -> OutputGuardRule:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(OutputGuardRuleRecord).where(OutputGuardRuleRecord.rule_id == rule.rule_id)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                record = OutputGuardRuleRecord(
+                    rule_id=rule.rule_id,
+                    package_id=rule.package_id,
+                    pattern=rule.pattern,
+                    action=rule.action,
+                    source=rule.source,
+                    enabled=rule.enabled,
+                )
+                session.add(record)
+            else:
+                record.package_id = rule.package_id
+                record.pattern = rule.pattern
+                record.action = rule.action
+                record.source = rule.source
+                record.enabled = rule.enabled
+            await session.commit()
+            return rule
+
+    @staticmethod
+    def _to_domain(record: OutputGuardRuleRecord) -> OutputGuardRule:
+        return OutputGuardRule(
+            rule_id=record.rule_id,
+            package_id=record.package_id,
+            pattern=record.pattern,
+            action=record.action,
+            source=record.source,
+            enabled=record.enabled,
+        )
+
+
+class PostgresPluginConfigRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def get(self, tenant_id: str, plugin_name: str) -> PluginConfig | None:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(PluginConfigRecord)
+                .where(PluginConfigRecord.tenant_id == tenant_id)
+                .where(PluginConfigRecord.plugin_name == plugin_name)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return PluginConfig(
+                tenant_id=record.tenant_id,
+                plugin_name=record.plugin_name,
+                config=dict(record.config or {}),
+            )
+
+    async def upsert(self, plugin_config: PluginConfig) -> PluginConfig:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(PluginConfigRecord)
+                .where(PluginConfigRecord.tenant_id == plugin_config.tenant_id)
+                .where(PluginConfigRecord.plugin_name == plugin_config.plugin_name)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                record = PluginConfigRecord(
+                    config_id=f"pcfg-{uuid4().hex[:12]}",
+                    tenant_id=plugin_config.tenant_id,
+                    plugin_name=plugin_config.plugin_name,
+                    config=dict(plugin_config.config),
+                )
+                session.add(record)
+            else:
+                record.config = dict(plugin_config.config)
+            await session.commit()
+            return plugin_config
+
+
+class PostgresReleasePlanRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_recent(self) -> list[ReleasePlan]:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(ReleasePlanRecord).order_by(desc(ReleasePlanRecord.started_at), ReleasePlanRecord.package_id)
+            )
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    async def update_status(self, release_id: str, *, status: str, rollout_percent: int) -> ReleasePlan | None:
+        async with self._runtime.session() as session:
+            result = await session.execute(select(ReleasePlanRecord).where(ReleasePlanRecord.release_id == release_id))
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            record.status = status
+            record.rollout_percent = rollout_percent
+            await session.commit()
+            await session.refresh(record)
+            return self._to_domain(record)
+
+    @staticmethod
+    def _to_domain(record: ReleasePlanRecord) -> ReleasePlan:
+        return ReleasePlan(
+            release_id=record.release_id,
+            package_id=record.package_id,
+            package_name=record.package_name,
+            skill=record.skill,
+            version=record.version,
+            status=record.status,
+            rollout_percent=record.rollout_percent,
+            metric_delta=record.metric_delta,
+            started_at=record.started_at,
+        )
 
 
 class PostgresUserRepository:
@@ -664,6 +961,95 @@ class PostgresUserRepository:
             return True
 
 
+class PostgresBusinessOutputRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_for_tenant(
+        self,
+        tenant_id: str,
+        *,
+        type_filter: str | None = None,
+        package_id: str | None = None,
+        status: str | None = None,
+    ) -> list[BusinessOutput]:
+        async with self._runtime.session() as session:
+            stmt = select(BusinessOutputRecord).where(BusinessOutputRecord.tenant_id == tenant_id)
+            if type_filter:
+                stmt = stmt.where(BusinessOutputRecord.type == type_filter)
+            if package_id:
+                stmt = stmt.where(BusinessOutputRecord.package_id == package_id)
+            if status:
+                stmt = stmt.where(BusinessOutputRecord.status == status)
+            stmt = stmt.order_by(desc(BusinessOutputRecord.created_at))
+            result = await session.execute(stmt)
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    async def get(self, tenant_id: str, output_id: str) -> BusinessOutput | None:
+        async with self._runtime.session() as session:
+            record = await session.get(BusinessOutputRecord, output_id)
+            if record is None or record.tenant_id != tenant_id:
+                return None
+            return self._to_domain(record)
+
+    async def create(self, output: BusinessOutput) -> BusinessOutput:
+        async with self._runtime.session() as session:
+            record = BusinessOutputRecord(
+                output_id=output.output_id,
+                tenant_id=output.tenant_id,
+                package_id=output.package_id,
+                type=output.type,
+                title=output.title,
+                status=output.status,
+                payload=output.payload,
+                citations=list(output.citations),
+                conversation_id=output.conversation_id,
+                trace_id=output.trace_id,
+                linked_draft_group_id=output.linked_draft_group_id,
+                summary=output.summary,
+                created_by=output.created_by,
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return self._to_domain(record)
+
+    async def update(self, output: BusinessOutput) -> BusinessOutput:
+        async with self._runtime.session() as session:
+            record = await session.get(BusinessOutputRecord, output.output_id)
+            if record is None or record.tenant_id != output.tenant_id:
+                raise ValueError("Business output not found")
+            record.title = output.title
+            record.status = output.status
+            record.payload = output.payload
+            record.citations = list(output.citations)
+            record.summary = output.summary
+            record.linked_draft_group_id = output.linked_draft_group_id
+            await session.commit()
+            await session.refresh(record)
+            return self._to_domain(record)
+
+    @staticmethod
+    def _to_domain(record: BusinessOutputRecord) -> BusinessOutput:
+        return BusinessOutput(
+            output_id=record.output_id,
+            tenant_id=record.tenant_id,
+            package_id=record.package_id,
+            type=record.type,
+            title=record.title,
+            status=record.status,
+            payload=dict(record.payload or {}),
+            citations=list(record.citations or []),
+            conversation_id=record.conversation_id,
+            trace_id=record.trace_id,
+            linked_draft_group_id=record.linked_draft_group_id,
+            summary=record.summary or "",
+            created_by=record.created_by or "",
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+
 class PostgresDraftRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:
         self._runtime = runtime
@@ -723,6 +1109,21 @@ class PostgresSecurityRepository:
                 .order_by(desc(SecurityEventRecord.created_at))
             )
             return [_security_from_record(item) for item in result.scalars().all()]
+
+    async def save(self, event: SecurityEvent) -> SecurityEvent:
+        async with self._runtime.session() as session:
+            record = SecurityEventRecord(
+                event_id=event.event_id,
+                tenant_id=event.tenant_id,
+                category=event.category,
+                severity=event.severity,
+                title=event.title,
+                status=event.status,
+                owner=event.owner,
+            )
+            session.add(record)
+            await session.commit()
+            return event
 
 
 class PostgresKnowledgeRepository:
@@ -833,6 +1234,7 @@ class PostgresKnowledgeRepository:
                 owner=owner,
                 chunk_count=len(contents),
                 status="运行中",
+                chunk_attributes_schema=dict(DEFAULT_CHUNK_ATTRIBUTES_SCHEMA),
             )
             session.add(document)
             for index, item in enumerate(normalized):

@@ -1,0 +1,36 @@
+{
+  "package_id": "_common/report_gen",
+  "name": "报告生成",
+  "version": "v0.5.2",
+  "owner": "业务效率组",
+  "status": "运行中",
+  "domain": "common",
+  "intents": [
+    {
+      "name": "report_compose",
+      "score": 0.66,
+      "keywords": ["报告", "导出", "汇总"]
+    }
+  ],
+  "skills": [
+    {
+      "name": "report_compose",
+      "description": "汇总事实、引用、结论与建议，输出结构化报告。",
+      "version": "0.5.2",
+      "source": "_common",
+      "package_id": "_common/report_gen",
+      "depends_on_capabilities": ["knowledge.query"],
+      "depends_on_tools": ["json_path"],
+      "enabled": true
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "platform_skill",
+      "name": "report_compose",
+      "version_range": ">=0.5 <1.0",
+      "current_version": "0.5.2",
+      "compatible": true
+    }
+  ]
+}

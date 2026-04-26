@@ -18,9 +18,13 @@ from test_chat_runtime_chain import (
     FakeDraftRepository,
     FakeKnowledgeBaseRepository,
     FakeLLMConfigRepository,
+    FakeOutputGuardRuleRepository,
+    FakePluginConfigRepository,
+    FakeReleasePlanRepository,
     FakeSecurityRepository,
     FakeTenantRepository,
     FakeTraceRepository,
+    FakeToolOverrideRepository,
     FakeUserRepository,
     FakeWikiService,
 )
@@ -81,11 +85,18 @@ class RecordingKnowledgeRepo:
 
 
 def _build_service(*, llm_client, knowledge_repo, llm_config: FakeLLMConfigRepository) -> ChatService:
+    from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
     return ChatService(
         registry=CapabilityRegistry(),
+        skills=SkillRegistry(),
+        tools=ToolRegistry(),
         conversations=FakeConversationRepository(),
         traces=FakeTraceRepository(),
         tenants=FakeTenantRepository(),
+        tool_overrides=FakeToolOverrideRepository(),
+        output_guard_rules=FakeOutputGuardRuleRepository(),
+        plugin_configs=FakePluginConfigRepository(),
+        releases=FakeReleasePlanRepository(),
         users=FakeUserRepository(),
         drafts=FakeDraftRepository(),
         security_events=FakeSecurityRepository(),

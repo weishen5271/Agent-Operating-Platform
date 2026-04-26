@@ -15,6 +15,7 @@ class TenantRecord(Base):
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     package: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled_common_packages: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     environment: Mapped[str] = mapped_column(String(64), nullable=False)
     budget: Mapped[str] = mapped_column(String(64), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -80,6 +81,11 @@ class TraceStepRecord(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    node_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ref_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ref_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trace: Mapped["RequestTraceRecord"] = relationship(back_populates="steps")
 
 
@@ -113,6 +119,78 @@ class SecurityEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class ToolOverrideRecord(Base):
+    __tablename__ = "tool_override"
+
+    override_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class OutputGuardRuleRecord(Base):
+    __tablename__ = "output_guard_rule"
+
+    rule_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    package_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PluginConfigRecord(Base):
+    __tablename__ = "plugin_config"
+
+    config_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    plugin_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ReleasePlanRecord(Base):
+    __tablename__ = "release_plan"
+
+    release_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    package_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    package_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    skill: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    rollout_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metric_delta: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class KnowledgeDocumentRecord(Base):
     __tablename__ = "knowledge_document"
 
@@ -124,6 +202,7 @@ class KnowledgeDocumentRecord(Base):
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_attributes_schema: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     chunks: Mapped[list["KnowledgeChunkRecord"]] = relationship(back_populates="document")
 
 
@@ -158,6 +237,7 @@ class KnowledgeWikiSourceRecord(Base):
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_attributes_schema: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     chunks: Mapped[list["KnowledgeWikiSourceChunkRecord"]] = relationship(back_populates="document")
 
 
@@ -338,6 +418,28 @@ class LLMRuntimeConfigRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class BusinessOutputRecord(Base):
+    __tablename__ = "business_output"
+
+    output_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    package_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    citations: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    linked_draft_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 def import_db_models() -> None:
     _ = (
         TenantRecord,
@@ -360,4 +462,5 @@ def import_db_models() -> None:
         KnowledgeWikiFeedbackRecord,
         KnowledgeBaseRecord,
         LLMRuntimeConfigRecord,
+        BusinessOutputRecord,
     )

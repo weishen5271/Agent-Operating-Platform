@@ -14,6 +14,12 @@ class ProcurementDraftPlugin(CapabilityPlugin):
         input_schema={"required": ["request_title", "amount"]},
         output_schema={"required": ["summary", "approval_hint"]},
     )
+    config_schema = {
+        "endpoint": {"type": "string", "required": True, "default": "https://workflow.example.local"},
+        "auth_ref": {"type": "string", "required": True, "format": "secret-ref"},
+        "timeout_ms": {"type": "integer", "default": 5000},
+    }
+    auth_ref = "secrets/workflow_sandbox_token"
 
     def invoke(self, payload: dict[str, object]) -> dict[str, object]:
         request_title = str(payload["request_title"])

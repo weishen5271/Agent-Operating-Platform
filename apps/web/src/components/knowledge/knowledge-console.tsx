@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { KnowledgeBaseManager } from "@/components/knowledge/knowledge-base-manager";
 import { KnowledgeIngestPanel } from "@/components/knowledge/knowledge-ingest-panel";
+import { KnowledgeSourceAttributes } from "@/components/knowledge/knowledge-source-detail";
 import { WikiFileDistributionPanel } from "@/components/knowledge/wiki-file-distribution-panel";
 import { WikiManagementPanel } from "@/components/knowledge/wiki-management-panel";
 import { WikiSearchPanel } from "@/components/knowledge/wiki-search-panel";
@@ -356,6 +357,8 @@ export function KnowledgeConsole({
                       </dd>
                     </div>
                   </dl>
+
+                  <KnowledgeSourceAttributes sourceId={sourceDetail.source.source_id} />
 
                   <div style={{ marginTop: "1rem" }}>
                     <h4 style={{ margin: "0 0 0.5rem" }}>切片元数据</h4>

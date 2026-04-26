@@ -1,0 +1,40 @@
+{
+  "package_id": "_common/knowledge",
+  "name": "通用知识问答",
+  "version": "v1.0.3",
+  "owner": "知识平台组",
+  "status": "运行中",
+  "domain": "common",
+  "intents": [
+    {
+      "name": "knowledge_query",
+      "score": 0.88,
+      "keywords": ["知识库", "文档", "制度", "资料", "引用", "依据"]
+    },
+    {
+      "name": "wiki_query",
+      "score": 0.88,
+      "keywords": ["wiki", "页面", "引用", "资料"]
+    }
+  ],
+  "skills": [
+    {
+      "name": "kb_grounded_qa",
+      "description": "基于知识库的有据问答：检索 → 重排 → 模型生成 → 引用对齐。",
+      "version": "1.3.1",
+      "source": "_platform",
+      "depends_on_capabilities": ["knowledge.query"],
+      "depends_on_tools": [],
+      "enabled": true
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "platform_skill",
+      "name": "kb_grounded_qa",
+      "version_range": ">=1.2 <2.0",
+      "current_version": "1.3.1",
+      "compatible": true
+    }
+  ]
+}

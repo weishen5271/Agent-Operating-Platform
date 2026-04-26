@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useLinkStatus } from "next/dist/client/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { getCurrentUser } from "@/lib/api-client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentUser, getTenantPackages } from "@/lib/api-client";
+import { PackageContextBadge } from "@/components/packages/package-context-badge";
+import { PackageSwitcher } from "@/components/packages/package-switcher";
+import type { TenantPackagesResponse } from "@/lib/api-client/types";
 
 type NavKey =
   | "overview"
@@ -13,6 +16,7 @@ type NavKey =
   | "security"
   | "audit"
   | "knowledge"
+  | "outputs"
   | "system";
 
 type NavHref =
@@ -22,6 +26,7 @@ type NavHref =
   | "/security"
   | "/audit"
   | "/knowledge"
+  | "/outputs"
   | "/system";
 
 type ConsoleNavItem = {
@@ -64,6 +69,7 @@ const navGroups: ConsoleNavGroup[] = [
     items: [
       { key: "packages", href: "/packages", label: "业务包管理", icon: "inventory_2" },
       { key: "knowledge", href: "/knowledge", label: "知识库治理", icon: "library_books" },
+      { key: "outputs", href: "/outputs", label: "业务成果", icon: "lightbulb" },
     ],
   },
   {
@@ -103,7 +109,10 @@ export function Shell({
   const pathname = usePathname();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [isPackageMenuOpen, setIsPackageMenuOpen] = useState(false);
+  const [tenantPackages, setTenantPackages] = useState<TenantPackagesResponse | null>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const packageMenuRef = useRef<HTMLDivElement>(null);
 
   const [progressKey, setProgressKey] = useState(0);
   const [navigating, setNavigating] = useState(false);
@@ -137,11 +146,23 @@ export function Shell({
       if (!userMenuRef.current?.contains(event.target as Node)) {
         setIsUserMenuOpen(false);
       }
+      if (!packageMenuRef.current?.contains(event.target as Node)) {
+        setIsPackageMenuOpen(false);
+      }
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, []);
+
+  useEffect(() => {
+    if (!user?.tenant_id) return;
+    getTenantPackages(user.tenant_id)
+      .then(setTenantPackages)
+      .catch(() => {
+        // 包上下文展示失败不影响主流程，弹层内会展示具体错误。
+      });
+  }, [user?.tenant_id]);
 
   function handleLogout() {
     setIsUserMenuOpen(false);
@@ -158,6 +179,9 @@ export function Shell({
   const displayRole = user?.role ? user.role.replace(/_/g, " ").toUpperCase() : "ADMIN";
   const displayName = user?.email || user?.user_id || "运营管理员";
   const tenantName = user?.tenant_name || user?.tenant_id || "未绑定租户";
+  const handlePackagesChange = useCallback((data: TenantPackagesResponse) => {
+    setTenantPackages(data);
+  }, []);
 
   return (
     <div className="console-shell">
@@ -261,9 +285,32 @@ export function Shell({
             <button type="button" className="icon-button" aria-label="服务拓扑">
               <Icon name="account_tree" />
             </button>
-            <button type="button" className="icon-button" aria-label="应用切换">
-              <Icon name="apps" />
-            </button>
+            <PackageContextBadge
+              packages={tenantPackages}
+              primaryPackage={tenantPackages?.primary_package ?? null}
+              commonPackages={tenantPackages?.common_packages ?? []}
+            />
+            <div className="header-package-menu" ref={packageMenuRef}>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="应用切换"
+                aria-expanded={isPackageMenuOpen}
+                aria-haspopup="dialog"
+                onClick={() => setIsPackageMenuOpen((open) => !open)}
+              >
+                <Icon name="apps" />
+              </button>
+              {isPackageMenuOpen ? (
+                <div className="package-menu-panel" role="dialog" aria-label="业务包切换">
+                  <PackageSwitcher
+                    tenantId={user?.tenant_id}
+                    packages={tenantPackages}
+                    onPackagesChange={handlePackagesChange}
+                  />
+                </div>
+              ) : null}
+            </div>
             <div className="header-user-menu" ref={userMenuRef}>
               <button
                 type="button"

@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import json
 import re
 from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
 
 from agent_platform.bootstrap.settings import settings
 from agent_platform.domain.models import (
+    BusinessOutput,
     CapabilityDefinition,
     Conversation,
     DraftAction,
     KnowledgeBase,
     LLMRuntimeConfig,
+    OutputGuardRule,
+    PluginConfig,
+    ReleasePlan,
+    SecurityEvent,
+    SkillDefinition,
     SourceReference,
     TenantProfile,
+    ToolOverride,
     TraceRecord,
     TraceStep,
     UserContext,
@@ -23,21 +31,38 @@ from agent_platform.domain.models import (
 from agent_platform.infrastructure.auth import get_password_hash, verify_password
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 from agent_platform.infrastructure.repositories import (
+    BusinessOutputRepository,
     ConversationRepository,
     DraftRepository,
     KnowledgeRepository,
     KnowledgeBaseRepository,
     LLMConfigRepository,
+    OutputGuardRuleRepository,
+    PluginConfigRepository,
+    ReleasePlanRepository,
     SecurityRepository,
     TenantRepository,
+    ToolOverrideRepository,
     TraceRepository,
     UserRepository,
 )
 from agent_platform.runtime.registry import CapabilityRegistry
+from agent_platform.runtime.package_loader import PackageLoader
+from agent_platform.runtime.package_router import PackageRouter
+from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
 from agent_platform.wiki.service import WikiService
 
 
 TENANT_MANAGE_SCOPE = "tenant:manage"
+BUSINESS_OUTPUT_TYPES = {"report", "chart", "recommendation", "action_plan"}
+BUSINESS_OUTPUT_STATUSES = {"draft", "reviewing", "approved", "exported", "archived"}
+OUTPUT_GUARD_ACTIONS = {
+    "prepend_safety_warning",
+    "append_warning",
+    "block_or_escalate",
+    "mask_sensitive_data",
+    "downgrade_answer",
+}
 TraceStepCallback = Callable[[TraceRecord, TraceStep], Awaitable[None]]
 AnswerDeltaCallback = Callable[[str], Awaitable[None]]
 
@@ -46,9 +71,15 @@ class ChatService:
     def __init__(
         self,
         registry: CapabilityRegistry,
+        skills: SkillRegistry,
+        tools: ToolRegistry,
         conversations: ConversationRepository,
         traces: TraceRepository,
         tenants: TenantRepository,
+        tool_overrides: ToolOverrideRepository,
+        output_guard_rules: OutputGuardRuleRepository,
+        plugin_configs: PluginConfigRepository,
+        releases: ReleasePlanRepository,
         users: UserRepository,
         drafts: DraftRepository,
         security_events: SecurityRepository,
@@ -57,11 +88,18 @@ class ChatService:
         wiki_service: WikiService,
         llm_config: LLMConfigRepository,
         llm_client: OpenAICompatibleLLMClient,
+        business_outputs: "BusinessOutputRepository | None" = None,
     ) -> None:
         self._registry = registry
+        self._skills = skills
+        self._tools = tools
         self._conversations = conversations
         self._traces = traces
         self._tenants = tenants
+        self._tool_overrides = tool_overrides
+        self._output_guard_rules = output_guard_rules
+        self._plugin_configs = plugin_configs
+        self._releases = releases
         self._users = users
         self._drafts = drafts
         self._security_events = security_events
@@ -70,6 +108,7 @@ class ChatService:
         self._wiki_service = wiki_service
         self._llm_config = llm_config
         self._llm_client = llm_client
+        self._business_outputs = business_outputs
 
     async def home_snapshot(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -107,6 +146,8 @@ class ChatService:
         tenant_id: str | None = None,
         user_id: str | None = None,
         retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+        primary_package: str | None = None,
+        common_packages: list[str] | None = None,
     ) -> dict[str, object]:
         return await self._complete_core(
             message=message,
@@ -114,6 +155,8 @@ class ChatService:
             tenant_id=tenant_id,
             user_id=user_id,
             retrieval_mode=retrieval_mode,
+            primary_package=primary_package,
+            common_packages=common_packages,
         )
 
     async def stream_complete(
@@ -123,6 +166,8 @@ class ChatService:
         tenant_id: str | None = None,
         user_id: str | None = None,
         retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+        primary_package: str | None = None,
+        common_packages: list[str] | None = None,
     ) -> AsyncIterator[dict[str, object]]:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
@@ -145,6 +190,8 @@ class ChatService:
                 tenant_id=tenant_id,
                 user_id=user_id,
                 retrieval_mode=retrieval_mode,
+                primary_package=primary_package,
+                common_packages=common_packages,
                 on_step=emit_step,
                 on_answer_delta=emit_answer_delta,
             )
@@ -166,6 +213,7 @@ class ChatService:
             "sources": response["sources"],
             "warnings": response.get("warnings", []),
             "draft_action": response.get("draft_action"),
+            "routing": response.get("routing"),
         }
         answer = str(response["message"]["content"])
         yield {"event": "message_done", "content": answer}
@@ -178,6 +226,8 @@ class ChatService:
         tenant_id: str | None = None,
         user_id: str | None = None,
         retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+        primary_package: str | None = None,
+        common_packages: list[str] | None = None,
         on_step: TraceStepCallback | None = None,
         on_answer_delta: AnswerDeltaCallback | None = None,
     ) -> dict[str, object]:
@@ -185,6 +235,16 @@ class ChatService:
         tenant = await self._tenants.get(context.tenant_id)
         if tenant is None:
             raise ValueError("Tenant context not found")
+        if primary_package:
+            tenant = TenantProfile(
+                tenant_id=tenant.tenant_id,
+                name=tenant.name,
+                package=primary_package,
+                environment=tenant.environment,
+                budget=tenant.budget,
+                enabled_common_packages=list(common_packages or tenant.enabled_common_packages),
+                active=tenant.active,
+            )
         trace_id = str(uuid4())
         trace = TraceRecord(
             trace_id=trace_id,
@@ -209,7 +269,7 @@ class ChatService:
             answer_streamed = True
             await on_answer_delta(answer_chunk)
 
-        await add_step(TraceStep(name="received", status="completed", summary="请求已进入 Supervisor。"))
+        await add_step(TraceStep(name="received", status="completed", summary="请求已进入 Supervisor。", node_type="runtime"))
 
         input_findings = self._inspect_input(message)
         await add_step(
@@ -217,6 +277,7 @@ class ChatService:
                 name="input_guard",
                 status="completed",
                 summary="输入安全检查完成。" if not input_findings else f"输入安全检查完成，识别到 {', '.join(input_findings)}。",
+                node_type="guard",
             )
         )
 
@@ -230,14 +291,38 @@ class ChatService:
                     f"已读取短期记忆 {len(short_memory.messages)} 条消息，"
                     f"长期知识摘要：{long_memory_summary}"
                 ),
+                node_type="runtime",
             )
         )
 
-        intent = self._classify_intent(message, retrieval_mode=retrieval_mode)
+        planner_decision = await self._plan_intent_with_llm(
+            tenant_id=context.tenant_id,
+            message=message,
+            retrieval_mode=retrieval_mode,
+        )
+        if planner_decision is not None:
+            await add_step(
+                TraceStep(
+                    name="react_planner",
+                    status="completed",
+                    summary=f"LLM Planner 决策为 {planner_decision['intent']}。",
+                    node_type="runtime",
+                )
+            )
+        else:
+            await add_step(
+                TraceStep(
+                    name="react_planner",
+                    status="skipped",
+                    summary="LLM Planner 未启用或未返回有效决策，使用规则兜底。",
+                    node_type="runtime",
+                )
+            )
+        intent = str(planner_decision["intent"]) if planner_decision else self._classify_intent(message, retrieval_mode=retrieval_mode)
         strategy = "plan_execute" if intent in {"hr_query", "procurement_draft"} else "direct_answer"
         trace.intent = intent
         trace.strategy = strategy
-        await add_step(TraceStep(name="classified", status="completed", summary=f"识别意图为 {intent}，策略为 {strategy}。"))
+        await add_step(TraceStep(name="classified", status="completed", summary=f"识别意图为 {intent}，策略为 {strategy}。", node_type="runtime"))
 
         candidate_capabilities = self._select_candidate_capabilities(context)
         await add_step(
@@ -245,6 +330,7 @@ class ChatService:
                 name="capability_candidates",
                 status="completed",
                 summary=f"当前可用 capability 共 {len(candidate_capabilities)} 个。",
+                node_type="runtime",
             )
         )
 
@@ -254,74 +340,122 @@ class ChatService:
         if intent == "general_chat":
             self._ensure_scope(context=context, required_scope="chat:read")
             self._check_quota(message)
-            await add_step(TraceStep(name="planned", status="completed", summary="命中模型直答链路: model.direct_chat。"))
-            await add_step(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。"))
-            await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
+            await add_step(TraceStep(name="planned", status="completed", summary="命中模型直答链路: model.direct_chat。", node_type="runtime"))
+            await add_step(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。", node_type="guard"))
+            await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。", node_type="guard"))
             answer, used_model = await self._generate_direct_llm_answer(
                 tenant_id=context.tenant_id,
                 message=message,
                 short_memory=short_memory,
-                on_delta=stream_answer if on_answer_delta is not None else None,
+                on_delta=None,
             )
-            await add_step(TraceStep(name="executed", status="completed", summary="model.direct_chat 执行完成。"))
+            await add_step(TraceStep(name="executed", status="completed", summary="model.direct_chat 执行完成。", node_type="runtime"))
             await add_step(
                 TraceStep(
                     name="model",
                     status="completed" if used_model else "failed",
                     summary="已通过 OpenAI-compatible 模型生成日常对话回答。" if used_model else "LLM Runtime 未启用，无法生成日常对话回答。",
+                    node_type="skill",
+                    ref="model.direct_chat",
+                    ref_source="_platform",
                 )
             )
             if not used_model:
                 warnings.append("LLM 运行时未启用，已退化到内置文案。请在「设置 → LLM 配置」中启用模型。")
         else:
-            capability_name, payload = self._plan(message, intent)
-            if capability_name not in {item.name for item in candidate_capabilities}:
-                raise PermissionError(f"Missing scope for capability: {capability_name}")
-            await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。"))
-            capability = self._registry.get(capability_name)
-            autonomy = self._evaluate_risk(capability)
-            await add_step(
-                TraceStep(
-                    name="risk",
-                    status="completed",
-                    summary=f"风险等级 {capability.risk_level}，自主度上限：{autonomy}。",
+            tool_plan = self._plan_platform_tool(message, intent, planner_decision=planner_decision)
+            if tool_plan is not None:
+                tool_name, tool_payload = tool_plan
+                await add_step(TraceStep(name="planned", status="completed", summary=f"命中平台 Tool: {tool_name}。", node_type="runtime"))
+                await add_step(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。", node_type="guard"))
+                self._ensure_scope(context=context, required_scope="chat:read")
+                self._check_quota(message)
+                await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。", node_type="guard"))
+                result = await self._invoke_tool_with_trace(
+                    tool_name=tool_name,
+                    payload=tool_payload,
+                    add_step=add_step,
                 )
-            )
-            self._ensure_scope(context=context, required_scope=capability.required_scope)
-            self._check_quota(message)
-            await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。"))
-
-            if intent == "knowledge_query":
-                result = await self._run_knowledge_search(
-                    context.tenant_id, payload["query"], add_step=add_step
-                )
-            elif intent == "wiki_query":
-                result = await self._run_wiki_search(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    query=payload["query"],
-                )
+                answer, sources = self._compose_tool_answer(tool_name, result)
             else:
-                result = self._registry.invoke(capability_name, payload)
-            await add_step(TraceStep(name="executed", status="completed", summary=self._execution_summary(capability_name, result)))
+                selected_skill = self._select_skill_for_intent(intent=intent, tenant=tenant)
+                if selected_skill is not None:
+                    await add_step(
+                        TraceStep(
+                            name="skill_selected",
+                            status="completed",
+                            summary=f"命中 Skill: {selected_skill.name}。",
+                            node_type="skill",
+                            ref=selected_skill.name,
+                            ref_source=selected_skill.source,
+                            ref_version=selected_skill.version,
+                        )
+                    )
 
-            answer, sources = self._compose_answer(intent, result)
+                capability_name, payload = self._plan(message, intent)
+                if capability_name not in {item.name for item in candidate_capabilities}:
+                    raise PermissionError(f"Missing scope for capability: {capability_name}")
+                await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。", node_type="runtime"))
+                capability = self._registry.get(capability_name)
+                autonomy = self._evaluate_risk(capability)
+                await add_step(
+                    TraceStep(
+                        name="risk",
+                        status="completed",
+                        summary=f"风险等级 {capability.risk_level}，自主度上限：{autonomy}。",
+                        node_type="guard",
+                    )
+                )
+                self._ensure_scope(context=context, required_scope=capability.required_scope)
+                self._check_quota(message)
+                await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。", node_type="guard"))
+
+                if selected_skill is not None and selected_skill.name == "report_compose":
+                    result = await self._run_report_compose_skill(
+                        tenant_id=context.tenant_id,
+                        query=payload["query"],
+                        add_step=add_step,
+                    )
+                elif intent == "knowledge_query":
+                    result = await self._run_knowledge_search(
+                        context.tenant_id, payload["query"], add_step=add_step
+                    )
+                elif intent == "wiki_query":
+                    result = await self._run_wiki_search(
+                        tenant_id=context.tenant_id,
+                        user_id=context.user_id,
+                        query=payload["query"],
+                    )
+                else:
+                    result = self._registry.invoke(capability_name, payload)
+                await add_step(
+                    TraceStep(
+                        name="executed",
+                        status="completed",
+                        summary=self._execution_summary(capability_name, result),
+                        node_type="capability",
+                        ref=capability_name,
+                        ref_source="package",
+                    )
+                )
+
+                answer, sources = self._compose_answer(intent, result)
             if intent == "knowledge_query":
                 llm_answer = await self._generate_rag_llm_answer(
                     tenant_id=context.tenant_id,
                     message=message,
                     sources=sources,
                     short_memory=short_memory,
-                    on_delta=stream_answer if on_answer_delta is not None else None,
+                    on_delta=None,
                 )
                 if llm_answer:
                     answer = llm_answer
-                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型生成最终回答。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型生成最终回答。", node_type="skill", ref="kb_grounded_qa", ref_source="_platform"))
                 elif not sources:
-                    await add_step(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。", node_type="runtime"))
                     warnings.append("未在已发布知识库中检索到相关内容，请尝试更换关键词或上传相关文档。")
                 else:
-                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。"))
+                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。", node_type="skill", ref="kb_grounded_qa", ref_source="_platform"))
                     warnings.append("LLM 运行时未启用，当前回答为检索片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
             elif intent == "wiki_query":
                 llm_answer = await self._generate_wiki_llm_answer(
@@ -329,26 +463,50 @@ class ChatService:
                     message=message,
                     sources=sources,
                     short_memory=short_memory,
-                    on_delta=stream_answer if on_answer_delta is not None else None,
+                    on_delta=None,
                 )
                 if llm_answer:
                     answer = llm_answer
-                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。", node_type="skill", ref="wiki_grounded_qa", ref_source="_platform"))
                 elif not sources:
-                    await add_step(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。"))
+                    await add_step(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。", node_type="runtime"))
                     warnings.append("未在 Wiki 中检索到相关页面，请尝试更换关键词或检查权限范围。")
                 else:
-                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。"))
+                    await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。", node_type="skill", ref="wiki_grounded_qa", ref_source="_platform"))
                     warnings.append("LLM 运行时未启用，当前回答为 Wiki 片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
         if intent not in {"knowledge_query", "wiki_query", "general_chat"}:
-            await add_step(TraceStep(name="model", status="completed", summary="当前能力无需模型生成。"))
+            await add_step(TraceStep(name="model", status="completed", summary="当前能力无需模型生成。", node_type="runtime"))
         answer = self._review_output(answer)
+        output_guard_rules = await self._output_guard_rules.list_enabled()
+        guard_result = await self._apply_output_guard(
+            tenant_id=context.tenant_id,
+            answer=answer,
+            rules=output_guard_rules,
+        )
+        answer = guard_result["answer"]
+        warnings.extend(guard_result["warnings"])
+        conversation_title = (
+            await self._generate_conversation_title(
+                tenant_id=context.tenant_id,
+                user_message=message,
+                assistant_message=answer,
+            )
+            if not short_memory.messages
+            else None
+        )
         if on_answer_delta is not None and not answer_streamed:
             await self._emit_text_deltas(answer, stream_answer)
-        await add_step(TraceStep(name="output_guard", status="completed", summary="输出脱敏与内容审查完成。"))
+        await add_step(
+            TraceStep(
+                name="output_guard",
+                status="completed",
+                summary=guard_result["summary"],
+                node_type="guard",
+            )
+        )
         trace.answer = answer
         trace.sources = sources
-        await add_step(TraceStep(name="completed", status="completed", summary="响应已组装并返回。"))
+        await add_step(TraceStep(name="completed", status="completed", summary="响应已组装并返回。", node_type="runtime"))
         await self._traces.save(trace)
 
         conversation = await self._conversations.append_message(
@@ -357,8 +515,10 @@ class ChatService:
             conversation_id=conversation_id,
             user_message=message,
             assistant_message=answer,
+            title=conversation_title,
         )
 
+        routing = self._build_routing_decision(tenant=tenant, intent=intent, message=message)
         response = {
             "trace_id": trace.trace_id,
             "conversation_id": conversation.conversation_id,
@@ -373,6 +533,7 @@ class ChatService:
                 for source in sources
             ],
             "warnings": warnings,
+            "routing": routing,
         }
         if capability and capability.side_effect_level in {"write", "irreversible"}:
             draft = await self.create_draft(
@@ -392,8 +553,21 @@ class ChatService:
                 "title": item.title,
                 "updated_at": item.updated_at.isoformat(),
             }
-            for item in await self._conversations.list_recent(context.tenant_id, context.user_id)
+            for item in await self._conversations.list_recent(context.tenant_id, context.user_id, limit=30)
         ]
+
+    async def create_conversation(
+        self,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        conversation = await self._conversations.create(context.tenant_id, context.user_id)
+        return {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.title,
+            "updated_at": conversation.updated_at.isoformat(),
+        }
 
     async def get_conversation(
         self,
@@ -403,6 +577,15 @@ class ChatService:
     ) -> Conversation | None:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         return await self._conversations.get(context.tenant_id, context.user_id, conversation_id)
+
+    async def delete_conversation(
+        self,
+        conversation_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        return await self._conversations.delete(context.tenant_id, context.user_id, conversation_id)
 
     async def get_trace(
         self,
@@ -415,6 +598,146 @@ class ChatService:
         if trace is None or trace.tenant_id != context.tenant_id or trace.user_id != context.user_id:
             return None
         return trace
+
+    async def list_business_outputs(
+        self,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        type_filter: str | None = None,
+        package_id: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        if self._business_outputs is None:
+            return {"items": []}
+        if type_filter and type_filter not in BUSINESS_OUTPUT_TYPES:
+            raise ValueError("Unsupported output type")
+        if status and status not in BUSINESS_OUTPUT_STATUSES:
+            raise ValueError("Unsupported output status")
+        items = await self._business_outputs.list_for_tenant(
+            context.tenant_id,
+            type_filter=type_filter,
+            package_id=package_id,
+            status=status,
+        )
+        return {"items": [self._serialize_business_output(item) for item in items]}
+
+    async def get_business_output(
+        self,
+        output_id: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        if self._business_outputs is None:
+            raise ValueError("Business output store not configured")
+        record = await self._business_outputs.get(context.tenant_id, output_id)
+        if record is None:
+            raise ValueError("Business output not found")
+        return self._serialize_business_output(record)
+
+    async def create_business_output(
+        self,
+        *,
+        type: str,
+        title: str,
+        package_id: str,
+        payload: dict[str, object] | None = None,
+        citations: list[str] | None = None,
+        conversation_id: str | None = None,
+        trace_id: str | None = None,
+        summary: str = "",
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        if self._business_outputs is None:
+            raise ValueError("Business output store not configured")
+        if type not in BUSINESS_OUTPUT_TYPES:
+            raise ValueError("Unsupported output type")
+        if not title.strip():
+            raise ValueError("title is required")
+        if not package_id.strip():
+            raise ValueError("package_id is required")
+        record = BusinessOutput(
+            output_id=f"out-{uuid4().hex[:12]}",
+            tenant_id=context.tenant_id,
+            package_id=package_id.strip(),
+            type=type,
+            title=title.strip(),
+            status="draft",
+            payload=payload or {},
+            citations=list(citations or []),
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            summary=summary,
+            created_by=context.user_id,
+        )
+        saved = await self._business_outputs.create(record)
+        return self._serialize_business_output(saved)
+
+    async def update_business_output(
+        self,
+        output_id: str,
+        *,
+        title: str | None = None,
+        status: str | None = None,
+        payload: dict[str, object] | None = None,
+        citations: list[str] | None = None,
+        summary: str | None = None,
+        linked_draft_group_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        if self._business_outputs is None:
+            raise ValueError("Business output store not configured")
+        existing = await self._business_outputs.get(context.tenant_id, output_id)
+        if existing is None:
+            raise ValueError("Business output not found")
+        if status is not None and status not in BUSINESS_OUTPUT_STATUSES:
+            raise ValueError("Unsupported output status")
+        next_record = BusinessOutput(
+            output_id=existing.output_id,
+            tenant_id=existing.tenant_id,
+            package_id=existing.package_id,
+            type=existing.type,
+            title=title.strip() if title is not None else existing.title,
+            status=status or existing.status,
+            payload=payload if payload is not None else existing.payload,
+            citations=list(citations) if citations is not None else list(existing.citations),
+            conversation_id=existing.conversation_id,
+            trace_id=existing.trace_id,
+            linked_draft_group_id=linked_draft_group_id if linked_draft_group_id is not None else existing.linked_draft_group_id,
+            summary=summary if summary is not None else existing.summary,
+            created_by=existing.created_by,
+            created_at=existing.created_at,
+            updated_at=existing.updated_at,
+        )
+        saved = await self._business_outputs.update(next_record)
+        return self._serialize_business_output(saved)
+
+    @staticmethod
+    def _serialize_business_output(item: BusinessOutput) -> dict[str, object]:
+        return {
+            "output_id": item.output_id,
+            "tenant_id": item.tenant_id,
+            "package_id": item.package_id,
+            "type": item.type,
+            "title": item.title,
+            "status": item.status,
+            "payload": item.payload,
+            "citations": list(item.citations),
+            "conversation_id": item.conversation_id,
+            "trace_id": item.trace_id,
+            "linked_draft_group_id": item.linked_draft_group_id,
+            "summary": item.summary,
+            "created_by": item.created_by,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        }
 
     async def list_traces(self, tenant_id: str | None = None, user_id: str | None = None) -> list[dict[str, object]]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -477,27 +800,11 @@ class ChatService:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
         capabilities = [item for item in self._registry.list_capabilities() if item.enabled]
+        skills = [item for item in self._skills.list_skills() if item.enabled]
+        tools = [item for item in self._tools.list_tools() if item.enabled]
+        packages = self._admin_package_catalog()
         return {
-            "packages": [
-                {
-                    "name": "通用知识包",
-                    "version": "v1.0.3",
-                    "owner": "知识平台组",
-                    "status": "运行中",
-                },
-                {
-                    "name": "HR 业务包",
-                    "version": "v1.2.0",
-                    "owner": "人力共享中心",
-                    "status": "运行中",
-                },
-                {
-                    "name": "财务业务包",
-                    "version": "v0.9.8",
-                    "owner": "财务运营组",
-                    "status": "灰度中",
-                },
-            ],
+            "packages": packages,
             "capabilities": [
                 {
                     "name": item.name,
@@ -507,6 +814,186 @@ class ChatService:
                 }
                 for item in capabilities
             ],
+            "skills": [
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "version": item.version,
+                    "source": item.source,
+                    "package_id": item.package_id,
+                    "depends_on_capabilities": list(item.depends_on_capabilities),
+                    "depends_on_tools": list(item.depends_on_tools),
+                }
+                for item in skills
+            ],
+            "tools": [
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "version": item.version,
+                    "source": item.source,
+                    "timeout_ms": item.timeout_ms,
+                    "quota_per_minute": item.quota_per_minute,
+                }
+                for item in tools
+            ],
+        }
+
+    async def list_tenant_packages(self, target_tenant_id: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        tenant = await self._tenants.get(target_tenant_id)
+        if tenant is None:
+            raise ValueError("Tenant not found")
+        packages = self._admin_package_catalog()
+        industry_packages = [item for item in packages if item["domain"] == "industry"]
+        industry_ids = {str(item["package_id"]) for item in industry_packages}
+        if tenant.primary_package in industry_ids:
+            primary_package = tenant.primary_package
+        elif industry_packages:
+            primary_package = str(industry_packages[0]["package_id"])
+        else:
+            primary_package = ""
+        return {
+            "primary_package": primary_package,
+            "common_packages": list(tenant.enabled_common_packages),
+            "available_packages": [
+                {
+                    "package_id": item["package_id"],
+                    "name": item["name"],
+                    "domain": item["domain"],
+                    "version": item["version"],
+                    "status": item["status"],
+                }
+                for item in packages
+            ],
+        }
+
+    async def update_tenant_packages(
+        self,
+        target_tenant_id: str,
+        primary_package: str,
+        common_packages: list[str],
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        tenant = await self._tenants.get(target_tenant_id)
+        if tenant is None:
+            raise ValueError("Tenant not found")
+
+        catalog = self._admin_package_catalog()
+        known_ids = {str(item["package_id"]) for item in catalog}
+        industry_ids = {str(item["package_id"]) for item in catalog if item["domain"] == "industry"}
+        common_ids = {str(item["package_id"]) for item in catalog if item["domain"] == "common"}
+
+        normalized_primary = primary_package.strip()
+        normalized_commons = [item.strip() for item in common_packages if item.strip()]
+        if normalized_primary not in industry_ids:
+            raise ValueError("主业务包不存在或不是行业包")
+        unknown_commons = [item for item in normalized_commons if item not in known_ids or item not in common_ids]
+        if unknown_commons:
+            raise ValueError(f"通用包不存在或不是通用包: {', '.join(unknown_commons)}")
+
+        updated = replace(
+            tenant,
+            package=normalized_primary,
+            enabled_common_packages=list(dict.fromkeys(normalized_commons)),
+        )
+        await self._tenants.update(updated)
+        return await self.list_tenant_packages(target_tenant_id, tenant_id=tenant_id, user_id=user_id)
+
+    async def get_package_detail(self, package_id: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        package = self._find_package(package_id)
+        if package is None:
+            raise ValueError("Package not found")
+
+        dependencies = list(package.get("dependencies", []))
+        return {
+            **package,
+            "dependencies": dependencies,
+            "dependency_summary": {
+                "platform_skills": sum(1 for item in dependencies if item.get("kind") == "platform_skill"),
+                "common_packages": sum(1 for item in dependencies if item.get("kind") == "common_package"),
+                "plugins": sum(1 for item in dependencies if item.get("kind") == "plugin"),
+                "tools": sum(1 for item in dependencies if item.get("kind") == "platform_tool"),
+            },
+        }
+
+    async def get_package_impact(self, target: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        target_name, target_version = self._parse_dependency_target(target)
+        affected_packages = []
+        for package in self._admin_package_catalog():
+            for dependency in package.get("dependencies", []):
+                if not isinstance(dependency, dict) or dependency.get("name") != target_name:
+                    continue
+                version_range = str(dependency.get("version_range", ""))
+                compatible = self._version_satisfies(target_version, version_range)
+                affected_packages.append(
+                    {
+                        "package_id": package["package_id"],
+                        "name": package["name"],
+                        "version": package["version"],
+                        "dependency": dependency,
+                        "risk": "low" if compatible else "high",
+                        "compatible": compatible,
+                        "reason": "目标版本满足依赖范围" if compatible else f"目标版本不满足依赖范围 {version_range}",
+                    }
+                )
+        return {
+            "target": {
+                "name": target_name,
+                "version": target_version,
+            },
+            "affected_packages": affected_packages,
+        }
+
+    async def get_plugin_config_schema(self, plugin_name: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        plugin = self._registry.get_plugin(plugin_name)
+        schema = self._normalize_plugin_config_schema(plugin.config_schema or {})
+        saved_config = await self._plugin_configs.get(context.tenant_id, plugin_name)
+        return {
+            "plugin_name": plugin_name,
+            "capability": asdict(plugin.capability),
+            "config_schema": schema,
+            "config": saved_config.config if saved_config else {},
+            "auth_refs": self._available_auth_refs(plugin.auth_ref),
+        }
+
+    async def update_plugin_config(
+        self,
+        plugin_name: str,
+        config: dict[str, object],
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        plugin = self._registry.get_plugin(plugin_name)
+        schema = self._normalize_plugin_config_schema(plugin.config_schema or {})
+        normalized = self._validate_plugin_config(config, schema, self._available_auth_refs(plugin.auth_ref))
+        saved_config = await self._plugin_configs.upsert(
+            PluginConfig(
+                tenant_id=context.tenant_id,
+                plugin_name=plugin_name,
+                config=normalized,
+            )
+        )
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"插件配置已更新：{plugin_name}",
+            status="已记录",
+        )
+        return {
+            "plugin_name": plugin_name,
+            "config": saved_config.config,
         }
 
     async def list_system_overview(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
@@ -526,10 +1013,172 @@ class ChatService:
     async def list_security_overview(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
-        return {
-            "events": [asdict(item) for item in await self._security_events.list_recent(context.tenant_id)],
-            "drafts": [self._serialize_draft(item) for item in await self._drafts.list_recent(context.tenant_id)],
+        events = [asdict(item) for item in await self._security_events.list_recent(context.tenant_id)]
+        tenants = await self._tenants.list_all()
+        tools = [item for item in self._tools.list_tools() if item.enabled]
+        overrides = {
+            (item.tenant_id, item.tool_name): item
+            for item in await self._tool_overrides.list_all()
         }
+        guard_rules = await self._output_guard_rules.list_all()
+        if not guard_rules:
+            guard_rules = self._default_output_guard_rules()
+        return {
+            "events": events,
+            "drafts": [self._serialize_draft(item) for item in await self._drafts.list_recent(context.tenant_id)],
+            "tool_overrides": [
+                self._serialize_tool_override(
+                    tenant_id=tenant.tenant_id,
+                    tool_name=tool.name,
+                    default_quota=tool.quota_per_minute,
+                    default_timeout=tool.timeout_ms,
+                    override=overrides.get((tenant.tenant_id, tool.name)),
+                )
+                for tool in tools
+                for tenant in tenants
+            ],
+            "redlines": [self._serialize_output_guard_rule(rule, events) for rule in guard_rules],
+        }
+
+    async def update_output_guard_rule(
+        self,
+        *,
+        rule_id: str,
+        package_id: str,
+        pattern: str,
+        action: str,
+        source: str,
+        enabled: bool,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        normalized_rule_id = rule_id.strip()
+        normalized_package_id = package_id.strip()
+        normalized_pattern = pattern.strip()
+        normalized_action = action.strip()
+        normalized_source = source.strip()
+        if not normalized_rule_id:
+            raise ValueError("rule_id is required")
+        if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", normalized_rule_id):
+            raise ValueError("rule_id only supports letters, numbers, dot, underscore, colon and hyphen")
+        if not normalized_package_id:
+            raise ValueError("package_id is required")
+        known_package_ids = {str(item["package_id"]) for item in self._admin_package_catalog()}
+        if normalized_package_id not in known_package_ids:
+            raise ValueError("Package not found")
+        if not normalized_pattern:
+            raise ValueError("pattern is required")
+        if normalized_action not in OUTPUT_GUARD_ACTIONS:
+            raise ValueError("Unsupported output guard action")
+        if not normalized_source:
+            raise ValueError("source is required")
+
+        rule = await self._output_guard_rules.upsert(
+            OutputGuardRule(
+                rule_id=normalized_rule_id,
+                package_id=normalized_package_id,
+                pattern=normalized_pattern,
+                action=normalized_action,
+                source=normalized_source,
+                enabled=enabled,
+            )
+        )
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"OutputGuard 红线已更新：{normalized_rule_id}",
+            status="已记录",
+        )
+        events = [asdict(item) for item in await self._security_events.list_recent(context.tenant_id)]
+        return self._serialize_output_guard_rule(rule, events)
+
+    async def list_release_plans(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        releases = await self._releases.list_recent()
+        return {"releases": [self._serialize_release_plan(item) for item in releases]}
+
+    async def update_release_plan(
+        self,
+        release_id: str,
+        *,
+        status: str,
+        rollout_percent: int,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        normalized_status = status.strip()
+        if normalized_status not in {"待发布", "灰度中", "已完成", "已回滚"}:
+            raise ValueError("Unsupported release status")
+        if rollout_percent < 0 or rollout_percent > 100:
+            raise ValueError("rollout_percent must be between 0 and 100")
+        if normalized_status == "已完成" and rollout_percent != 100:
+            raise ValueError("completed release must use 100 percent rollout")
+        if normalized_status == "已回滚" and rollout_percent != 0:
+            raise ValueError("rolled back release must use 0 percent rollout")
+
+        release = await self._releases.update_status(
+            release_id,
+            status=normalized_status,
+            rollout_percent=rollout_percent,
+        )
+        if release is None:
+            raise ValueError("Release not found")
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"发布计划已更新：{release_id} -> {normalized_status}/{rollout_percent}%",
+            status="已记录",
+        )
+        return self._serialize_release_plan(release)
+
+    async def update_tool_override(
+        self,
+        *,
+        target_tenant_id: str,
+        tool_name: str,
+        quota: int | None,
+        timeout: int | None,
+        disabled: bool,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        tenant = await self._tenants.get(target_tenant_id)
+        if tenant is None:
+            raise ValueError("Tenant not found")
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            raise ValueError("Tool not found")
+        if quota is not None and quota < 0:
+            raise ValueError("quota must be greater than or equal to 0")
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be greater than or equal to 0")
+
+        override = await self._tool_overrides.upsert(
+            ToolOverride(
+                tenant_id=target_tenant_id,
+                tool_name=tool_name,
+                quota=quota,
+                timeout=timeout,
+                disabled=disabled,
+            )
+        )
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"Tool 覆盖配置已更新：{target_tenant_id}/{tool_name}",
+            status="已记录",
+        )
+        return self._serialize_tool_override(
+            tenant_id=target_tenant_id,
+            tool_name=tool_name,
+            default_quota=tool.quota_per_minute,
+            default_timeout=tool.timeout_ms,
+            override=override,
+        )
 
     async def list_knowledge_sources(
         self,
@@ -564,6 +1213,44 @@ class ChatService:
             "source": asdict(detail.source),
             "chunks": [asdict(item) for item in detail.chunks],
             "content": detail.content,
+        }
+
+    async def get_knowledge_source_attributes(
+        self,
+        source_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        detail = await self._knowledge_sources.get_detail(context.tenant_id, source_id)
+        if detail is None:
+            raise ValueError("Knowledge source not found")
+
+        schema = self._chunk_attributes_schema_for_source(detail.source)
+        total = len(detail.chunks)
+        fields = []
+        for field_name, config in schema.items():
+            hit_count = sum(
+                1
+                for chunk in detail.chunks
+                if self._chunk_attribute_value(chunk.metadata_json, field_name) is not None
+            )
+            fields.append(
+                {
+                    "field": field_name,
+                    "type": config["type"],
+                    "indexed": config["indexed"],
+                    "filter": config.get("filter", ""),
+                    "hit_count": hit_count,
+                    "chunk_count": total,
+                    "hit_rate": round(hit_count / total, 4) if total else 0,
+                }
+            )
+        return {
+            "source_id": source_id,
+            "schema": schema,
+            "fields": fields,
         }
 
     async def list_knowledge_bases(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
@@ -928,6 +1615,11 @@ class ChatService:
 
     @staticmethod
     def _classify_intent(message: str, retrieval_mode: Literal["auto", "rag", "wiki"] = "auto") -> str:
+        normalized = message.lower()
+        if "json_path" in normalized or "jsonpath" in normalized:
+            return "tool.json_path"
+        if re.search(r"https?://[^\s，。]+", message) and any(keyword in message for keyword in ("抓取", "访问", "读取", "请求")):
+            return "tool.http_fetch"
         if "采购" in message or "审批草稿" in message or "草稿" in message:
             return "procurement_draft"
         if "年假" in message or "假期" in message:
@@ -936,6 +1628,9 @@ class ChatService:
             return "wiki_query"
         if retrieval_mode == "rag":
             return "knowledge_query"
+        catalog_intent = ChatService._classify_catalog_intent(message)
+        if catalog_intent:
+            return catalog_intent
         wiki_keywords = (
             "wiki",
             "Wiki",
@@ -954,8 +1649,14 @@ class ChatService:
             "引用",
             "依据",
             "制度",
-            "流程",
-            "平台",
+            "根据知识",
+            "根据资料",
+            "根据文档",
+            "按文档",
+            "查文档",
+            "检索",
+            "专业",
+            "行业",
             "架构",
             "技术文档",
             "PRD",
@@ -969,6 +1670,176 @@ class ChatService:
         if any(keyword in message for keyword in knowledge_keywords):
             return "knowledge_query"
         return "general_chat"
+
+    async def _plan_intent_with_llm(
+        self,
+        *,
+        tenant_id: str,
+        message: str,
+        retrieval_mode: Literal["auto", "rag", "wiki"],
+    ) -> dict[str, object] | None:
+        if retrieval_mode == "rag":
+            return {"intent": "knowledge_query", "reason": "用户显式选择 RAG 模式"}
+        if retrieval_mode == "wiki":
+            return {"intent": "wiki_query", "reason": "用户显式选择 Wiki 模式"}
+        try:
+            config, api_key = await self._llm_config.get(tenant_id=tenant_id)
+        except Exception:
+            return None
+        if not config.enabled or not api_key:
+            return None
+        context_blocks = [self._planner_context_block()]
+        prompt = (
+            "你是 ReAct Planner，只负责选择下一步动作，不回答用户问题。\n"
+            "根据用户问题和可用资产，选择一个 action，并只返回 JSON。\n"
+            "JSON 格式：{\"intent\":\"...\",\"action_type\":\"tool|skill|capability|chat\",\"action_name\":\"...\",\"arguments\":{},\"reason\":\"...\"}。\n"
+            "如果用户只是普通聊天或开放闲聊，intent=general_chat, action_type=chat。\n"
+            "当选择 Tool 时，必须根据用户问题填写 arguments；不要让服务端猜参数。\n"
+            "time_now 参数使用 IANA timezone：北京时间用 Asia/Shanghai；美国时间若未指定城市/州，返回美国主要时区 "
+            "[America/New_York, America/Chicago, America/Denver, America/Los_Angeles]；"
+            "纽约用 America/New_York，洛杉矶用 America/Los_Angeles，芝加哥用 America/Chicago，丹佛用 America/Denver。\n"
+            "只有用户明确要求查文档/知识库/资料/引用，或问题明显属于专业/行业资料问答时，才选择 knowledge_query。\n"
+            f"用户问题：{message}"
+        )
+        try:
+            raw = self._llm_client.complete(
+                config=config,
+                api_key=api_key,
+                user_message=prompt,
+                context_blocks=context_blocks,
+            )
+        except Exception:
+            return None
+        return self._parse_planner_decision(raw)
+
+    def _planner_context_block(self) -> str:
+        tools = [
+            {
+                "name": item.name,
+                "description": item.description,
+                "version": item.version,
+            }
+            for item in self._tools.list_tools()
+            if item.enabled
+        ]
+        skills = [
+            {
+                "name": item.name,
+                "description": item.description,
+                "source": item.source,
+                "package_id": item.package_id,
+                "depends_on_capabilities": item.depends_on_capabilities,
+                "depends_on_tools": item.depends_on_tools,
+            }
+            for item in self._skills.list_skills()
+            if item.enabled
+        ]
+        capabilities = [
+            {
+                "name": item.name,
+                "description": item.description,
+                "risk_level": item.risk_level,
+                "side_effect_level": item.side_effect_level,
+            }
+            for item in self._registry.list_capabilities()
+            if item.enabled
+        ]
+        return json.dumps(
+            {
+                "可用Tool": tools,
+                "可用Skill": skills,
+                "可用Capability": capabilities,
+                "intent说明": {
+                    "tool.time_now": "用户询问当前时间、日期或现在几点时使用 time_now。arguments 支持 timezone 或 timezones。",
+                    "tool.json_path": "用户要求对 JSON 执行 JSONPath 查询时使用 json_path。",
+                    "tool.http_fetch": "用户要求抓取或读取 URL 时使用 http_fetch。",
+                    "knowledge_query": "用户明确要求基于文档、知识库、资料、依据、引用或专业行业资料回答时使用 kb_grounded_qa。",
+                    "report_compose": "用户要求报告、汇总、总结或导出时使用 report_compose。",
+                    "hr_query": "用户询问员工假期余额时使用 HR capability。",
+                    "procurement_draft": "用户要求生成采购或审批草稿时使用 workflow capability。",
+                    "general_chat": "普通聊天、解释、闲聊、未要求外部事实或工具时使用。",
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _parse_planner_decision(raw: str) -> dict[str, object] | None:
+        cleaned = raw.strip()
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL)
+        if fenced:
+            cleaned = fenced.group(1)
+        else:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                cleaned = cleaned[start:end + 1]
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        action_type = str(parsed.get("action_type", ""))
+        action_name = str(parsed.get("action_name", ""))
+        intent = str(parsed.get("intent", ""))
+        arguments = parsed.get("arguments")
+        if arguments is None:
+            parsed["arguments"] = {}
+        elif not isinstance(arguments, dict):
+            return None
+        if action_type == "tool" and action_name:
+            tool_intent = {
+                "time_now": "tool.time_now",
+                "json_path": "tool.json_path",
+                "http_fetch": "tool.http_fetch",
+            }.get(action_name)
+            if tool_intent:
+                parsed["intent"] = tool_intent
+                return parsed
+        if action_type == "skill" and action_name:
+            skill_intent = {
+                "kb_grounded_qa": "knowledge_query",
+                "report_compose": "report_compose",
+            }.get(action_name)
+            if skill_intent:
+                parsed["intent"] = skill_intent
+                return parsed
+        allowed_intents = {
+            "general_chat",
+            "knowledge_query",
+            "wiki_query",
+            "report_compose",
+            "hr_query",
+            "procurement_draft",
+            "tool.time_now",
+            "tool.json_path",
+            "tool.http_fetch",
+        }
+        if intent in allowed_intents:
+            return parsed
+        return None
+
+    @staticmethod
+    def _classify_catalog_intent(message: str) -> str | None:
+        scored: list[tuple[float, str]] = []
+        lowered = message.lower()
+        for package in PackageLoader.default().list_packages():
+            for rule in package.get("intents", []):
+                if not isinstance(rule, dict):
+                    continue
+                intent = str(rule.get("name", "")).strip()
+                if not intent:
+                    continue
+                keywords = [str(item) for item in rule.get("keywords", []) if str(item).strip()]
+                hits = [keyword for keyword in keywords if keyword.lower() in lowered]
+                if not hits:
+                    continue
+                score = float(rule.get("score", 0.5)) + min(0.2, len(hits) * 0.05)
+                scored.append((score, intent))
+        if not scored:
+            return None
+        return max(scored, key=lambda item: item[0])[1]
 
     @staticmethod
     def _extract_employee_name(message: str) -> str:
@@ -991,7 +1862,210 @@ class ChatService:
             return "hr.leave.balance.query", {"employee_name": self._extract_employee_name(message)}
         if intent == "wiki_query":
             return "wiki.search", {"query": message}
+        if intent == "report_compose":
+            return "knowledge.search", {"query": message}
         return "knowledge.search", {"query": message}
+
+    def _plan_platform_tool(
+        self,
+        message: str,
+        intent: str,
+        *,
+        planner_decision: dict[str, object] | None = None,
+    ) -> tuple[str, dict[str, object]] | None:
+        planner_arguments = planner_decision.get("arguments") if planner_decision else None
+        arguments = dict(planner_arguments) if isinstance(planner_arguments, dict) else {}
+        if intent == "tool.time_now":
+            if arguments:
+                return "time_now", arguments
+            timezone = "Asia/Shanghai"
+            timezone_match = re.search(r"(UTC[+-]\d{1,2}|Asia/[A-Za-z_]+|America/[A-Za-z_]+|Europe/[A-Za-z_]+)", message)
+            if timezone_match:
+                timezone = timezone_match.group(1).replace("UTC+8", "Asia/Shanghai")
+            return "time_now", {"timezone": timezone}
+        if intent == "tool.http_fetch":
+            if arguments.get("url"):
+                return "http_fetch", arguments
+            match = re.search(r"https?://[^\s，。]+", message)
+            if not match:
+                raise ValueError("未找到可抓取的 http(s) URL")
+            return "http_fetch", {"url": match.group(0)}
+        if intent == "tool.json_path":
+            if arguments.get("document") is not None:
+                return "json_path", arguments
+            return "json_path", self._extract_json_path_payload(message)
+        return None
+
+    @staticmethod
+    def _extract_json_path_payload(message: str) -> dict[str, object]:
+        path_match = re.search(r"(\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\])*)", message)
+        path = path_match.group(1) if path_match else "$"
+        search_from = path_match.end() if path_match else 0
+        object_start = message.find("{", search_from)
+        array_start = message.find("[", search_from)
+        if object_start >= 0 and (array_start == -1 or object_start < array_start):
+            json_start = object_start
+        elif array_start >= 0:
+            json_start = array_start
+        else:
+            raise ValueError("JSONPath Tool 需要在消息中提供 JSON 对象或数组")
+        json_text = message[json_start:].strip()
+        return {
+            "document": json.loads(json_text),
+            "path": path,
+        }
+
+    def _select_skill_for_intent(self, *, intent: str, tenant: TenantProfile | None) -> SkillDefinition | None:
+        candidates = self._candidate_skill_names_for_intent(intent)
+        for skill_name in candidates:
+            skill = self._skills.get(skill_name)
+            if skill is None or not skill.enabled:
+                continue
+            if skill.source in {"_platform", "package"}:
+                return skill
+            if skill.source == "_common" and self._common_skill_available(skill, tenant):
+                return skill
+        return None
+
+    @staticmethod
+    def _candidate_skill_names_for_intent(intent: str) -> list[str]:
+        names: list[str] = []
+        for package in PackageLoader.default().list_packages():
+            package_intents = {
+                str(rule.get("name", ""))
+                for rule in package.get("intents", [])
+                if isinstance(rule, dict)
+            }
+            if intent not in package_intents:
+                continue
+            names.extend(
+                str(skill.get("name"))
+                for skill in package.get("skills", [])
+                if isinstance(skill, dict) and str(skill.get("name", "")).strip()
+            )
+            names.extend(
+                str(dependency.get("name"))
+                for dependency in package.get("dependencies", [])
+                if isinstance(dependency, dict)
+                and dependency.get("kind") == "platform_skill"
+                and str(dependency.get("name", "")).strip()
+            )
+        if intent == "knowledge_query":
+            names.append("kb_grounded_qa")
+        if intent == "report_compose":
+            names.append("report_compose")
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _common_skill_available(skill: SkillDefinition, tenant: TenantProfile | None) -> bool:
+        if not skill.package_id:
+            return True
+        if tenant is None:
+            return False
+        active_ids = {tenant.package, *tenant.enabled_common_packages}
+        if skill.package_id in active_ids or tenant.package == "通用业务包":
+            return True
+        package = PackageLoader.default().get_package(tenant.package)
+        if package is None:
+            return False
+        return any(
+            dependency.get("kind") == "common_package" and dependency.get("name") == skill.package_id
+            for dependency in package.get("dependencies", [])
+            if isinstance(dependency, dict)
+        )
+
+    async def _invoke_tool_with_trace(
+        self,
+        *,
+        tool_name: str,
+        payload: dict[str, object],
+        add_step: Callable[[TraceStep], Awaitable[None]],
+    ) -> dict[str, object]:
+        result = self._tools.invoke(tool_name, payload)
+        await add_step(
+            TraceStep(
+                name="tool_executed",
+                status="completed",
+                summary=f"平台 Tool {tool_name} 执行完成。",
+                node_type="tool",
+                ref=tool_name,
+                ref_source="_platform",
+                ref_version=self._tools.get(tool_name).version if self._tools.get(tool_name) else None,
+            )
+        )
+        return result
+
+    async def _run_report_compose_skill(
+        self,
+        *,
+        tenant_id: str,
+        query: str,
+        add_step: Callable[[TraceStep], Awaitable[None]],
+    ) -> dict[str, object]:
+        search_result = await self._run_knowledge_search(tenant_id, query, add_step=add_step)
+        matches = list(search_result.get("matches", []))
+        tool_result = await self._invoke_tool_with_trace(
+            tool_name="json_path",
+            payload={
+                "document": {
+                    "matches": [
+                        {"title": item.title, "snippet": item.snippet}
+                        for item in matches
+                        if isinstance(item, SourceReference)
+                    ]
+                },
+                "path": "$.matches",
+            },
+            add_step=add_step,
+        )
+        return {
+            "summary": "已基于通用报告 Skill 汇总检索事实、引用和建议。",
+            "matches": matches,
+            "report": {
+                "title": "业务资料汇总报告",
+                "fact_count": int(tool_result.get("match_count", 0)),
+            },
+            "retrieval": search_result.get("retrieval", {}),
+        }
+
+    @staticmethod
+    def _compose_tool_answer(tool_name: str, result: dict[str, object]) -> tuple[str, list[SourceReference]]:
+        if tool_name == "time_now":
+            items = result.get("items")
+            if isinstance(items, list) and len(items) > 1:
+                lines = [
+                    f"- {item['timezone']}：{item['iso']}"
+                    for item in items
+                    if isinstance(item, dict) and item.get("timezone") and item.get("iso")
+                ]
+                return (
+                    "当前时间：\n" + "\n".join(lines),
+                    [],
+                )
+            return (
+                f"当前时间：{result['iso']}（{result['timezone']}）。",
+                [],
+            )
+        if tool_name == "json_path":
+            return (
+                f"JSONPath {result['path']} 查询完成，命中 {result['match_count']} 项：{json.dumps(result['matches'], ensure_ascii=False)}",
+                [],
+            )
+        if tool_name == "http_fetch":
+            text = str(result.get("text", ""))
+            preview = text[:500].replace("\n", " ")
+            return (
+                f"HTTP 抓取完成，状态码 {result['status']}，内容类型 {result['content_type']}。\n{preview}",
+                [
+                    SourceReference(
+                        id=str(result["url"]),
+                        title=str(result["url"]),
+                        snippet=preview,
+                        source_type="tool",
+                    )
+                ],
+            )
+        return (f"Tool {tool_name} 执行完成。", [])
 
     async def _run_knowledge_search(
         self,
@@ -1295,6 +2369,14 @@ class ChatService:
             )
             answer = f"{result['summary']}\n{bullets}"
             return answer, sources
+        if intent == "report_compose":
+            matches = list(result["matches"])
+            if not matches:
+                return f"{result['summary']}\n暂无可引用事实，请先补充或发布相关知识资料。", []
+            bullets = "\n".join(f"- {item.title}: {item.snippet}" for item in matches)
+            fact_count = result.get("report", {}).get("fact_count", len(matches)) if isinstance(result.get("report"), dict) else len(matches)
+            answer = f"{result['summary']}\n引用事实 {fact_count} 项：\n{bullets}"
+            return answer, matches
 
         matches = list(result["matches"])
         if not matches:
@@ -1355,6 +2437,155 @@ class ChatService:
             raise ValueError("Message exceeds quota")
 
     @staticmethod
+    def _admin_package_catalog() -> list[dict[str, object]]:
+        return PackageLoader.default().list_packages()
+
+    @staticmethod
+    def _find_package(package_id: str) -> dict[str, object] | None:
+        return PackageLoader.default().get_package(package_id)
+
+    @staticmethod
+    def _parse_dependency_target(target: str) -> tuple[str, str]:
+        normalized = target.strip()
+        if "@" not in normalized:
+            raise ValueError("target must be '<name>@<version>'")
+        name, version = normalized.rsplit("@", 1)
+        if not name or not version:
+            raise ValueError("target must be '<name>@<version>'")
+        return name, version
+
+    @staticmethod
+    def _version_tuple(version: str) -> tuple[int, int, int]:
+        parts = version.strip().lstrip("v").split(".")
+        numbers: list[int] = []
+        for part in parts[:3]:
+            digits = "".join(char for char in part if char.isdigit())
+            numbers.append(int(digits or "0"))
+        while len(numbers) < 3:
+            numbers.append(0)
+        return tuple(numbers)  # type: ignore[return-value]
+
+    @staticmethod
+    def _version_satisfies(version: str, version_range: str) -> bool:
+        target = ChatService._version_tuple(version)
+        constraints = version_range.strip()
+        if not constraints:
+            return True
+        if constraints.startswith("~"):
+            base = ChatService._version_tuple(constraints[1:])
+            upper = (base[0], base[1] + 1, 0)
+            return target >= base and target < upper
+        for constraint in constraints.split():
+            if constraint.startswith(">=") and target < ChatService._version_tuple(constraint[2:]):
+                return False
+            if constraint.startswith(">") and target <= ChatService._version_tuple(constraint[1:]):
+                return False
+            if constraint.startswith("<=") and target > ChatService._version_tuple(constraint[2:]):
+                return False
+            if constraint.startswith("<") and target >= ChatService._version_tuple(constraint[1:]):
+                return False
+            if constraint[0].isdigit() and target != ChatService._version_tuple(constraint):
+                return False
+        return True
+
+    @staticmethod
+    def _chunk_attributes_schema_for_source(source: KnowledgeSource) -> dict[str, dict[str, str]]:
+        return source.chunk_attributes_schema
+
+    @staticmethod
+    def _chunk_attribute_value(metadata_json: dict[str, object], field_name: str) -> object | None:
+        attributes = metadata_json.get("attributes")
+        if isinstance(attributes, dict) and field_name in attributes:
+            return attributes[field_name]
+        return metadata_json.get(field_name)
+
+    @staticmethod
+    def _normalize_plugin_config_schema(schema: dict[str, object]) -> dict[str, object]:
+        properties: dict[str, object] = {}
+        required: list[str] = []
+        raw_properties = schema.get("properties") if "properties" in schema else schema
+        if not isinstance(raw_properties, dict):
+            raw_properties = {}
+        for field_name, raw_config in raw_properties.items():
+            if not isinstance(raw_config, dict):
+                continue
+            field_config = dict(raw_config)
+            if "array<" in str(field_config.get("type")):
+                field_config["type"] = "array"
+                field_config.setdefault("items", {"type": "string"})
+            if field_config.pop("secret", False):
+                field_config["format"] = "secret-ref"
+            if field_config.pop("required", False):
+                required.append(str(field_name))
+            properties[str(field_name)] = field_config
+        if isinstance(schema.get("required"), list):
+            required.extend(str(item) for item in schema["required"])
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": list(dict.fromkeys(required)),
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _available_auth_refs(default_ref: str | None) -> list[str]:
+        refs = [
+            "secrets/hr_demo_token",
+            "secrets/workflow_sandbox_token",
+            "secrets/erp_factoryA_token",
+            "secrets/erp_factoryB_token",
+        ]
+        if default_ref and default_ref not in refs:
+            refs.insert(0, default_ref)
+        return refs
+
+    @staticmethod
+    def _validate_plugin_config(
+        config: dict[str, object],
+        schema: dict[str, object],
+        auth_refs: list[str],
+    ) -> dict[str, object]:
+        properties = schema.get("properties")
+        required = schema.get("required", [])
+        if not isinstance(properties, dict):
+            properties = {}
+        if not isinstance(required, list):
+            required = []
+        normalized: dict[str, object] = {}
+        for field_name, field_schema in properties.items():
+            if not isinstance(field_schema, dict):
+                continue
+            value = config.get(field_name, field_schema.get("default"))
+            if field_name in required and value in (None, ""):
+                raise ValueError(f"Missing required config field: {field_name}")
+            if value in (None, ""):
+                continue
+            if field_schema.get("format") == "secret-ref":
+                if not isinstance(value, str) or value not in auth_refs:
+                    raise ValueError(f"Invalid secret reference for field: {field_name}")
+                normalized[field_name] = value
+                continue
+            field_type = field_schema.get("type")
+            if field_type == "integer":
+                normalized[field_name] = int(value)  # type: ignore[arg-type]
+            elif field_type == "number":
+                normalized[field_name] = float(value)  # type: ignore[arg-type]
+            elif field_type == "boolean":
+                normalized[field_name] = bool(value)
+            elif field_type == "array":
+                normalized[field_name] = value if isinstance(value, list) else [value]
+            else:
+                normalized[field_name] = str(value)
+        unknown_fields = set(config) - set(properties)
+        if unknown_fields:
+            raise ValueError(f"Unknown config fields: {', '.join(sorted(unknown_fields))}")
+        return normalized
+
+    @staticmethod
+    def _build_routing_decision(tenant: TenantProfile | None, intent: str, message: str = "") -> dict[str, object]:
+        return PackageRouter.default().route(tenant=tenant, intent=intent, message=message)
+
+    @staticmethod
     def _execution_summary(capability_name: str, result: dict[str, object]) -> str:
         retrieval = result.get("retrieval")
         if isinstance(retrieval, dict):
@@ -1367,6 +2598,110 @@ class ChatService:
     @staticmethod
     def _review_output(answer: str) -> str:
         return re.sub(r"\b1[3-9]\d{3}(\d{4})\d{4}\b", r"1****\1****", answer)
+
+    async def _apply_output_guard(
+        self,
+        *,
+        tenant_id: str,
+        answer: str,
+        rules: list[OutputGuardRule],
+    ) -> dict[str, object]:
+        if not answer or not rules:
+            return {
+                "answer": answer,
+                "warnings": [],
+                "summary": "输出脱敏与内容审查完成，未命中红线规则。",
+            }
+
+        guarded_answer = answer
+        warnings: list[str] = []
+        matched_rules: list[OutputGuardRule] = []
+        blocked = False
+
+        for rule in rules:
+            if not rule.enabled or not self._output_guard_matches(rule.pattern, guarded_answer):
+                continue
+            matched_rules.append(rule)
+            if rule.action == "prepend_safety_warning":
+                prefix = "安全提示：执行设备、能量源或现场作业相关操作前，请先确认断电、泄压、挂牌上锁和人员资质。"
+                if not guarded_answer.startswith(prefix):
+                    guarded_answer = f"{prefix}\n\n{guarded_answer}"
+            elif rule.action == "append_warning":
+                suffix = "安全提示：以上内容仅用于辅助判断，涉及现场作业请遵循企业 SOP 与审批流程。"
+                if suffix not in guarded_answer:
+                    guarded_answer = f"{guarded_answer}\n\n{suffix}"
+            elif rule.action == "mask_sensitive_data":
+                guarded_answer = self._mask_sensitive_output(guarded_answer)
+            elif rule.action == "downgrade_answer":
+                guarded_answer = (
+                    "该问题命中安全治理规则，我只能提供原则性说明，不能给出可直接执行的高风险操作步骤。\n\n"
+                    f"{self._summarize_guarded_answer(guarded_answer)}"
+                )
+                warnings.append(f"OutputGuard 已降级回答：{rule.rule_id}")
+            elif rule.action == "block_or_escalate":
+                guarded_answer = (
+                    "该回答命中安全红线，已停止输出具体操作建议。请联系安全治理组或具备资质的现场负责人复核。"
+                )
+                blocked = True
+                warnings.append(f"OutputGuard 已拦截回答：{rule.rule_id}")
+                break
+
+        for rule in matched_rules:
+            await self._security_events.save(
+                SecurityEvent(
+                    event_id=f"sec-og-{uuid4().hex[:12]}",
+                    tenant_id=tenant_id,
+                    category="safety",
+                    severity="critical" if rule.action == "block_or_escalate" else "high",
+                    title=f"OutputGuard 命中 {rule.rule_id}",
+                    status="已阻断" if blocked and rule.action == "block_or_escalate" else "已处理",
+                    owner="安全治理组",
+                )
+            )
+
+        if not matched_rules:
+            return {
+                "answer": guarded_answer,
+                "warnings": warnings,
+                "summary": "输出脱敏与内容审查完成，未命中红线规则。",
+            }
+        return {
+            "answer": guarded_answer,
+            "warnings": warnings,
+            "summary": f"输出治理命中 {len(matched_rules)} 条红线规则：{', '.join(rule.rule_id for rule in matched_rules)}。",
+        }
+
+    async def _record_admin_audit_event(self, *, context: UserContext, title: str, status: str) -> None:
+        await self._security_events.save(
+            SecurityEvent(
+                event_id=f"sec-audit-{uuid4().hex[:12]}",
+                tenant_id=context.tenant_id,
+                category="audit",
+                severity="medium",
+                title=f"{title}（操作者：{context.user_id}）",
+                status=status,
+                owner="平台治理组",
+            )
+        )
+
+    @staticmethod
+    def _output_guard_matches(pattern: str, answer: str) -> bool:
+        try:
+            return re.search(pattern, answer, flags=re.IGNORECASE) is not None
+        except re.error:
+            return pattern.lower() in answer.lower()
+
+    @staticmethod
+    def _mask_sensitive_output(answer: str) -> str:
+        masked = re.sub(r"\b1[3-9]\d{3}(\d{4})\d{4}\b", r"1****\1****", answer)
+        return re.sub(r"\b[A-Z]{1,4}\d{4,10}\b", "***", masked)
+
+    @staticmethod
+    def _summarize_guarded_answer(answer: str) -> str:
+        first_line = next((line.strip() for line in answer.splitlines() if line.strip()), "")
+        if len(first_line) > 120:
+            return f"{first_line[:120]}..."
+        return first_line or "请补充业务背景后由具备权限的人员复核。"
 
     @staticmethod
     def _chunk_answer(answer: str, chunk_size: int = 6) -> list[str]:
@@ -1421,6 +2756,40 @@ class ChatService:
             context_blocks=self._conversation_context_blocks(short_memory),
         )
         return answer, True
+
+    async def _generate_conversation_title(
+        self,
+        *,
+        tenant_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> str:
+        fallback = self._normalize_conversation_title(user_message)
+        config, api_key = await self._llm_config.get(tenant_id=tenant_id)
+        if not config.enabled:
+            return fallback
+        prompt = (
+            "请基于下面第一轮问答生成一个中文会话标题。\n"
+            "要求：不超过 16 个汉字；不要引号；不要句号；只输出标题。\n\n"
+            f"用户：{user_message}\n"
+            f"助手：{assistant_message[:800]}"
+        )
+        try:
+            title = self._llm_client.complete(
+                config=config,
+                api_key=api_key,
+                user_message=prompt,
+                context_blocks=[],
+            )
+        except Exception:
+            return fallback
+        return self._normalize_conversation_title(title) or fallback
+
+    @staticmethod
+    def _normalize_conversation_title(value: str) -> str:
+        title = re.sub(r"[\r\n\t]+", " ", value).strip().strip("\"'“”‘’")
+        title = re.sub(r"\s+", " ", title)
+        return (title[:16] or "新会话").rstrip("。.!！?")
 
     async def _generate_rag_llm_answer(
         self,
@@ -1585,6 +2954,76 @@ class ChatService:
             "payload": draft.payload,
             "created_at": draft.created_at.isoformat(),
         }
+
+    @staticmethod
+    def _serialize_tool_override(
+        *,
+        tenant_id: str,
+        tool_name: str,
+        default_quota: int,
+        default_timeout: int,
+        override: ToolOverride | None,
+    ) -> dict[str, object]:
+        return {
+            "tool_name": tool_name,
+            "tenant_id": tenant_id,
+            "quota": override.quota if override and override.quota is not None else default_quota,
+            "timeout": override.timeout if override and override.timeout is not None else default_timeout,
+            "disabled": override.disabled if override else False,
+            "overridden": override is not None,
+            "default_quota": default_quota,
+            "default_timeout": default_timeout,
+        }
+
+    @staticmethod
+    def _serialize_output_guard_rule(rule: OutputGuardRule, events: list[dict[str, object]]) -> dict[str, object]:
+        recent_triggers = sum(
+            1
+            for item in events
+            if item.get("category") == "safety" or item.get("severity") in {"critical", "high"}
+        )
+        return {
+            "rule_id": rule.rule_id,
+            "package_id": rule.package_id,
+            "pattern": rule.pattern,
+            "action": rule.action,
+            "source": rule.source,
+            "enabled": rule.enabled,
+            "recent_triggers": recent_triggers,
+        }
+
+    @staticmethod
+    def _serialize_release_plan(release: ReleasePlan) -> dict[str, object]:
+        return {
+            "release_id": release.release_id,
+            "package_id": release.package_id,
+            "package_name": release.package_name,
+            "skill": release.skill,
+            "version": release.version,
+            "status": release.status,
+            "rollout_percent": release.rollout_percent,
+            "metric_delta": release.metric_delta,
+            "started_at": release.started_at.strftime("%Y-%m-%d %H:%M"),
+        }
+
+    @staticmethod
+    def _default_output_guard_rules() -> list[OutputGuardRule]:
+        return [
+            OutputGuardRule(
+                rule_id="mfg.output_guard.power_off",
+                package_id="industry.mfg",
+                pattern="断电|停机|挂牌上锁",
+                action="prepend_safety_warning",
+                source="industry.mfg",
+            ),
+            OutputGuardRule(
+                rule_id="mfg.output_guard.pressure_release",
+                package_id="industry.mfg",
+                pattern="泄压|有限空间|登高",
+                action="block_or_escalate",
+                source="industry.mfg",
+            ),
+        ]
 
     @staticmethod
     def _serialize_source(source: SourceReference) -> dict[str, object]:

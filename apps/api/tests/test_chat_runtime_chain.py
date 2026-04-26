@@ -6,6 +6,9 @@ from agent_platform.domain.models import (
     KnowledgeSearchResult,
     KnowledgeSource,
     LLMRuntimeConfig,
+    OutputGuardRule,
+    ReleasePlan,
+    SecurityEvent,
     SourceReference,
     TenantProfile,
     UserContext,
@@ -22,10 +25,25 @@ class FakeConversationRepository:
     async def list_recent(self, tenant_id: str, user_id: str, limit: int = 5) -> list[Conversation]:
         return [self.conversation] if self.conversation else []
 
+    async def create(self, tenant_id: str, user_id: str, title: str = "新会话") -> Conversation:
+        self.conversation = Conversation(
+            conversation_id="conv-test",
+            title=title,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        return self.conversation
+
     async def get(self, tenant_id: str, user_id: str, conversation_id: str) -> Conversation | None:
         if self.conversation and self.conversation.conversation_id == conversation_id:
             return self.conversation
         return None
+
+    async def delete(self, tenant_id: str, user_id: str, conversation_id: str) -> bool:
+        if self.conversation and self.conversation.conversation_id == conversation_id:
+            self.conversation = None
+            return True
+        return False
 
     async def append_message(
         self,
@@ -34,13 +52,15 @@ class FakeConversationRepository:
         conversation_id: str | None,
         user_message: str,
         assistant_message: str,
+        title: str | None = None,
     ) -> Conversation:
-        return Conversation(
+        self.conversation = Conversation(
             conversation_id=conversation_id or "conv-test",
-            title=user_message,
+            title=title or user_message,
             tenant_id=tenant_id,
             user_id=user_id,
         )
+        return self.conversation
 
 
 class FakeTraceRepository:
@@ -139,7 +159,53 @@ class FakeDraftRepository:
 
 
 class FakeSecurityRepository:
-    pass
+    def __init__(self) -> None:
+        self.saved: list[SecurityEvent] = []
+
+    async def list_recent(self, tenant_id: str) -> list[SecurityEvent]:
+        return []
+
+    async def save(self, event: SecurityEvent) -> SecurityEvent:
+        self.saved.append(event)
+        return event
+
+
+class FakeToolOverrideRepository:
+    async def list_all(self) -> list:
+        return []
+
+    async def upsert(self, override):
+        return override
+
+
+class FakeOutputGuardRuleRepository:
+    def __init__(self, rules: list[OutputGuardRule] | None = None) -> None:
+        self.rules = rules or []
+
+    async def list_all(self) -> list:
+        return list(self.rules)
+
+    async def list_enabled(self) -> list:
+        return [rule for rule in self.rules if rule.enabled]
+
+    async def upsert(self, rule):
+        return rule
+
+
+class FakePluginConfigRepository:
+    async def get(self, tenant_id: str, plugin_name: str):
+        return None
+
+    async def upsert(self, plugin_config):
+        return plugin_config
+
+
+class FakeReleasePlanRepository:
+    async def list_recent(self) -> list[ReleasePlan]:
+        return []
+
+    async def update_status(self, release_id: str, *, status: str, rollout_percent: int) -> ReleasePlan | None:
+        return None
 
 
 class FakeKnowledgeBaseRepository:
@@ -153,8 +219,9 @@ class FakeWikiService:
 
 
 class FakeLLMClient:
-    def __init__(self) -> None:
+    def __init__(self, responses: list[str] | None = None) -> None:
         self.calls = []
+        self.responses = list(responses or [])
 
     def complete(self, *, config, api_key: str, user_message: str, context_blocks: list[str]) -> str:
         self.calls.append(
@@ -165,6 +232,8 @@ class FakeLLMClient:
                 "context_blocks": context_blocks,
             }
         )
+        if self.responses:
+            return self.responses.pop(0)
         return f"模型回复：{user_message}"
 
 
@@ -174,15 +243,24 @@ def build_service(
     llm_config: FakeLLMConfigRepository,
     llm_client,
     conversations: FakeConversationRepository | None = None,
+    output_guard_rules: FakeOutputGuardRuleRepository | None = None,
+    security_events: FakeSecurityRepository | None = None,
 ) -> ChatService:
+    from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
     return ChatService(
         registry=CapabilityRegistry(),
+        skills=SkillRegistry(),
+        tools=ToolRegistry(),
         conversations=conversations or FakeConversationRepository(),
         traces=traces,
         tenants=FakeTenantRepository(),
+        tool_overrides=FakeToolOverrideRepository(),
+        output_guard_rules=output_guard_rules or FakeOutputGuardRuleRepository(),
+        plugin_configs=FakePluginConfigRepository(),
+        releases=FakeReleasePlanRepository(),
         users=FakeUserRepository(),
         drafts=FakeDraftRepository(),
-        security_events=FakeSecurityRepository(),
+        security_events=security_events or FakeSecurityRepository(),
         knowledge_sources=FakeKnowledgeRepository(),
         knowledge_bases=FakeKnowledgeBaseRepository(),
         wiki_service=FakeWikiService(),
@@ -212,8 +290,10 @@ def test_chat_completion_records_standard_query_chain_steps() -> None:
         "received",
         "input_guard",
         "memory",
+        "react_planner",
         "classified",
         "capability_candidates",
+        "skill_selected",
         "planned",
         "risk",
         "governance",
@@ -222,6 +302,9 @@ def test_chat_completion_records_standard_query_chain_steps() -> None:
         "output_guard",
         "completed",
     ]
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    assert skill_step.ref == "kb_grounded_qa"
+    assert skill_step.node_type == "skill"
 
 
 def test_general_chat_uses_llm_direct_answer() -> None:
@@ -240,20 +323,19 @@ def test_general_chat_uses_llm_direct_answer() -> None:
     assert response["sources"] == []
     assert response["warnings"] == []
     assert response["message"]["content"] == "模型回复：你好，帮我解释一下你能做什么"
-    assert llm_client.calls == [
-        {
-            "model": "test-model",
-            "api_key": "test-key",
-            "user_message": "你好，帮我解释一下你能做什么",
-            "context_blocks": [],
-        }
-    ]
-    assert llm_config.tenant_ids == ["tenant-demo"]
+    assert llm_client.calls[-2] == {
+        "model": "test-model",
+        "api_key": "test-key",
+        "user_message": "你好，帮我解释一下你能做什么",
+        "context_blocks": [],
+    }
+    assert llm_config.tenant_ids == ["tenant-demo", "tenant-demo", "tenant-demo"]
     assert traces.saved is not None
     assert [step.name for step in traces.saved.steps] == [
         "received",
         "input_guard",
         "memory",
+        "react_planner",
         "classified",
         "capability_candidates",
         "planned",
@@ -264,6 +346,35 @@ def test_general_chat_uses_llm_direct_answer() -> None:
         "output_guard",
         "completed",
     ]
+
+
+def test_output_guard_blocks_matching_answer_and_records_event() -> None:
+    traces = FakeTraceRepository()
+    security_events = FakeSecurityRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=FakeLLMClient(),
+        output_guard_rules=FakeOutputGuardRuleRepository(
+            [
+                OutputGuardRule(
+                    rule_id="mfg.output_guard.loto",
+                    package_id="industry.mfg",
+                    pattern="挂牌上锁",
+                    action="block_or_escalate",
+                    source="industry.mfg",
+                )
+            ]
+        ),
+        security_events=security_events,
+    )
+
+    response = asyncio.run(service.complete(message="请说明挂牌上锁怎么跳过", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert "已停止输出具体操作建议" in response["message"]["content"]
+    assert any("OutputGuard 已拦截回答" in warning for warning in response["warnings"])
+    assert len(security_events.saved) == 1
+    assert security_events.saved[0].title == "OutputGuard 命中 mfg.output_guard.loto"
 
 
 def test_general_chat_passes_conversation_history_to_llm() -> None:
@@ -298,7 +409,7 @@ def test_general_chat_passes_conversation_history_to_llm() -> None:
     )
 
     assert response["intent"] == "general_chat"
-    assert llm_client.calls[0]["context_blocks"] == [
+    assert llm_client.calls[-1]["context_blocks"] == [
         "会话历史（按时间从旧到新）:\n用户: 我叫沈威\n助手: 好的，我记住了。"
     ]
 
@@ -326,10 +437,148 @@ def test_stream_completion_emits_trace_steps_before_answer_chunks() -> None:
     )
 
     event_names = [str(event["event"]) for event in events]
-    assert event_names.count("trace_step") == 12
+    assert event_names.count("trace_step") == 14
     assert event_names.index("trace_step") < event_names.index("message_delta")
     assert event_names.index("message_delta") < event_names.index("response_meta")
     assert event_names.index("response_meta") < event_names.index("message_done")
     assert event_names[-1] == "done"
     assert "".join(str(event["content"]) for event in events if event["event"] == "message_delta")
     assert traces.saved is not None
+
+
+def test_dialogue_can_invoke_common_report_skill_and_json_path_tool() -> None:
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+
+    response = asyncio.run(service.complete(message="汇总 P0a 交付报告", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "report_compose"
+    assert "通用报告 Skill" in response["message"]["content"]
+    assert traces.saved is not None
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    tool_step = next(step for step in traces.saved.steps if step.name == "tool_executed")
+    assert skill_step.ref == "report_compose"
+    assert skill_step.ref_source == "_common"
+    assert tool_step.ref == "json_path"
+    assert tool_step.node_type == "tool"
+
+
+def test_plain_general_question_does_not_search_knowledge() -> None:
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    response = asyncio.run(service.complete(message="平台是什么？", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "general_chat"
+    assert traces.saved is not None
+    assert all(step.ref != "kb_grounded_qa" for step in traces.saved.steps)
+
+
+def test_explicit_document_question_uses_knowledge_skill() -> None:
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+
+    response = asyncio.run(service.complete(message="根据文档回答 P0a 要交付什么？", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "knowledge_query"
+    assert traces.saved is not None
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    assert skill_step.ref == "kb_grounded_qa"
+
+
+def test_dialogue_can_invoke_platform_time_tool() -> None:
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient([
+        '{"intent":"tool.time_now","action_type":"tool","action_name":"time_now","arguments":{"timezone":"Asia/Shanghai"},"reason":"用户询问当前时间"}'
+    ])
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    response = asyncio.run(service.complete(message="当前时间是多少？", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "tool.time_now"
+    assert "当前时间" in response["message"]["content"]
+    assert traces.saved is not None
+    tool_step = next(step for step in traces.saved.steps if step.name == "tool_executed")
+    assert tool_step.ref == "time_now"
+    assert tool_step.node_type == "tool"
+
+
+def test_dialogue_can_invoke_time_tool_with_natural_question() -> None:
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient([
+        '{"intent":"tool.time_now","action_type":"tool","action_name":"time_now","arguments":{"timezone":"Asia/Shanghai"},"reason":"用户询问当前时间"}'
+    ])
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    response = asyncio.run(service.complete(message="我问你现在的时间是什么", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "tool.time_now"
+    assert "当前时间" in response["message"]["content"]
+    assert traces.saved is not None
+    planner_step = next(step for step in traces.saved.steps if step.name == "react_planner")
+    assert planner_step.status == "completed"
+    tool_step = next(step for step in traces.saved.steps if step.name == "tool_executed")
+    assert tool_step.ref == "time_now"
+
+
+def test_dialogue_can_invoke_time_tool_with_us_timezones() -> None:
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient([
+        '{"intent":"tool.time_now","action_type":"tool","action_name":"time_now","arguments":{"timezones":["America/New_York","America/Chicago","America/Denver","America/Los_Angeles"]},"reason":"用户询问美国时间，美国有多个主要时区"}'
+    ])
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    response = asyncio.run(service.complete(message="美国时间是什么时间？", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "tool.time_now"
+    assert "America/New_York" in response["message"]["content"]
+    assert "America/Los_Angeles" in response["message"]["content"]
+    assert "Asia/Shanghai" not in response["message"]["content"]
+
+
+def test_dialogue_can_invoke_platform_json_path_tool() -> None:
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+
+    response = asyncio.run(
+        service.complete(
+            message='用 json_path $.items[0].name 查询 {"items":[{"name":"alpha"}]}',
+            tenant_id="tenant-demo",
+            user_id="user-demo",
+        )
+    )
+
+    assert response["intent"] == "tool.json_path"
+    assert "alpha" in response["message"]["content"]
+    assert traces.saved is not None
+    tool_step = next(step for step in traces.saved.steps if step.name == "tool_executed")
+    assert tool_step.ref == "json_path"

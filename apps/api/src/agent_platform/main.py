@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from agent_platform.api.routes.admin import router as admin_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.chat import router as chat_router
+from agent_platform.api.routes.outputs import router as outputs_router
 from agent_platform.api.routes.workspace import router as workspace_router
 from agent_platform.bootstrap.container import initialize_runtime_state
 from agent_platform.bootstrap.settings import settings
@@ -40,6 +41,7 @@ app.add_middleware(
 
 app.include_router(chat_router, prefix=settings.api_prefix)
 app.include_router(workspace_router, prefix=settings.api_prefix)
+app.include_router(outputs_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 

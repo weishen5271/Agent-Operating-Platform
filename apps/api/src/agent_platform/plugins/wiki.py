@@ -14,6 +14,10 @@ class WikiSearchPlugin(CapabilityPlugin):
         input_schema={"required": ["query"]},
         output_schema={"required": ["summary", "hits"]},
     )
+    config_schema = {
+        "space_code": {"type": "string", "default": "knowledge"},
+        "top_k": {"type": "integer", "default": 5},
+    }
 
     def invoke(self, payload: dict[str, str]) -> dict[str, object]:
         return {

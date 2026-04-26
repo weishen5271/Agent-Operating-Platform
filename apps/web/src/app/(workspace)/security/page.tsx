@@ -1,4 +1,6 @@
 import { getAdminSecurity } from "@/lib/api-client";
+import { OutputGuardRuleEditor } from "@/components/admin/output-guard-rule-editor";
+import { ToolOverrideMatrix } from "@/components/admin/tool-override-matrix";
 import { Shell } from "@/components/shared/shell";
 import { securityData } from "@/lib/workspace-fixtures";
 
@@ -6,6 +8,8 @@ export default async function SecurityPage() {
   const adminSecurity = await getAdminSecurity().catch(() => null);
   const events = adminSecurity?.events ?? [];
   const drafts = adminSecurity?.drafts ?? [];
+  const toolOverrides = adminSecurity?.tool_overrides ?? [];
+  const redlines = adminSecurity?.redlines ?? [];
 
   const stats = [
     {
@@ -126,7 +130,7 @@ export default async function SecurityPage() {
           <section className="panel-card">
             <div className="panel-header">
               <div>
-                <h3>待处理审批</h3>
+                <h3>审批策略</h3>
                 <p>高风险写操作与跨权限动作统一在此受控处理。</p>
               </div>
               <span className="status-chip pulse info">实时同步</span>
@@ -155,10 +159,23 @@ export default async function SecurityPage() {
           <section className="panel-card">
             <div className="panel-header">
               <div>
-                <h3>规则命中</h3>
-                <p>当前生效的核心风险规则与命中动作。</p>
+                <h3>Tool 启用矩阵</h3>
+                <p>按租户查看 Tool 默认配额、超时与启用状态。</p>
               </div>
             </div>
+            <ToolOverrideMatrix initialRows={toolOverrides} />
+          </section>
+        </div>
+
+        <section className="panel-card">
+          <div className="panel-header">
+            <div>
+              <h3>OutputGuard 红线</h3>
+              <p>展示业务包声明的输出安全红线与近期触发计数。</p>
+            </div>
+          </div>
+          <div className="dashboard-grid">
+            <OutputGuardRuleEditor initialRows={redlines} />
             <div className="stack-list">
               {ruleRows.map((item) => (
                 <article key={item.name} className="stack-item">
@@ -173,8 +190,8 @@ export default async function SecurityPage() {
                 </article>
               ))}
             </div>
-          </section>
-        </div>
+          </div>
+        </section>
       </section>
     </Shell>
   );

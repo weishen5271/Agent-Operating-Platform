@@ -1,0 +1,31 @@
+{
+  "package_id": "industry.finance",
+  "name": "财务业务包",
+  "version": "v0.9.8",
+  "owner": "财务运营组",
+  "status": "灰度中",
+  "domain": "industry",
+  "intents": [
+    {
+      "name": "procurement_draft",
+      "score": 0.86,
+      "keywords": ["采购", "报销", "审批", "合同", "付款"]
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "plugin",
+      "name": "workflow",
+      "version_range": "~0.4.0",
+      "current_version": "0.4.1",
+      "compatible": true
+    },
+    {
+      "kind": "common_package",
+      "name": "_common/report_gen",
+      "version_range": ">=0.5",
+      "current_version": "0.5.2",
+      "compatible": true
+    }
+  ]
+}

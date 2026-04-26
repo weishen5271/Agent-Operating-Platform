@@ -55,6 +55,37 @@ class UserUpdateRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class TenantPackagesUpdateRequest(BaseModel):
+    primary_package: str = Field(..., max_length=255)
+    common_packages: list[str] = Field(default_factory=list)
+
+
+class PluginConfigUpdateRequest(BaseModel):
+    config: dict[str, object] = Field(default_factory=dict)
+
+
+class ToolOverrideUpdateRequest(BaseModel):
+    tenant_id: str = Field(..., max_length=64)
+    tool_name: str = Field(..., max_length=128)
+    quota: int | None = Field(default=None, ge=0)
+    timeout: int | None = Field(default=None, ge=0)
+    disabled: bool = Field(default=False)
+
+
+class OutputGuardRuleUpdateRequest(BaseModel):
+    rule_id: str = Field(..., min_length=1, max_length=128)
+    package_id: str = Field(..., min_length=1, max_length=255)
+    pattern: str = Field(..., min_length=1)
+    action: str = Field(..., min_length=1, max_length=128)
+    source: str = Field(..., min_length=1, max_length=128)
+    enabled: bool = Field(default=True)
+
+
+class ReleasePlanUpdateRequest(BaseModel):
+    status: str = Field(..., min_length=1, max_length=64)
+    rollout_percent: int = Field(..., ge=0, le=100)
+
+
 class KnowledgeIngestRequest(BaseModel):
     knowledge_base_code: str = Field(default="knowledge", max_length=64)
     name: str = Field(..., min_length=1, max_length=255)
@@ -97,6 +128,68 @@ async def list_packages(auth: AuthContext) -> dict[str, object]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@router.get("/packages/impact")
+async def package_impact(
+    auth: AuthContext,
+    target: str = Query(..., min_length=3, pattern=r"^[A-Za-z0-9_./:-]+@[A-Za-z0-9_.+-]+$"),
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.get_package_impact(target=target, tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/packages/{package_id:path}")
+async def package_detail(package_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.get_package_detail(package_id=package_id, tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/plugins/{plugin_name:path}/config-schema")
+async def plugin_config_schema(plugin_name: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.get_plugin_config_schema(
+            plugin_name=plugin_name,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Plugin not found") from exc
+
+
+@router.put("/plugins/{plugin_name:path}/config")
+async def update_plugin_config(
+    plugin_name: str,
+    payload: PluginConfigUpdateRequest,
+    auth: AuthContext,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.update_plugin_config(
+            plugin_name=plugin_name,
+            config=payload.config,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Plugin not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/system")
 async def system_overview(auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
@@ -104,6 +197,33 @@ async def system_overview(auth: AuthContext) -> dict[str, object]:
         return await chat_service.list_system_overview(tenant_id=tenant_id, user_id=user_id)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/releases")
+async def list_releases(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.list_release_plans(tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.put("/releases/{release_id}")
+async def update_release(release_id: str, payload: ReleasePlanUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.update_release_plan(
+            release_id,
+            status=payload.status,
+            rollout_percent=payload.rollout_percent,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 @router.get("/llm-runtime")
@@ -184,6 +304,43 @@ async def update_tenant(target_tenant_id: str, payload: TenantUpdateRequest, aut
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
+@router.get("/tenants/{target_tenant_id}/packages")
+async def list_tenant_packages(target_tenant_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.list_tenant_packages(
+            target_tenant_id=target_tenant_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/tenants/{target_tenant_id}/packages")
+async def update_tenant_packages(
+    target_tenant_id: str,
+    payload: TenantPackagesUpdateRequest,
+    auth: AuthContext,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.update_tenant_packages(
+            target_tenant_id=target_tenant_id,
+            primary_package=payload.primary_package,
+            common_packages=payload.common_packages,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @router.delete("/tenants/{target_tenant_id}")
 async def delete_tenant(target_tenant_id: str, auth: AuthContext) -> dict[str, object]:
     auth_tenant_id, user_id = auth
@@ -253,6 +410,47 @@ async def security_overview(auth: AuthContext) -> dict[str, object]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@router.put("/security/tool-overrides")
+async def update_tool_override(payload: ToolOverrideUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.update_tool_override(
+            target_tenant_id=payload.tenant_id,
+            tool_name=payload.tool_name,
+            quota=payload.quota,
+            timeout=payload.timeout,
+            disabled=payload.disabled,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.put("/security/redlines")
+async def update_output_guard_rule(payload: OutputGuardRuleUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.update_output_guard_rule(
+            rule_id=payload.rule_id,
+            package_id=payload.package_id,
+            pattern=payload.pattern,
+            action=payload.action,
+            source=payload.source,
+            enabled=payload.enabled,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @router.get("/knowledge")
 async def knowledge_sources(
     auth: AuthContext,
@@ -274,6 +472,21 @@ async def knowledge_source_detail(source_id: str, auth: AuthContext) -> dict[str
     tenant_id, user_id = auth
     try:
         return await chat_service.get_knowledge_source_detail(
+            source_id=source_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/knowledge/sources/{source_id}/attributes")
+async def knowledge_source_attributes(source_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.get_knowledge_source_attributes(
             source_id=source_id,
             tenant_id=tenant_id,
             user_id=user_id,

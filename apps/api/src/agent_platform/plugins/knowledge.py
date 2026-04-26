@@ -17,6 +17,10 @@ class KnowledgePlugin(CapabilityPlugin):
         input_schema={"required": ["query"]},
         output_schema={"required": ["summary", "matches"]},
     )
+    config_schema = {
+        "top_k": {"type": "integer", "default": 3},
+        "knowledge_base_code": {"type": "string", "default": "knowledge"},
+    }
 
     def __init__(self) -> None:
         repo_root = Path(__file__).resolve().parents[5]

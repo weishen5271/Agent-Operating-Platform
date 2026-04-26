@@ -14,6 +14,12 @@ class HRLeaveBalancePlugin(CapabilityPlugin):
         input_schema={"required": ["employee_name"]},
         output_schema={"required": ["days_remaining", "summary"]},
     )
+    config_schema = {
+        "endpoint": {"type": "string", "required": True, "default": "https://hr.example.local"},
+        "auth_ref": {"type": "string", "required": True, "format": "secret-ref"},
+        "timeout_ms": {"type": "integer", "default": 3000},
+    }
+    auth_ref = "secrets/hr_demo_token"
 
     def __init__(self) -> None:
         self._balances = {
