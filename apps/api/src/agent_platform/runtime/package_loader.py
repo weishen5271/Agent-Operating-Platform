@@ -18,6 +18,7 @@ class PackageLoader:
 
     INSTALLED_DIRNAME = "installed"
     CATALOG_DIRNAME = "catalog"
+    DEFAULT_BUNDLE_STATUS = "运行中"
 
     def __init__(self, catalog_dir: Path, installed_dir: Path | None = None) -> None:
         self._catalog_dir = catalog_dir
@@ -81,7 +82,9 @@ class PackageLoader:
         *,
         bundle_dir: Path | None,
     ) -> dict[str, Any]:
-        required = ["package_id", "name", "version", "owner", "status", "domain"]
+        required = ["package_id", "name", "version", "owner", "domain"]
+        if bundle_dir is None:
+            required.append("status")
         missing = [field for field in required if not str(raw.get(field, "")).strip()]
         if missing:
             raise ValueError(f"Package manifest {manifest_path} missing fields: {', '.join(missing)}")
@@ -113,6 +116,11 @@ class PackageLoader:
             bundle_dir=bundle_dir,
             package_id=str(raw["package_id"]),
         )
+        if not knowledge_imports and bundle_dir is not None:
+            knowledge_imports = cls._discover_knowledge_imports(
+                bundle_dir=bundle_dir,
+                package_id=str(raw["package_id"]),
+            )
 
         prompts: dict[str, str] = {}
         prompt_refs = raw.get("prompts") or {}
@@ -129,7 +137,7 @@ class PackageLoader:
             "name": str(raw["name"]),
             "version": str(raw["version"]),
             "owner": str(raw["owner"]),
-            "status": str(raw["status"]),
+            "status": cls.DEFAULT_BUNDLE_STATUS if bundle_dir is not None else str(raw["status"]),
             "domain": str(raw["domain"]),
             "description": str(raw.get("description", "")),
             "dependencies": merged_deps,
@@ -220,6 +228,30 @@ class PackageLoader:
                 }
             )
         return normalized
+
+    @classmethod
+    def _discover_knowledge_imports(cls, *, bundle_dir: Path, package_id: str) -> list[dict[str, Any]]:
+        knowledge_dir = cls._safe_join(bundle_dir, "knowledge")
+        if not knowledge_dir.is_dir():
+            return []
+
+        imports: list[dict[str, Any]] = []
+        for path in sorted(item for item in knowledge_dir.rglob("*") if item.is_file()):
+            if path.suffix.lower() not in {".md", ".txt"}:
+                continue
+            rel_path = path.relative_to(bundle_dir).as_posix()
+            imports.append(
+                {
+                    "file": rel_path,
+                    "name": path.stem,
+                    "source_type": "Markdown" if path.suffix.lower() == ".md" else "Text",
+                    "knowledge_base_code": "knowledge",
+                    "owner": f"bundle:{package_id}",
+                    "auto_import": False,
+                    "attributes": {},
+                }
+            )
+        return imports
 
     @staticmethod
     def _safe_join(bundle_dir: Path, rel_path: str) -> Path:

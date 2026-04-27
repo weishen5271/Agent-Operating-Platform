@@ -61,7 +61,6 @@ export default async function WorkspaceHomePage() {
         name: item.name,
         owner: item.owner,
         calls: `${(index + 1) * 9.7}k`,
-        status: item.status,
       }))
     : overviewData.packageHealth;
 
@@ -85,13 +84,6 @@ export default async function WorkspaceHomePage() {
   const hotCapabilities = home?.enabled_capabilities.length
     ? home.enabled_capabilities.map((item) => item.name)
     : overviewData.hotCapabilities;
-
-  function statusTone(status: string): string {
-    if (status.includes("运行")) return "success";
-    if (status.includes("灰度")) return "warning";
-    if (status.includes("停") || status.includes("待")) return "info";
-    return "";
-  }
 
   return (
     <Shell
@@ -157,7 +149,7 @@ export default async function WorkspaceHomePage() {
             <div className="panel-header">
               <div>
                 <h3>业务包运行健康度</h3>
-                <p>按调用量、负责人和当前发布状态查看各业务包运行情况。</p>
+                <p>按调用量和负责人查看各业务包运行情况。</p>
               </div>
               <div className="panel-actions">
                 <button type="button" className="ghost-button">
@@ -167,14 +159,13 @@ export default async function WorkspaceHomePage() {
               </div>
             </div>
             <div className="data-table">
-              <div className="data-table-head four-cols">
+              <div className="data-table-head three-cols">
                 <span>业务包</span>
                 <span>负责人</span>
                 <span>调用量</span>
-                <span>状态</span>
               </div>
               {packageRows.map((item) => (
-                <div key={item.name} className="data-table-row four-cols">
+                <div key={item.name} className="data-table-row three-cols">
                   <div className="tenant-cell">
                     <span className="tenant-avatar">{item.name.charAt(0)}</span>
                     <div>
@@ -184,7 +175,6 @@ export default async function WorkspaceHomePage() {
                   </div>
                   <span>{item.owner}</span>
                   <span className="mono">{item.calls}</span>
-                  <span className={`status-chip ${statusTone(item.status)}`}>{item.status}</span>
                 </div>
               ))}
             </div>

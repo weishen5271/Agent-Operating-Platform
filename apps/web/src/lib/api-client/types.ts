@@ -170,16 +170,31 @@ export type ToolSummary = {
   quota_per_minute: number;
 };
 
+export type PackagePluginSummary = {
+  name: string;
+  description?: string;
+  version?: string;
+  executor?: string;
+  config_schema?: Record<string, PluginConfigFieldSchema>;
+  capabilities?: Array<{
+    name: string;
+    description?: string;
+    risk_level?: string;
+    side_effect_level?: string;
+    required_scope?: string;
+  }>;
+};
+
 export type AdminPackagesResponse = {
   packages: Array<{
     package_id?: string;
     name: string;
     version: string;
     owner: string;
-    status: string;
     domain?: "industry" | "common" | "platform";
     dependencies?: PackageDependency[];
     knowledge_imports?: KnowledgeImportDeclaration[];
+    plugins?: PackagePluginSummary[];
   }>;
   capabilities: Array<{
     name: string;
@@ -198,7 +213,6 @@ export type PackageDetailResponse = {
   name: string;
   version: string;
   owner: string;
-  status: string;
   domain: "industry" | "common" | "platform";
   dependencies: PackageDependency[];
   dependency_summary: {
@@ -207,6 +221,7 @@ export type PackageDetailResponse = {
     plugins: number;
     tools: number;
   };
+  plugins?: PackagePluginSummary[];
   knowledge_imports?: KnowledgeImportDeclaration[];
   source_kind?: "catalog" | "bundle";
   bundle_path?: string | null;
@@ -220,6 +235,11 @@ export type KnowledgeImportDeclaration = {
   owner: string;
   auto_import: boolean;
   attributes: Record<string, unknown>;
+};
+
+export type PackageKnowledgePreviewResponse = KnowledgeImportDeclaration & {
+  package_id: string;
+  content: string;
 };
 
 export type PackageKnowledgeImportResult = {
@@ -297,6 +317,7 @@ export type PluginConfigFieldSchema = {
   format?: string;
   default?: unknown;
   items?: { type?: string };
+  label?: string;
   description?: string;
   properties?: Record<string, PluginConfigFieldSchema>;
   required?: string[];
@@ -745,4 +766,3 @@ export type BusinessOutput = {
 export type BusinessOutputListResponse = {
   items: BusinessOutput[];
 };
-

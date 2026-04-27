@@ -4,20 +4,22 @@
   "description": "CMMS 工单系统对接：查询历史工单、创建工单草稿。executor=http，绑定声明式调用 CMMS REST API；上线前需在「业务包管理 → 能力 → 插件配置」填入 endpoint + secrets。",
   "executor": "http",
   "config_schema": {
-    "endpoint":   { "type": "string",  "required": true, "description": "CMMS REST API 根地址，例如 https://cmms.acme.local" },
+    "endpoint":   { "type": "string",  "required": true, "label": "CMMS 接口地址", "description": "CMMS REST API 根地址，例如 https://cmms.acme.local" },
     "secrets": {
       "type": "object",
       "required": true,
+      "label": "CMMS 密钥配置",
       "description": "CMMS 凭据配置",
       "properties": {
         "cmms_token": {
           "type": "string",
           "required": true,
+          "label": "CMMS 访问令牌",
           "description": "CMMS Bearer Token"
         }
       }
     },
-    "timeout_ms": { "type": "integer", "default": 5000 }
+    "timeout_ms": { "type": "integer", "default": 5000, "label": "请求超时时间（毫秒）" }
   },
   "default_config": {
     "timeout_ms": 5000

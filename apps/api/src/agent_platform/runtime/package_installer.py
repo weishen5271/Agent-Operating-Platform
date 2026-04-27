@@ -14,7 +14,7 @@ from agent_platform.runtime.package_loader import PackageLoader
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_BUNDLE_FILES = 500
 ALLOWED_EXTENSIONS = {".json", ".txt", ".md", ".yaml", ".yml"}
-REQUIRED_MANIFEST_FIELDS = ("package_id", "name", "version", "owner", "status", "domain")
+REQUIRED_MANIFEST_FIELDS = ("package_id", "name", "version", "owner", "domain")
 
 
 class PackageInstallError(ValueError):
@@ -101,7 +101,7 @@ class PackageInstaller:
                     )
                 total = 0
                 for member in archive.infolist():
-                    name = member.filename
+                    name = PackageInstaller._normalize_zip_member_name(member)
                     if not name or name.endswith("/"):
                         continue
                     # 先解析到目标目录下，再校验相对关系，阻止绝对路径和父目录穿越。
@@ -110,6 +110,8 @@ class PackageInstaller:
                         candidate.relative_to(staging.resolve())
                     except ValueError as exc:
                         raise PackageInstallError(f"Unsafe path in bundle: {name}") from exc
+                    if PackageInstaller._is_ignored_archive_metadata(name):
+                        continue
                     suffix = Path(name).suffix.lower()
                     if suffix and suffix not in ALLOWED_EXTENSIONS:
                         raise PackageInstallError(
@@ -123,6 +125,32 @@ class PackageInstaller:
                         shutil.copyfileobj(src, dst)
         except zipfile.BadZipFile as exc:
             raise PackageInstallError("Uploaded file is not a valid zip archive") from exc
+
+    @staticmethod
+    def _is_ignored_archive_metadata(name: str) -> bool:
+        parts = Path(name).parts
+        filename = parts[-1] if parts else name
+        return "__MACOSX" in parts or filename == ".DS_Store" or filename.startswith("._")
+
+    @staticmethod
+    def _normalize_zip_member_name(member: zipfile.ZipInfo) -> str:
+        name = member.filename
+        try:
+            repaired = name.encode("cp437").decode("utf-8")
+        except UnicodeError:
+            return name
+        if repaired and repaired != name and PackageInstaller._contains_cjk(repaired):
+            return repaired
+        return name
+
+    @staticmethod
+    def _contains_cjk(value: str) -> bool:
+        return any(
+            "\u3400" <= char <= "\u4dbf"
+            or "\u4e00" <= char <= "\u9fff"
+            or "\uf900" <= char <= "\ufaff"
+            for char in value
+        )
 
     @staticmethod
     def _locate_bundle_root(staging: Path) -> Path:

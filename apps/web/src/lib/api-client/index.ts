@@ -30,6 +30,7 @@ import type {
   PackageDetailResponse,
   PackageImpactResponse,
   PackageKnowledgeImportResult,
+  PackageKnowledgePreviewResponse,
   PluginConfigSchemaResponse,
   TenantListResponse,
   TenantPackagesResponse,
@@ -401,6 +402,19 @@ export function importPackageKnowledge(
     body: JSON.stringify({
       package_id: packageId,
       auto_only: options.autoOnly ?? false,
+    }),
+  });
+}
+
+export function previewPackageKnowledge(
+  packageId: string,
+  file: string,
+): Promise<PackageKnowledgePreviewResponse> {
+  return request<PackageKnowledgePreviewResponse>("/admin/packages/knowledge/preview", {
+    method: "POST",
+    body: JSON.stringify({
+      package_id: packageId,
+      file,
     }),
   });
 }

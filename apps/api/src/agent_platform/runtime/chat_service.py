@@ -1627,6 +1627,59 @@ class ChatService:
             "skipped": skipped,
         }
 
+    async def preview_package_knowledge(
+        self,
+        package_id: str,
+        *,
+        file: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+
+        package = self._find_package(package_id)
+        if package is None:
+            raise ValueError("Package not found")
+        bundle_path = package.get("bundle_path")
+        if not bundle_path:
+            raise ValueError("Package is not an installed bundle")
+
+        imports = package.get("knowledge_imports", [])
+        if not isinstance(imports, list):
+            raise ValueError("Package knowledge_imports is invalid")
+        normalized_file = file.strip()
+        declaration = next(
+            (
+                item
+                for item in imports
+                if isinstance(item, dict) and str(item.get("file", "")).strip() == normalized_file
+            ),
+            None,
+        )
+        if declaration is None:
+            raise ValueError("Knowledge file is not declared by package")
+
+        bundle_dir = Path(str(bundle_path))
+        knowledge_path = PackageLoader._safe_join(bundle_dir, normalized_file)
+        if not knowledge_path.exists() or not knowledge_path.is_file():
+            raise ValueError(f"Knowledge file not found: {normalized_file}")
+        content = knowledge_path.read_text(encoding="utf-8")
+        attributes = declaration.get("attributes", {})
+        if attributes is not None and not isinstance(attributes, dict):
+            raise ValueError(f"Knowledge attributes must be an object: {normalized_file}")
+        return {
+            "package_id": package_id,
+            "file": normalized_file,
+            "name": str(declaration.get("name") or knowledge_path.name),
+            "source_type": str(declaration.get("source_type") or "Markdown"),
+            "knowledge_base_code": str(declaration.get("knowledge_base_code") or "knowledge"),
+            "owner": str(declaration.get("owner") or f"bundle:{package_id}"),
+            "auto_import": bool(declaration.get("auto_import", False)),
+            "attributes": dict(attributes or {}),
+            "content": content,
+        }
+
     async def create_knowledge_base(
         self,
         *,

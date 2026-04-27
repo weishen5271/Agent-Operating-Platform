@@ -4,17 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 
-import { getPackageDetail, importPackageKnowledge, uninstallPackageBundle } from "@/lib/api-client";
+import { getPackageDetail, importPackageKnowledge, previewPackageKnowledge, uninstallPackageBundle } from "@/lib/api-client";
 import { PackageDependencyGraph } from "@/components/packages/package-dependency-graph";
+import { PluginConfigForm } from "@/components/packages/plugin-config-form";
 import { Shell } from "@/components/shared/shell";
-import type { KnowledgeImportDeclaration, PackageDetailResponse } from "@/lib/api-client/types";
-
-function statusTone(status: string): string {
-  if (status.includes("运行")) return "success";
-  if (status.includes("灰度")) return "warning";
-  if (status.includes("待")) return "info";
-  return "";
-}
+import type { KnowledgeImportDeclaration, PackageDetailResponse, PackageKnowledgePreviewResponse } from "@/lib/api-client/types";
 
 function formatAttributes(attributes: Record<string, unknown>): string {
   const entries = Object.entries(attributes);
@@ -22,6 +16,20 @@ function formatAttributes(attributes: Record<string, unknown>): string {
   return entries
     .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
     .join(" · ");
+}
+
+function executorLabel(value: string | undefined): string {
+  if (!value) return "未声明执行器";
+  const normalized = value.toLowerCase();
+  if (normalized === "http") return "HTTP 执行器";
+  if (normalized === "mcp") return "MCP 执行器";
+  if (normalized === "stub") return "占位执行器";
+  if (normalized === "platform") return "平台代理执行器";
+  return value;
+}
+
+function importModeLabel(autoImport: boolean): string {
+  return autoImport ? "自动导入" : "手动导入";
 }
 
 export default function PackageDetailPage() {
@@ -35,6 +43,11 @@ export default function PackageDetailPage() {
   const [uninstallMessage, setUninstallMessage] = useState("");
   const [uninstalling, setUninstalling] = useState(false);
   const [reloadCounter, setReloadCounter] = useState(0);
+  const [selectedPluginName, setSelectedPluginName] = useState("");
+  const [selectedKnowledgeFile, setSelectedKnowledgeFile] = useState("");
+  const [knowledgePreview, setKnowledgePreview] = useState<PackageKnowledgePreviewResponse | null>(null);
+  const [knowledgePreviewStatus, setKnowledgePreviewStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [knowledgePreviewError, setKnowledgePreviewError] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -105,6 +118,33 @@ export default function PackageDetailPage() {
     }
   }
 
+  async function handleOpenKnowledgePreview(item: KnowledgeImportDeclaration) {
+    if (!packageDetail) return;
+    setSelectedKnowledgeFile(item.file);
+    setKnowledgePreview(null);
+    setKnowledgePreviewStatus("loading");
+    setKnowledgePreviewError("");
+    try {
+      const response = await previewPackageKnowledge(packageDetail.package_id, item.file);
+      setKnowledgePreview(response);
+      setKnowledgePreviewStatus("idle");
+    } catch (exc) {
+      setKnowledgePreviewStatus("error");
+      setKnowledgePreviewError(exc instanceof Error ? exc.message : "知识文件详情加载失败");
+    }
+  }
+
+  function handleCloseKnowledgePreview() {
+    setSelectedKnowledgeFile("");
+    setKnowledgePreview(null);
+    setKnowledgePreviewStatus("idle");
+    setKnowledgePreviewError("");
+  }
+
+  function handleClosePluginDrawer() {
+    setSelectedPluginName("");
+  }
+
   if (!packageDetail) {
     return (
       <Shell activeKey="packages" title="业务包详情" searchPlaceholder="搜索依赖、Skill 或插件...">
@@ -140,6 +180,8 @@ export default function PackageDetailPage() {
   const knowledgeImports: KnowledgeImportDeclaration[] = packageDetail.knowledge_imports ?? [];
   const autoImportCount = knowledgeImports.filter((item) => item.auto_import).length;
   const isInstalledBundle = packageDetail.source_kind === "bundle" || Boolean(packageDetail.bundle_path);
+  const plugins = packageDetail.plugins ?? [];
+  const selectedPlugin = selectedPluginName ? plugins.find((item) => item.name === selectedPluginName) : undefined;
 
   return (
     <Shell activeKey="packages" title="业务包详情" searchPlaceholder="搜索依赖、Skill 或插件...">
@@ -176,7 +218,6 @@ export default function PackageDetailPage() {
                 {uninstalling ? "卸载中..." : "卸载 bundle"}
               </button>
             ) : null}
-            <span className={`status-chip ${statusTone(packageDetail.status)}`}>{packageDetail.status}</span>
           </div>
         </div>
         {uninstallMessage ? <p className="inline-error">{uninstallMessage}</p> : null}
@@ -188,7 +229,7 @@ export default function PackageDetailPage() {
               <span className="stat-icon material-symbols-outlined">auto_awesome</span>
             </div>
             <strong>{packageDetail.dependency_summary.platform_skills}</strong>
-            <p>由平台统一注册与灰度。</p>
+            <p>由平台统一注册与编排。</p>
           </article>
           <article className="stat-card">
             <div className="stat-card-head">
@@ -219,17 +260,52 @@ export default function PackageDetailPage() {
         <section className="panel-card">
           <div className="panel-header">
             <div>
-              <h3>依赖详情</h3>
-              <p>按依赖类型、版本范围和当前版本检查兼容状态。</p>
+              <h3>能力组成</h3>
+              <p>按平台 Skill、通用包、插件和平台 Tool 分类查看业务包依赖。</p>
             </div>
           </div>
-          <PackageDependencyGraph dependencies={packageDetail.dependencies} />
+          <PackageDependencyGraph dependencies={packageDetail.dependencies} plugins={plugins} />
         </section>
 
         <section className="panel-card">
           <div className="panel-header">
             <div>
-              <h3>Bundle 知识导入</h3>
+              <h3>外部系统对接</h3>
+              <p>按业务包声明的 plugin 配置 HTTP endpoint、密钥或 MCP Server。</p>
+            </div>
+          </div>
+          {!plugins.length ? (
+            <div className="trace-empty-state">
+              <span className="material-symbols-outlined">extension_off</span>
+              <p>当前业务包没有声明 plugin。</p>
+            </div>
+          ) : (
+            <div className="stack-list">
+              {plugins.map((plugin) => (
+                <button
+                  key={plugin.name}
+                  type="button"
+                  className="stack-item table-row-button"
+                  onClick={() => setSelectedPluginName(plugin.name)}
+                >
+                  <div>
+                    <strong>{plugin.name}</strong>
+                    <p>
+                        {executorLabel(plugin.executor)} · {plugin.version ?? "未声明版本"}
+                      </p>
+                    {plugin.description ? <p className="row-meta">{plugin.description}</p> : null}
+                  </div>
+                  <span className="status-chip plain">{plugin.capabilities?.length ?? 0} 个能力</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel-card">
+          <div className="panel-header">
+            <div>
+              <h3>业务包知识导入</h3>
               <p>展示 manifest.knowledge_imports 声明；导入动作必须由管理员显式确认。</p>
             </div>
             <div className="panel-actions">
@@ -267,7 +343,12 @@ export default function PackageDetailPage() {
           ) : (
             <div className="stack-list">
               {knowledgeImports.map((item) => (
-                <article key={`${item.file}-${item.knowledge_base_code}`} className="stack-item">
+                <button
+                  key={`${item.file}-${item.knowledge_base_code}`}
+                  type="button"
+                  className="stack-item table-row-button"
+                  onClick={() => void handleOpenKnowledgePreview(item)}
+                >
                   <div>
                     <strong>{item.name}</strong>
                     <p className="row-meta">
@@ -276,14 +357,141 @@ export default function PackageDetailPage() {
                     <p className="row-meta">{formatAttributes(item.attributes)}</p>
                   </div>
                   <span className={`status-chip ${item.auto_import ? "success" : "plain"}`}>
-                    {item.auto_import ? "auto_import" : "manual"}
+                    {importModeLabel(item.auto_import)}
                   </span>
-                </article>
+                </button>
               ))}
             </div>
           )}
         </section>
       </section>
+      {selectedPlugin ? (
+        <div className="knowledge-detail-drawer-backdrop" onClick={handleClosePluginDrawer}>
+          <aside className="knowledge-detail-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="knowledge-detail-drawer-header">
+              <div>
+                <div className="knowledge-detail-drawer-title-row">
+                  <h3>外部系统对接</h3>
+                  <span className="status-chip plain">{executorLabel(selectedPlugin.executor)}</span>
+                </div>
+                <p>{selectedPlugin.name}</p>
+              </div>
+              <button type="button" className="drawer-close-button" onClick={handleClosePluginDrawer}>
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="knowledge-detail-drawer-body">
+              <section className="drawer-section">
+                <h4>插件信息</h4>
+                <div className="drawer-summary-grid">
+                  <div>
+                    <span>版本</span>
+                    <strong>{selectedPlugin.version ?? "未声明版本"}</strong>
+                  </div>
+                  <div>
+                    <span>执行器</span>
+                    <strong>{executorLabel(selectedPlugin.executor)}</strong>
+                  </div>
+                  <div>
+                    <span>能力数量</span>
+                    <strong>{selectedPlugin.capabilities?.length ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>配置结构</span>
+                    <strong>{selectedPlugin.config_schema ? "已声明" : "未声明"}</strong>
+                  </div>
+                </div>
+                {selectedPlugin.description ? <p className="row-meta">{selectedPlugin.description}</p> : null}
+              </section>
+              <section className="drawer-section">
+                <h4>能力列表</h4>
+                {selectedPlugin.capabilities?.length ? (
+                  <div className="stack-list">
+                    {selectedPlugin.capabilities.map((capability) => (
+                      <article key={capability.name} className="stack-item">
+                        <div>
+                          <strong>{capability.name}</strong>
+                          {capability.description ? <p>{capability.description}</p> : null}
+                          <p className="row-meta">
+                            {capability.required_scope ?? "权限范围未声明"} · {capability.side_effect_level ?? "副作用等级未声明"}
+                          </p>
+                        </div>
+                        <span className="status-chip plain">{capability.risk_level ?? "风险等级未声明"}</span>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-distribution">当前插件没有声明能力。</div>
+                )}
+              </section>
+              <section className="drawer-section">
+                <h4>连接配置</h4>
+                <PluginConfigForm key={selectedPlugin.name} pluginName={selectedPlugin.name} />
+              </section>
+            </div>
+          </aside>
+        </div>
+      ) : null}
+      {selectedKnowledgeFile ? (
+        <div className="knowledge-detail-drawer-backdrop" onClick={handleCloseKnowledgePreview}>
+          <aside className="knowledge-detail-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="knowledge-detail-drawer-header">
+              <div>
+                <div className="knowledge-detail-drawer-title-row">
+                  <h3>业务包知识文件</h3>
+                  <span className="status-chip plain">{knowledgePreview?.source_type ?? "加载中"}</span>
+                </div>
+                <p>{knowledgePreview?.file ?? selectedKnowledgeFile}</p>
+              </div>
+              <button type="button" className="drawer-close-button" onClick={handleCloseKnowledgePreview}>
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="knowledge-detail-drawer-body">
+              {knowledgePreviewStatus === "loading" ? (
+                <div className="empty-distribution">正在读取 bundle 内知识文件。</div>
+              ) : knowledgePreviewStatus === "error" ? (
+                <div className="empty-distribution">{knowledgePreviewError || "知识文件详情加载失败。"}</div>
+              ) : knowledgePreview ? (
+                <>
+                  <section className="drawer-section">
+                    <h4>基本信息摘要</h4>
+                    <div className="drawer-summary-grid">
+                      <div>
+                        <span>文件名称</span>
+                        <strong>{knowledgePreview.name}</strong>
+                      </div>
+                      <div>
+                        <span>写入知识库</span>
+                        <strong>{knowledgePreview.knowledge_base_code}</strong>
+                      </div>
+                      <div>
+                        <span>负责人</span>
+                        <strong>{knowledgePreview.owner}</strong>
+                      </div>
+                      <div>
+                        <span>导入方式</span>
+                        <strong>{importModeLabel(knowledgePreview.auto_import)}</strong>
+                      </div>
+                    </div>
+                  </section>
+                  <section className="drawer-section">
+                    <h4>扩展属性</h4>
+                    <pre className="drawer-code-block">{formatAttributes(knowledgePreview.attributes)}</pre>
+                  </section>
+                  <section className="drawer-section">
+                    <div className="drawer-section-head">
+                      <h4>文件内容</h4>
+                      <span className="status-chip plain">{knowledgePreview.content.length} 字符</span>
+                    </div>
+                    <pre className="drawer-code-block">{knowledgePreview.content}</pre>
+                  </section>
+                </>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </Shell>
   );
 }

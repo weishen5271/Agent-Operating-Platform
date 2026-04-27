@@ -109,6 +109,11 @@ class PackageKnowledgeImportRequest(BaseModel):
     auto_only: bool = Field(default=False)
 
 
+class PackageKnowledgePreviewRequest(BaseModel):
+    package_id: str = Field(..., min_length=1, max_length=255)
+    file: str = Field(..., min_length=1, max_length=1024)
+
+
 class WikiCompileRequest(BaseModel):
     source_id: str | None = Field(default=None, max_length=64)
     space_code: str = Field(default="knowledge", max_length=64)
@@ -210,6 +215,22 @@ async def import_package_knowledge(payload: PackageKnowledgeImportRequest, auth:
             tenant_id=tenant_id,
             user_id=user_id,
             auto_only=payload.auto_only,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/packages/knowledge/preview")
+async def preview_package_knowledge(payload: PackageKnowledgePreviewRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.preview_package_knowledge(
+            package_id=payload.package_id,
+            file=payload.file,
+            tenant_id=tenant_id,
+            user_id=user_id,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

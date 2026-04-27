@@ -4,8 +4,8 @@
   "description": "SCADA 报警实时检索（只读）。",
   "executor": "stub",
   "config_schema": {
-    "endpoint": { "type": "string", "required": true },
-    "auth_ref": { "type": "string", "required": true, "format": "secret-ref" }
+    "endpoint": { "type": "string", "required": true, "label": "SCADA 接口地址" },
+    "auth_ref": { "type": "string", "required": true, "format": "secret-ref", "label": "SCADA 密钥引用" }
   },
   "capabilities": [
     {

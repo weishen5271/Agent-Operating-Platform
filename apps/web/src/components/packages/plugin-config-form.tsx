@@ -35,6 +35,10 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function fieldLabel(field: string, config: PluginConfigFieldSchema, parent?: string): string {
+  return config.label ?? (parent ? `${parent}.${field}` : field);
+}
+
 export function PluginConfigForm({ pluginName }: { pluginName: string }) {
   const [schema, setSchema] = useState<PluginConfigSchemaResponse | null>(null);
   const [form, setForm] = useState<FormState>({});
@@ -149,7 +153,7 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
           return (
             <div key={field} className="plugin-config-field">
               <span>
-                {field}
+                {fieldLabel(field, config)}
                 {required ? <strong> *</strong> : null}
               </span>
               {Object.entries(nestedProperties).map(([nestedField, nestedConfig]) => {
@@ -159,7 +163,7 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
                 return (
                   <label key={`${field}.${nestedField}`} className="plugin-config-field nested">
                     <span>
-                      {field}.{nestedField}
+                      {fieldLabel(nestedField, nestedConfig, field)}
                       {nestedRequired ? <strong> *</strong> : null}
                     </span>
                     {nestedConfig.type === "integer" || nestedConfig.type === "number" ? (
@@ -193,7 +197,7 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
         return (
           <label key={field} className="plugin-config-field">
             <span>
-              {field}
+              {fieldLabel(field, config)}
               {required ? <strong> *</strong> : null}
             </span>
             {field === "mcp_server" ? (

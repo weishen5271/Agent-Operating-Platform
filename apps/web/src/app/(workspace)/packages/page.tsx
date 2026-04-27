@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
@@ -18,7 +18,6 @@ type PackageRow = {
   version: string;
   owner: string;
   plugins: number;
-  status: string;
   dependencies?: PackageDependency[];
 };
 
@@ -46,7 +45,6 @@ export default function PackagesPage() {
   const [loadError, setLoadError] = useState("");
   const [importMessage, setImportMessage] = useState("");
   const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
 
   useEffect(() => {
@@ -108,7 +106,6 @@ export default function PackagesPage() {
         name: item.name,
         version: item.version ?? "v1.2.0",
         owner: item.owner,
-        status: item.status,
         plugins: Math.max((adminPackages.capabilities?.length ?? 3) - index * 2, 3),
         dependencies: item.dependencies,
       }))
@@ -121,15 +118,6 @@ export default function PackagesPage() {
   }));
   const skills = adminPackages?.skills ?? [];
   const tools = adminPackages?.tools ?? [];
-
-  const grayCount = packages.filter((item) => item.status === "灰度中").length || Number(packageData.hero.gray);
-
-  function statusTone(status: string): string {
-    if (status.includes("运行")) return "success";
-    if (status.includes("灰度")) return "warning";
-    if (status.includes("待")) return "info";
-    return "";
-  }
 
   const tabs = TAB_DEFS.map((tab) => ({
     label: tab.label,
@@ -153,29 +141,19 @@ export default function PackagesPage() {
               <span className="current">业务包管理</span>
             </div>
             <h1>业务包管理</h1>
-            <p>统一维护业务包生命周期，结合灰度与插件健康度推进稳妥发布。</p>
+            <p>统一维护业务包清单、能力契约、插件配置与知识声明。</p>
           </div>
           <div className="page-head-actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip,application/zip"
-              style={{ display: "none" }}
-              onChange={handleBundleSelected}
-            />
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={importing}
-              onClick={() => fileInputRef.current?.click()}
-            >
+            <label className={`primary-button file-upload-button ${importing ? "disabled" : ""}`}>
               <span className="material-symbols-outlined">upload</span>
               {importing ? "导入中..." : "导入业务包"}
-            </button>
-            <button type="button" className="primary-button">
-              <span className="material-symbols-outlined">add</span>
-              部署新业务包
-            </button>
+              <input
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                disabled={importing}
+                onChange={handleBundleSelected}
+              />
+            </label>
           </div>
         </div>
 
@@ -198,16 +176,16 @@ export default function PackagesPage() {
           </article>
           <article className="stat-card">
             <div className="stat-card-head">
-              <span className="stat-card-label">灰度中配置</span>
-              <span className="stat-icon material-symbols-outlined">experiment</span>
+              <span className="stat-card-label">已注册能力</span>
+              <span className="stat-icon material-symbols-outlined">hub</span>
             </div>
-            <strong>{grayCount}</strong>
-            <p>涉及 6 个业务域</p>
+            <strong>{capabilities.length}</strong>
+            <p>来自平台内置能力与已安装业务包</p>
             <span className="stat-trend">
-              <span className="material-symbols-outlined">trending_flat</span>
-              稳步推进
+              <span className="material-symbols-outlined">lan</span>
+              契约统一管理
             </span>
-            <span className="material-symbols-outlined stat-card-glyph">experiment</span>
+            <span className="material-symbols-outlined stat-card-glyph">hub</span>
           </article>
           <article className="stat-card">
             <div className="stat-card-head">
@@ -230,7 +208,7 @@ export default function PackagesPage() {
               <div className="panel-header">
                 <div>
                   <h3>业务包列表</h3>
-                  <p>查看版本、负责人、插件数量与当前发布状态。</p>
+                  <p>查看版本、负责人、插件数量与包标识。</p>
                 </div>
                 <div className="panel-actions">
                   <button type="button" className="ghost-button">
@@ -244,18 +222,17 @@ export default function PackagesPage() {
                 </div>
               </div>
               <div className="data-table">
-                <div className="data-table-head five-cols">
+                <div className="data-table-head four-cols">
                   <span>业务包</span>
                   <span>版本</span>
                   <span>负责人</span>
                   <span>插件数</span>
-                  <span>状态</span>
                 </div>
                 {packages.map((item) => (
                   <Link
                     key={item.name}
                     href={`/packages/${encodeURIComponent(item.package_id ?? item.name)}` as never}
-                    className="data-table-row five-cols"
+                    className="data-table-row four-cols"
                   >
                     <div className="tenant-cell">
                       <span className="tenant-avatar">{item.name.charAt(0)}</span>
@@ -267,7 +244,6 @@ export default function PackagesPage() {
                     <span className="mono">{item.version}</span>
                     <span>{item.owner}</span>
                     <span className="mono">{item.plugins}</span>
-                    <span className={`status-chip ${statusTone(item.status)}`}>{item.status}</span>
                   </Link>
                 ))}
               </div>
@@ -460,7 +436,7 @@ export default function PackagesPage() {
               <div className="panel-header">
                 <div>
                   <h3>发布编排</h3>
-                  <p>业务包灰度状态与回滚入口。</p>
+                  <p>平台发布计划与回滚入口。</p>
                 </div>
               </div>
               <div className="stack-list">
@@ -470,7 +446,6 @@ export default function PackagesPage() {
                       <strong>{pkg.name}</strong>
                       <p>当前版本 {pkg.version} · 负责人 {pkg.owner}</p>
                     </div>
-                    <span className={`status-chip ${statusTone(pkg.status)}`}>{pkg.status}</span>
                   </article>
                 ))}
               </div>
@@ -499,8 +474,8 @@ export default function PackagesPage() {
               <span className="material-symbols-outlined">shield</span>
             </div>
             <div>
-              <h4>灰度与回滚</h4>
-              <p>支持按租户、按能力灰度，同时保留 30 天内的快速回滚路径，减少上线风险。</p>
+              <h4>发布计划</h4>
+              <p>发布编排状态来自平台发布计划，不从业务包 manifest 推断。</p>
               <a className="info-card-link" href="#">
                 查看发布策略
                 <span className="material-symbols-outlined">arrow_forward</span>

@@ -135,6 +135,7 @@ class CapabilityRegistry:
             capability,
             package_id=package_id,
             plugin_name=plugin_name,
+            config_schema=config_schema,
         )
 
     def _build_platform_executor(

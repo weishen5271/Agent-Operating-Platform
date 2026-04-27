@@ -4,8 +4,8 @@
   "description": "备件库存与供应商查询。",
   "executor": "stub",
   "config_schema": {
-    "endpoint": { "type": "string", "required": true },
-    "auth_ref": { "type": "string", "required": true, "format": "secret-ref" }
+    "endpoint": { "type": "string", "required": true, "label": "备件系统接口地址" },
+    "auth_ref": { "type": "string", "required": true, "format": "secret-ref", "label": "备件系统密钥引用" }
   },
   "capabilities": [
     {

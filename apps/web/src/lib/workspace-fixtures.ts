@@ -6,10 +6,10 @@ export const overviewData = {
     { label: "租户活跃数", value: "48", hint: "新增 2 个试点租户", tone: "secondary", icon: "corporate_fare" },
   ],
   packageHealth: [
-    { name: "HR 业务包", status: "运行中", calls: "42.1k", owner: "人力共享中心" },
-    { name: "财务业务包", status: "灰度中", calls: "18.9k", owner: "财务运营组" },
-    { name: "法务业务包", status: "运行中", calls: "9.4k", owner: "法务合规部" },
-    { name: "工业业务包", status: "待发布", calls: "2.1k", owner: "工业智能组" },
+    { name: "HR 业务包", calls: "42.1k", owner: "人力共享中心" },
+    { name: "财务业务包", calls: "18.9k", owner: "财务运营组" },
+    { name: "法务业务包", calls: "9.4k", owner: "法务合规部" },
+    { name: "工业业务包", calls: "2.1k", owner: "工业智能组" },
   ],
   incidents: [
     { id: "INC-240418-01", title: "财务报销插件重试率升高", severity: "P1", owner: "运行平台组" },
@@ -62,14 +62,13 @@ export const chatData = {
 export const packageData = {
   hero: {
     total: "1,284",
-    gray: "18",
     latency: "42ms",
   },
   packages: [
-    { name: "HR 业务包", version: "v1.2.0", owner: "人力共享中心", plugins: 12, status: "运行中" },
-    { name: "财务业务包", version: "v0.9.8", owner: "财务运营组", plugins: 18, status: "灰度中" },
-    { name: "法务业务包", version: "v1.0.6", owner: "法务合规部", plugins: 9, status: "运行中" },
-    { name: "工业业务包", version: "v0.6.1", owner: "工业智能组", plugins: 15, status: "待发布" },
+    { name: "HR 业务包", version: "v1.2.0", owner: "人力共享中心", plugins: 12 },
+    { name: "财务业务包", version: "v0.9.8", owner: "财务运营组", plugins: 18 },
+    { name: "法务业务包", version: "v1.0.6", owner: "法务合规部", plugins: 9 },
+    { name: "工业业务包", version: "v0.6.1", owner: "工业智能组", plugins: 15 },
   ],
   plugins: [
     { name: "knowledge.search", packageName: "通用知识包", effect: "read", health: "99.99%" },

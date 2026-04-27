@@ -22,11 +22,13 @@ class StubPackagePlugin(CapabilityPlugin):
         *,
         package_id: str,
         plugin_name: str,
+        config_schema: dict[str, Any] | None = None,
     ) -> None:
         self.capability = capability
+        self.plugin_name = plugin_name
         self._package_id = package_id
         self._plugin_name = plugin_name
-        self.config_schema = None
+        self.config_schema = config_schema
         self.auth_ref = None
 
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:

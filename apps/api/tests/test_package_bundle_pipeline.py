@@ -37,13 +37,22 @@ def make_zip(files: dict[str, str | dict[str, Any]]) -> bytes:
     return buffer.getvalue()
 
 
+def make_zip_with_cp437_mojibake_name(files: dict[str, str | dict[str, Any]]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in files.items():
+            content = json.dumps(payload, ensure_ascii=False) if isinstance(payload, dict) else payload
+            mojibake_name = name.encode("utf-8").decode("cp437")
+            archive.writestr(mojibake_name, content)
+    return buffer.getvalue()
+
+
 def manifest(*, package_id: str = "pkg.pipeline", version: str = "1.0.0") -> dict[str, Any]:
     return {
         "package_id": package_id,
         "name": "Pipeline Test Package",
         "version": version,
         "owner": "test",
-        "status": "test",
         "domain": "common",
         "provides": {
             "skills": ["skills/lookup.json"],
@@ -59,6 +68,9 @@ def plugin_contract(*, capability_name: str = "pkg.pipeline.lookup") -> dict[str
     return {
         "name": "pkg.pipeline.plugin",
         "executor": "stub",
+        "config_schema": {
+            "endpoint": {"type": "string", "required": True, "label": "接口地址"},
+        },
         "capabilities": [
             {
                 "name": capability_name,
@@ -173,6 +185,9 @@ def test_bundle_install_load_and_registers_capability_and_skill(workspace_tmp: P
     assert packages[0]["prompts"] == {"answer": "Use registered capability results."}
     assert packages[0]["knowledge_imports"] == []
     assert registry.get("pkg.pipeline.lookup").package_id == "pkg.pipeline"
+    assert registry.get_plugin("pkg.pipeline.plugin").config_schema == {
+        "endpoint": {"type": "string", "required": True, "label": "接口地址"},
+    }
     assert skills.get("pkg.pipeline::pipeline_lookup") is not None
 
 
@@ -215,6 +230,92 @@ def test_bundle_loads_knowledge_imports_without_auto_ingesting(workspace_tmp: Pa
             "attributes": {"equipment_model": "MX-1"},
         }
     ]
+
+
+def test_bundle_discovers_knowledge_files_when_imports_not_declared(workspace_tmp: Path) -> None:
+    installed_dir = workspace_tmp / "installed"
+    catalog_dir = workspace_tmp / "catalog"
+    catalog_dir.mkdir()
+    installer = PackageInstaller(installed_dir, temp_dir=workspace_tmp)
+    manifest_payload = manifest(package_id="pkg.knowledge.discovery")
+    manifest_payload.pop("knowledge_imports")
+    installer.install_zip(
+        make_zip(
+            {
+                "manifest.json": manifest_payload,
+                "plugins/lookup.json": plugin_contract(),
+                "skills/lookup.json": skill_contract(),
+                "prompts/answer.md": "prompt",
+                "knowledge/sop.md": "# SOP\n\nUse the real bundle document.",
+                "knowledge/runbook.txt": "Check alarm and dispatch work order.",
+            }
+        )
+    )
+
+    package = PackageLoader(catalog_dir=catalog_dir, installed_dir=installed_dir).get_package(
+        "pkg.knowledge.discovery"
+    )
+
+    assert package is not None
+    assert package["knowledge_imports"] == [
+        {
+            "file": "knowledge/runbook.txt",
+            "name": "runbook",
+            "source_type": "Text",
+            "knowledge_base_code": "knowledge",
+            "owner": "bundle:pkg.knowledge.discovery",
+            "auto_import": False,
+            "attributes": {},
+        },
+        {
+            "file": "knowledge/sop.md",
+            "name": "sop",
+            "source_type": "Markdown",
+            "knowledge_base_code": "knowledge",
+            "owner": "bundle:pkg.knowledge.discovery",
+            "auto_import": False,
+            "attributes": {},
+        },
+    ]
+
+
+def test_bundle_install_repairs_utf8_zip_names_without_utf8_flag(workspace_tmp: Path) -> None:
+    installed_dir = workspace_tmp / "installed"
+    catalog_dir = workspace_tmp / "catalog"
+    catalog_dir.mkdir()
+    installer = PackageInstaller(installed_dir, temp_dir=workspace_tmp)
+    manifest_payload = manifest(package_id="pkg.knowledge.filename")
+    manifest_payload.pop("knowledge_imports")
+
+    installer.install_zip(
+        make_zip_with_cp437_mojibake_name(
+            {
+                "manifest.json": manifest_payload,
+                "plugins/lookup.json": plugin_contract(),
+                "skills/lookup.json": skill_contract(),
+                "prompts/answer.md": "prompt",
+                "knowledge/故障代码库-AX系列伺服.md": "# 故障代码库\n\nAX-203: 伺服报警。",
+            }
+        )
+    )
+
+    package = PackageLoader(catalog_dir=catalog_dir, installed_dir=installed_dir).get_package(
+        "pkg.knowledge.filename"
+    )
+
+    assert package is not None
+    assert package["knowledge_imports"] == [
+        {
+            "file": "knowledge/故障代码库-AX系列伺服.md",
+            "name": "故障代码库-AX系列伺服",
+            "source_type": "Markdown",
+            "knowledge_base_code": "knowledge",
+            "owner": "bundle:pkg.knowledge.filename",
+            "auto_import": False,
+            "attributes": {},
+        }
+    ]
+    assert (installed_dir / "pkg.knowledge.filename" / "knowledge" / "故障代码库-AX系列伺服.md").exists()
 
 
 def test_bundle_install_rejects_knowledge_import_path_escape(workspace_tmp: Path) -> None:
@@ -329,6 +430,25 @@ def test_bundle_install_requires_overwrite_for_existing_package(workspace_tmp: P
     assert overwritten["version"] == "1.0.1"
 
 
+def test_bundle_install_ignores_macos_archive_metadata(workspace_tmp: Path) -> None:
+    installer = PackageInstaller(workspace_tmp / "installed", temp_dir=workspace_tmp)
+    bundle = make_zip(
+        {
+            "industry.mfg_maintenance/manifest.json": manifest(package_id="pkg.macos"),
+            "industry.mfg_maintenance/plugins/lookup.json": plugin_contract(),
+            "industry.mfg_maintenance/skills/lookup.json": skill_contract(),
+            "industry.mfg_maintenance/prompts/answer.md": "prompt",
+            "__MACOSX/._industry.mfg_maintenance": "macOS resource fork metadata",
+            "industry.mfg_maintenance/.DS_Store": "Finder metadata",
+            "industry.mfg_maintenance/prompts/._answer.md": "macOS resource fork metadata",
+        }
+    )
+
+    install_result = installer.install_zip(bundle)
+
+    assert install_result["package_id"] == "pkg.macos"
+
+
 def test_bundle_install_rejects_unsafe_zip_path(workspace_tmp: Path) -> None:
     installer = PackageInstaller(workspace_tmp / "installed", temp_dir=workspace_tmp)
     unsafe_zip = make_zip(
@@ -355,6 +475,7 @@ def test_loader_installed_bundle_wins_over_catalog_manifest(workspace_tmp: Path)
             {
                 **manifest(package_id="pkg.pipeline", version="0.9.0"),
                 "provides": {},
+                "status": "灰度中",
                 "plugins": [
                     plugin_contract(capability_name="pkg.pipeline.catalog_only"),
                 ],
@@ -371,6 +492,7 @@ def test_loader_installed_bundle_wins_over_catalog_manifest(workspace_tmp: Path)
 
     assert len([item for item in packages if item["package_id"] == "pkg.pipeline"]) == 1
     assert packages[0]["version"] == "1.0.0"
+    assert packages[0]["status"] == "运行中"
     assert registry.get("pkg.pipeline.lookup").package_id == "pkg.pipeline"
     with pytest.raises(KeyError):
         registry.get("pkg.pipeline.catalog_only")
