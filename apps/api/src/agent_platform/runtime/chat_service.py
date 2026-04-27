@@ -67,6 +67,15 @@ OUTPUT_GUARD_ACTIONS = {
     "mask_sensitive_data",
     "downgrade_answer",
 }
+PLATFORM_INTENTS = {
+    "general_chat",
+    "knowledge_query",
+    "wiki_query",
+    "report_compose",
+    "tool.time_now",
+    "tool.json_path",
+    "tool.http_fetch",
+}
 TraceStepCallback = Callable[[TraceRecord, TraceStep], Awaitable[None]]
 AnswerDeltaCallback = Callable[[str], Awaitable[None]]
 
@@ -178,6 +187,7 @@ class ChatService:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
         async def emit_step(trace: TraceRecord, step: TraceStep) -> None:
+            # _complete_core 仍按同步主链路执行；这里把 Trace step 旁路推入队列供 SSE 消费。
             await queue.put(
                 {
                     "event": "trace_step",
@@ -205,6 +215,7 @@ class ChatService:
 
         while not task.done() or not queue.empty():
             try:
+                # 短超时轮询让服务端能持续让出事件循环，同时不阻塞后续增量事件。
                 yield await asyncio.wait_for(queue.get(), timeout=0.1)
             except TimeoutError:
                 continue
@@ -237,20 +248,25 @@ class ChatService:
         on_step: TraceStepCallback | None = None,
         on_answer_delta: AnswerDeltaCallback | None = None,
     ) -> dict[str, object]:
+        """对话运行主链路：上下文解析、规划、治理、执行、输出审查与持久化都在这里串联。"""
+
+        # 请求先落到用户/租户上下文，后续权限、业务包路由和配置加载都依赖这个边界。
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         tenant = await self._tenants.get(context.tenant_id)
         if tenant is None:
             raise ValueError("Tenant context not found")
         if primary_package:
+            # 前端业务包切换只影响本次请求上下文，不直接修改租户的持久绑定关系。
             tenant = TenantProfile(
                 tenant_id=tenant.tenant_id,
                 name=tenant.name,
                 package=primary_package,
                 environment=tenant.environment,
                 budget=tenant.budget,
-                enabled_common_packages=list(common_packages or tenant.enabled_common_packages),
+                enabled_common_packages=list(common_packages if common_packages is not None else tenant.enabled_common_packages),
                 active=tenant.active,
             )
+        active_packages = self._active_packages_for_tenant(tenant)
         trace_id = str(uuid4())
         trace = TraceRecord(
             trace_id=trace_id,
@@ -262,6 +278,7 @@ class ChatService:
         )
 
         async def add_step(step: TraceStep) -> None:
+            # Trace 是审计和前端执行过程展示的共同来源，所有关键节点都通过这里追加。
             trace.steps.append(step)
             if on_step is not None:
                 await on_step(trace, step)
@@ -277,6 +294,7 @@ class ChatService:
 
         await add_step(TraceStep(name="received", status="completed", summary="请求已进入 Supervisor。", node_type="runtime"))
 
+        # 输入检查先于规划，避免明显不合规内容继续进入工具调用或知识检索阶段。
         input_findings = self._inspect_input(message)
         await add_step(
             TraceStep(
@@ -287,6 +305,7 @@ class ChatService:
             )
         )
 
+        # 短期记忆用于当前会话上下文，长期摘要用于提示已有知识范围，两者都不改变用户输入。
         short_memory = await self._load_short_memory(context.tenant_id, context.user_id, conversation_id)
         long_memory_summary = await self._load_long_memory_summary(context.tenant_id)
         await add_step(
@@ -301,10 +320,12 @@ class ChatService:
             )
         )
 
+        # Planner 可用时优先给出意图判断；不可用或返回异常时才进入规则分类。
         planner_decision = await self._plan_intent_with_llm(
             tenant_id=context.tenant_id,
             message=message,
             retrieval_mode=retrieval_mode,
+            active_packages=active_packages,
         )
         if planner_decision is not None:
             await add_step(
@@ -324,13 +345,22 @@ class ChatService:
                     node_type="runtime",
                 )
             )
-        intent = str(planner_decision["intent"]) if planner_decision else self._classify_intent(message, retrieval_mode=retrieval_mode)
+        intent = (
+            str(planner_decision["intent"])
+            if planner_decision
+            else self._classify_intent(
+                message,
+                retrieval_mode=retrieval_mode,
+                active_packages=active_packages,
+            )
+        )
         strategy = "plan_execute" if intent in {"hr_query", "procurement_draft"} else "direct_answer"
         trace.intent = intent
         trace.strategy = strategy
         await add_step(TraceStep(name="classified", status="completed", summary=f"识别意图为 {intent}，策略为 {strategy}。", node_type="runtime"))
 
-        candidate_capabilities = self._select_candidate_capabilities(context)
+        # 候选能力先按当前用户上下文过滤，后续命中 capability 时再做精确权限与配额校验。
+        candidate_capabilities = self._select_candidate_capabilities(context, active_packages=active_packages)
         await add_step(
             TraceStep(
                 name="capability_candidates",
@@ -344,6 +374,7 @@ class ChatService:
         warnings: list[str] = []
         capability = None
         if intent == "general_chat":
+            # 日常对话不进入工具规划，直接走 LLM，并仍保留治理和 Trace 节点。
             self._ensure_scope(context=context, required_scope="chat:read")
             self._check_quota(message)
             await add_step(TraceStep(name="planned", status="completed", summary="命中模型直答链路: model.direct_chat。", node_type="runtime"))
@@ -371,6 +402,7 @@ class ChatService:
         else:
             tool_plan = self._plan_platform_tool(message, intent, planner_decision=planner_decision)
             if tool_plan is not None:
+                # 平台内置 tool 优先于业务包 skill，适合会话列表、系统概览等固定平台能力。
                 tool_name, tool_payload = tool_plan
                 await add_step(TraceStep(name="planned", status="completed", summary=f"命中平台 Tool: {tool_name}。", node_type="runtime"))
                 await add_step(TraceStep(name="risk", status="completed", summary="风险等级 low，自主度上限：auto_execute。", node_type="guard"))
@@ -384,7 +416,11 @@ class ChatService:
                 )
                 answer, sources = self._compose_tool_answer(tool_name, result)
             else:
-                selected_skill = self._select_skill_for_intent(intent=intent, tenant=tenant)
+                selected_skill = self._select_skill_for_intent(
+                    intent=intent,
+                    tenant=tenant,
+                    active_packages=active_packages,
+                )
                 if selected_skill is not None:
                     await add_step(
                         TraceStep(
@@ -400,6 +436,7 @@ class ChatService:
 
                 capability_name, payload = self._plan(message, intent)
                 if selected_skill is not None and selected_skill.steps:
+                    # 声明式 skill.steps 由 SkillExecutor 编排，每一步都会单独写 Trace 便于追踪。
                     await add_step(TraceStep(name="planned", status="completed", summary=f"命中 Skill steps: {selected_skill.name}。", node_type="runtime"))
                     await add_step(TraceStep(name="risk", status="completed", summary="Skill steps 将逐步执行，每步按 capability/tool 自身治理约束处理。", node_type="guard"))
                     self._check_quota(message)
@@ -430,6 +467,7 @@ class ChatService:
                 if continue_to_post_model and capability_name not in {item.name for item in candidate_capabilities}:
                     raise PermissionError(f"Missing scope for capability: {capability_name}")
                 if continue_to_post_model:
+                    # 传统 capability 链路仍保留风险评估、权限校验和必要时的草稿确认。
                     await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。", node_type="runtime"))
                     capability = self._registry.get(capability_name)
                     autonomy = self._evaluate_risk(capability)
@@ -1902,21 +1940,161 @@ class ChatService:
         return await self._users.delete(tenant_id, user_id)
 
     @staticmethod
-    def _classify_intent(message: str, retrieval_mode: Literal["auto", "rag", "wiki"] = "auto") -> str:
+    def _active_packages_for_tenant(tenant: TenantProfile | None) -> list[dict[str, object]]:
+        if tenant is None:
+            return []
+        packages = PackageLoader.default().list_packages()
+        by_id = {str(package.get("package_id") or ""): package for package in packages}
+        by_name = {str(package.get("name") or ""): package for package in packages}
+        active_ids: set[str] = set()
+
+        def add_identifier(value: str) -> None:
+            normalized = value.strip()
+            if not normalized:
+                return
+            if normalized == "通用业务包":
+                active_ids.update(
+                    str(package.get("package_id") or "")
+                    for package in packages
+                    if str(package.get("domain") or "") == "common"
+                )
+                return
+            package = by_id.get(normalized) or by_name.get(normalized)
+            if package is not None:
+                active_ids.add(str(package.get("package_id") or ""))
+
+        add_identifier(tenant.package)
+        for package_id in tenant.enabled_common_packages:
+            add_identifier(package_id)
+
+        expanded = True
+        while expanded:
+            expanded = False
+            for package_id in list(active_ids):
+                package = by_id.get(package_id)
+                if package is None:
+                    continue
+                for dependency in package.get("dependencies", []):
+                    if not isinstance(dependency, dict) or dependency.get("kind") != "common_package":
+                        continue
+                    dependency_id = str(dependency.get("name") or "").strip()
+                    if dependency_id and dependency_id in by_id and dependency_id not in active_ids:
+                        active_ids.add(dependency_id)
+                        expanded = True
+        return [package for package in packages if str(package.get("package_id") or "") in active_ids]
+
+    @staticmethod
+    def _package_ids(packages: list[dict[str, object]]) -> set[str]:
+        return {str(package.get("package_id") or "") for package in packages if str(package.get("package_id") or "")}
+
+    @staticmethod
+    def _package_intent_names(packages: list[dict[str, object]]) -> set[str]:
+        return {
+            str(rule.get("name") or "").strip()
+            for package in packages
+            for rule in package.get("intents", [])
+            if isinstance(rule, dict) and str(rule.get("name") or "").strip()
+        }
+
+    @classmethod
+    def _allowed_planner_intents(cls, active_packages: list[dict[str, object]]) -> set[str]:
+        return {*PLATFORM_INTENTS, *cls._package_intent_names(active_packages)}
+
+    @classmethod
+    def _skill_intent_map(cls, active_packages: list[dict[str, object]]) -> dict[str, str]:
+        mapping = {
+            "kb_grounded_qa": "knowledge_query",
+            "report_compose": "report_compose",
+        }
+        for package in active_packages:
+            package_id = str(package.get("package_id") or "").strip()
+            intents = [
+                str(rule.get("name") or "").strip()
+                for rule in package.get("intents", [])
+                if isinstance(rule, dict) and str(rule.get("name") or "").strip()
+            ]
+            if not intents:
+                continue
+            primary_intent = intents[0]
+            source_kind = str(package.get("source_kind") or "catalog")
+            for skill in package.get("skills", []):
+                if not isinstance(skill, dict):
+                    continue
+                skill_name = str(skill.get("name") or "").strip()
+                if not skill_name:
+                    continue
+                mapping[skill_name] = primary_intent
+                if package_id and str(skill.get("source") or ("package" if source_kind == "bundle" else "")) == "package":
+                    mapping[f"{package_id}::{skill_name}"] = primary_intent
+        return mapping
+
+    @classmethod
+    def _candidate_skill_names_from_packages(cls, packages: list[dict[str, object]]) -> list[str]:
+        names: list[str] = []
+        for package in packages:
+            package_id = str(package.get("package_id") or "").strip()
+            source_kind = str(package.get("source_kind") or "catalog")
+            names.extend(
+                (
+                    f"{package_id}::{str(skill.get('name'))}"
+                    if (
+                        package_id
+                        and str(skill.get("source") or ("package" if source_kind == "bundle" else "")) == "package"
+                    )
+                    else str(skill.get("name"))
+                )
+                for skill in package.get("skills", [])
+                if isinstance(skill, dict) and str(skill.get("name", "")).strip()
+            )
+            names.extend(
+                str(dependency.get("name"))
+                for dependency in package.get("dependencies", [])
+                if isinstance(dependency, dict)
+                and dependency.get("kind") == "platform_skill"
+                and str(dependency.get("name", "")).strip()
+            )
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _skill_is_active(
+        skill: SkillDefinition,
+        active_skill_names: set[str],
+        active_package_ids: set[str],
+    ) -> bool:
+        if skill.name in active_skill_names:
+            return True
+        if skill.package_id and skill.package_id in active_package_ids:
+            return True
+        return skill.source == "_platform" and skill.package_id is None and skill.name in active_skill_names
+
+    @staticmethod
+    def _capability_is_active(capability: CapabilityDefinition, active_package_ids: set[str]) -> bool:
+        return capability.source != "package" or bool(capability.package_id and capability.package_id in active_package_ids)
+
+    @staticmethod
+    def _classify_intent(
+        message: str,
+        retrieval_mode: Literal["auto", "rag", "wiki"] = "auto",
+        active_packages: list[dict[str, object]] | None = None,
+    ) -> str:
         normalized = message.lower()
         if "json_path" in normalized or "jsonpath" in normalized:
             return "tool.json_path"
         if re.search(r"https?://[^\s，。]+", message) and any(keyword in message for keyword in ("抓取", "访问", "读取", "请求")):
             return "tool.http_fetch"
-        if "采购" in message or "审批草稿" in message or "草稿" in message:
+        package_intents = ChatService._package_intent_names(active_packages or [])
+        if (
+            "procurement_draft" in package_intents
+            and ("采购" in message or "审批草稿" in message or "草稿" in message)
+        ):
             return "procurement_draft"
-        if "年假" in message or "假期" in message:
+        if "hr_query" in package_intents and ("年假" in message or "假期" in message):
             return "hr_query"
         if retrieval_mode == "wiki":
             return "wiki_query"
         if retrieval_mode == "rag":
             return "knowledge_query"
-        catalog_intent = ChatService._classify_catalog_intent(message)
+        catalog_intent = ChatService._classify_catalog_intent(message, active_packages=active_packages or [])
         if catalog_intent:
             return catalog_intent
         wiki_keywords = (
@@ -1965,6 +2143,7 @@ class ChatService:
         tenant_id: str,
         message: str,
         retrieval_mode: Literal["auto", "rag", "wiki"],
+        active_packages: list[dict[str, object]],
     ) -> dict[str, object] | None:
         if retrieval_mode == "rag":
             return {"intent": "knowledge_query", "reason": "用户显式选择 RAG 模式"}
@@ -1976,7 +2155,7 @@ class ChatService:
             return None
         if not config.enabled or not api_key:
             return None
-        context_blocks = [self._planner_context_block()]
+        context_blocks = [self._planner_context_block(active_packages=active_packages)]
         prompt = (
             "你是 ReAct Planner，只负责选择下一步动作，不回答用户问题。\n"
             "根据用户问题和可用资产，选择一个 action，并只返回 JSON。\n"
@@ -1998,9 +2177,15 @@ class ChatService:
             )
         except Exception:
             return None
-        return self._parse_planner_decision(raw)
+        return self._parse_planner_decision(
+            raw,
+            allowed_intents=self._allowed_planner_intents(active_packages),
+            skill_intent_by_name=self._skill_intent_map(active_packages),
+        )
 
-    def _planner_context_block(self) -> str:
+    def _planner_context_block(self, *, active_packages: list[dict[str, object]]) -> str:
+        active_skill_names = set(self._candidate_skill_names_from_packages(active_packages))
+        active_package_ids = self._package_ids(active_packages)
         tools = [
             {
                 "name": item.name,
@@ -2022,7 +2207,7 @@ class ChatService:
                 "outputs_mapping": item.outputs_mapping,
             }
             for item in self._skills.list_skills()
-            if item.enabled
+            if item.enabled and self._skill_is_active(item, active_skill_names, active_package_ids)
         ]
         capabilities = [
             {
@@ -2032,10 +2217,30 @@ class ChatService:
                 "side_effect_level": item.side_effect_level,
             }
             for item in self._registry.list_capabilities()
-            if item.enabled
+            if item.enabled and self._capability_is_active(item, active_package_ids)
+        ]
+        package_intents = [
+            {
+                "package_id": str(package.get("package_id") or ""),
+                "intent": str(rule.get("name") or ""),
+                "keywords": [str(item) for item in rule.get("keywords", [])] if isinstance(rule, dict) else [],
+                "score": rule.get("score", 0.5) if isinstance(rule, dict) else 0.5,
+            }
+            for package in active_packages
+            for rule in package.get("intents", [])
+            if isinstance(rule, dict) and str(rule.get("name") or "").strip()
         ]
         return json.dumps(
             {
+                "当前业务包": [
+                    {
+                        "package_id": str(package.get("package_id") or ""),
+                        "name": str(package.get("name") or ""),
+                        "source_kind": str(package.get("source_kind") or "catalog"),
+                    }
+                    for package in active_packages
+                ],
+                "当前业务包Intent": package_intents,
                 "可用Tool": tools,
                 "可用Skill": skills,
                 "可用Capability": capabilities,
@@ -2045,8 +2250,6 @@ class ChatService:
                     "tool.http_fetch": "用户要求抓取或读取 URL 时使用 http_fetch。",
                     "knowledge_query": "用户明确要求基于文档、知识库、资料、依据、引用或专业行业资料回答时使用 kb_grounded_qa。",
                     "report_compose": "用户要求报告、汇总、总结或导出时使用 report_compose。",
-                    "hr_query": "用户询问员工假期余额时使用 HR capability。",
-                    "procurement_draft": "用户要求生成采购或审批草稿时使用 workflow capability。",
                     "general_chat": "普通聊天、解释、闲聊、未要求外部事实或工具时使用。",
                 },
             },
@@ -2054,7 +2257,12 @@ class ChatService:
         )
 
     @staticmethod
-    def _parse_planner_decision(raw: str) -> dict[str, object] | None:
+    def _parse_planner_decision(
+        raw: str,
+        *,
+        allowed_intents: set[str] | None = None,
+        skill_intent_by_name: dict[str, str] | None = None,
+    ) -> dict[str, object] | None:
         cleaned = raw.strip()
         fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL)
         if fenced:
@@ -2088,33 +2296,24 @@ class ChatService:
                 parsed["intent"] = tool_intent
                 return parsed
         if action_type == "skill" and action_name:
-            skill_intent = {
-                "kb_grounded_qa": "knowledge_query",
-                "report_compose": "report_compose",
-            }.get(action_name)
+            skill_intent = (skill_intent_by_name or {}).get(action_name)
             if skill_intent:
                 parsed["intent"] = skill_intent
                 return parsed
-        allowed_intents = {
-            "general_chat",
-            "knowledge_query",
-            "wiki_query",
-            "report_compose",
-            "hr_query",
-            "procurement_draft",
-            "tool.time_now",
-            "tool.json_path",
-            "tool.http_fetch",
-        }
+        allowed_intents = allowed_intents or set(PLATFORM_INTENTS)
         if intent in allowed_intents:
             return parsed
         return None
 
     @staticmethod
-    def _classify_catalog_intent(message: str) -> str | None:
+    def _classify_catalog_intent(
+        message: str,
+        *,
+        active_packages: list[dict[str, object]] | None = None,
+    ) -> str | None:
         scored: list[tuple[float, str]] = []
         lowered = message.lower()
-        for package in PackageLoader.default().list_packages():
+        for package in active_packages or []:
             for rule in package.get("intents", []):
                 if not isinstance(rule, dict):
                     continue
@@ -2234,8 +2433,14 @@ class ChatService:
             "path": path,
         }
 
-    def _select_skill_for_intent(self, *, intent: str, tenant: TenantProfile | None) -> SkillDefinition | None:
-        candidates = self._candidate_skill_names_for_intent(intent)
+    def _select_skill_for_intent(
+        self,
+        *,
+        intent: str,
+        tenant: TenantProfile | None,
+        active_packages: list[dict[str, object]],
+    ) -> SkillDefinition | None:
+        candidates = self._candidate_skill_names_for_intent(intent, active_packages=active_packages)
         for skill_name in candidates:
             skill = self._skills.get(skill_name)
             if skill is None or not skill.enabled:
@@ -2246,10 +2451,15 @@ class ChatService:
                 return skill
         return None
 
-    @staticmethod
-    def _candidate_skill_names_for_intent(intent: str) -> list[str]:
+    @classmethod
+    def _candidate_skill_names_for_intent(
+        cls,
+        intent: str,
+        *,
+        active_packages: list[dict[str, object]],
+    ) -> list[str]:
         names: list[str] = []
-        for package in PackageLoader.default().list_packages():
+        for package in active_packages:
             package_intents = {
                 str(rule.get("name", ""))
                 for rule in package.get("intents", [])
@@ -2331,8 +2541,11 @@ class ChatService:
         tenant_id: str,
         add_step: Callable[[TraceStep], Awaitable[None]],
     ) -> dict[str, object]:
+        """执行业务包声明式 skill，并把租户配置、权限校验和 Trace 写入连接起来。"""
+
         async def load_tenant_config(capability_name: str) -> dict[str, object]:
             capability = self._registry.get(capability_name)
+            # skill 内部 capability 仍复用平台权限模型，不能绕过 capability 自身声明的 scope。
             self._ensure_scope(
                 context=UserContext(
                     tenant_id=tenant_id,
@@ -2342,6 +2555,7 @@ class ChatService:
                 ),
                 required_scope=capability.required_scope,
             )
+            # HTTP/MCP 等执行器需要租户级 endpoint、密钥和超时配置，由 service 统一加载。
             return await self._load_capability_tenant_config(
                 tenant_id=tenant_id,
                 capability_name=capability_name,
@@ -2800,9 +3014,19 @@ class ChatService:
             lines.append(f"{role}: {item.content}")
         return ["会话历史（按时间从旧到新）:\n" + "\n".join(lines)]
 
-    def _select_candidate_capabilities(self, context: UserContext) -> list[CapabilityDefinition]:
+    def _select_candidate_capabilities(
+        self,
+        context: UserContext,
+        *,
+        active_packages: list[dict[str, object]],
+    ) -> list[CapabilityDefinition]:
         _ = context
-        return [capability for capability in self._registry.list_capabilities() if capability.enabled]
+        active_package_ids = self._package_ids(active_packages)
+        return [
+            capability
+            for capability in self._registry.list_capabilities()
+            if capability.enabled and self._capability_is_active(capability, active_package_ids)
+        ]
 
     @staticmethod
     def _evaluate_risk(capability: CapabilityDefinition) -> str:
@@ -3153,6 +3377,8 @@ class ChatService:
         answer: str,
         rules: list[OutputGuardRule],
     ) -> dict[str, object]:
+        """按租户输出红线规则处理回答，并记录命中安全事件。"""
+
         if not answer or not rules:
             return {
                 "answer": answer,
@@ -3169,6 +3395,7 @@ class ChatService:
             if not rule.enabled or not self._output_guard_matches(rule.pattern, guarded_answer):
                 continue
             matched_rules.append(rule)
+            # 规则动作按风险递增处理：提示、脱敏、降级、阻断；阻断后立即停止后续输出加工。
             if rule.action == "prepend_safety_warning":
                 prefix = "安全提示：执行设备、能量源或现场作业相关操作前，请先确认断电、泄压、挂牌上锁和人员资质。"
                 if not guarded_answer.startswith(prefix):
@@ -3194,6 +3421,7 @@ class ChatService:
                 break
 
         for rule in matched_rules:
+            # 命中红线不仅影响本次回答，也落安全事件，供治理页面和审计链路追踪。
             await self._security_events.save(
                 SecurityEvent(
                     event_id=f"sec-og-{uuid4().hex[:12]}",
@@ -3347,6 +3575,8 @@ class ChatService:
         short_memory: Conversation,
         on_delta: AnswerDeltaCallback | None = None,
     ) -> str | None:
+        """把知识库召回结果组装为 LLM 上下文，生成带来源约束的回答。"""
+
         config, api_key = await self._llm_config.get(tenant_id=tenant_id)
         if not config.enabled:
             return None

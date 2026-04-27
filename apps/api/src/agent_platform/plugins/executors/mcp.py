@@ -1,11 +1,9 @@
-"""Declarative MCP capability executor.
+"""声明式 MCP capability 执行器。
 
-This first MCP executor supports the HTTP family of MCP transports using the
-existing ``httpx`` dependency. Bundle authors still ship only declarative
-bindings; tenants provide server endpoints and credentials through
-``plugin_config``.
+当前 MCP 执行器基于 httpx 支持 HTTP 系列传输。业务包仍只声明 binding，
+租户通过 plugin_config 提供 server endpoint、headers 和凭据。
 
-Binding shape::
+Binding 形态::
 
     {
         "mcp_server": "$config.mcp_server",
@@ -14,7 +12,7 @@ Binding shape::
         "response_map": {"url": "$response.body.structuredContent.html_url"}
     }
 
-Tenant config shape::
+租户配置形态::
 
     {
         "mcp_server": "github",
@@ -48,7 +46,7 @@ _MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
 
 class McpExecutorError(RuntimeError):
-    """Raised when an MCP invocation cannot be completed."""
+    """MCP 调用无法完成时抛出，错误码会进入 capability 调用结果链路。"""
 
     def __init__(self, code: str, status: int | None, detail: str) -> None:
         super().__init__(f"{code}: {detail}")
@@ -58,7 +56,7 @@ class McpExecutorError(RuntimeError):
 
 
 class McpExecutor(CapabilityPlugin):
-    """Run a single capability through an MCP tools/call binding."""
+    """通过 MCP tools/call binding 执行单个 capability。"""
 
     def __init__(
         self,
@@ -90,6 +88,7 @@ class McpExecutor(CapabilityPlugin):
         tenant_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ctx = BindingContext(inputs=dict(payload), config=self._merge_config(tenant_config))
+        # server 可以来自显式 mcp_server、租户 mcp_servers 注册表或直连 endpoint。
         server = self._resolve_server(ctx)
         transport = str(server.get("transport") or "streamable-http").lower()
         if transport not in {"streamable-http", "http"}:
@@ -117,6 +116,7 @@ class McpExecutor(CapabilityPlugin):
         timeout_seconds = self._resolve_timeout(ctx)
         try:
             with self._open_client(timeout_seconds) as client:
+                # MCP HTTP 调用需要先 initialize，再发送 initialized 通知，最后执行 tools/call。
                 initialize_result = self._post_json_rpc(
                     client,
                     endpoint=endpoint,
@@ -156,6 +156,7 @@ class McpExecutor(CapabilityPlugin):
             raise McpExecutorError("MCP_UNREACHABLE", None, str(exc)) from exc
 
         ctx.response = {"body": tool_result}
+        # response_map 把 MCP 原始结果收敛成平台 capability 的稳定输出结构。
         result = render_mapping(self._binding.get("response_map") or {}, ctx)
         if not isinstance(result, dict):
             result = {"data": result}
@@ -191,6 +192,7 @@ class McpExecutor(CapabilityPlugin):
         return merged
 
     def _resolve_server(self, ctx: BindingContext) -> dict[str, Any]:
+        # 优先按名称查租户配置，便于同一业务包在不同租户绑定不同 MCP Server。
         rendered = render_template(str(self._binding.get("mcp_server") or "$config.mcp_server"), ctx)
         if isinstance(rendered, dict):
             return rendered
@@ -248,6 +250,7 @@ class McpExecutor(CapabilityPlugin):
         params: dict[str, Any],
         expect_response: bool = True,
     ) -> dict[str, Any]:
+        # 所有 MCP 请求走 JSON-RPC，通知类请求不要求响应体。
         request: dict[str, Any] = {
             "jsonrpc": _JSON_RPC_VERSION,
             "method": method,
@@ -274,6 +277,7 @@ class McpExecutor(CapabilityPlugin):
         normalized = result if isinstance(result, dict) else {"value": result}
         session_id = response.headers.get("Mcp-Session-Id")
         if session_id:
+            # streamable-http transport 会通过响应头返回会话 ID，后续请求需要带回去。
             normalized["_mcp_session_id"] = session_id
         return normalized
 

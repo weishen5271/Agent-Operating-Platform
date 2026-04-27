@@ -6,17 +6,14 @@ from typing import Any
 
 
 class PackageLoader:
-    """Load business package manifests.
+    """加载并归一化业务包清单。
 
-    Two sources are scanned:
+    当前同时支持两类来源：
+    - ``packages/catalog/*.json``：内置示例业务包的旧格式平铺清单。
+    - ``packages/installed/<package_id>/manifest.json``：通过导入接口安装的 bundle。
 
-    - ``packages/catalog/*.json``  — legacy flat manifest catalog (built-in samples).
-    - ``packages/installed/<package_id>/manifest.json`` — bundle layout produced by
-      ``POST /admin/packages/import``. The bundle directory may also contain
-      ``skills/``, ``tools/``, ``plugins/``, ``prompts/`` and ``knowledge/`` folders
-      whose declarative artefacts are merged into the normalised manifest at load
-      time so downstream registries (SkillRegistry, ToolRegistry, plugin registry)
-      do not need to know whether a package came from catalog or bundle.
+    bundle 内的 skills、tools、plugins、prompts、knowledge 会在加载阶段合并进统一清单，
+    下游注册表不需要关心业务包来自内置目录还是上传安装目录。
     """
 
     INSTALLED_DIRNAME = "installed"
@@ -43,7 +40,7 @@ class PackageLoader:
         packages: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        # Bundles win over catalog when package_id collides — installed > sample.
+        # 同 package_id 同时存在时，安装目录优先于内置示例，便于本地覆盖验证 bundle。
         if self._installed_dir.exists():
             for bundle_dir in sorted(p for p in self._installed_dir.iterdir() if p.is_dir()):
                 manifest_path = bundle_dir / "manifest.json"
@@ -89,16 +86,14 @@ class PackageLoader:
         if missing:
             raise ValueError(f"Package manifest {manifest_path} missing fields: {', '.join(missing)}")
 
-        # ``dependencies`` is the legacy field; ``requires`` is the bundle-era name.
-        # Treat them as equivalent and merge.
+        # dependencies 是历史字段，requires 是 bundle 阶段字段；归一化后统一给影响分析使用。
         legacy_dependencies = raw.get("dependencies", [])
         requires = raw.get("requires", [])
         if not isinstance(legacy_dependencies, list) or not isinstance(requires, list):
             raise ValueError(f"Package manifest dependencies/requires must be a list: {manifest_path}")
         merged_deps = [dict(item) for item in (*legacy_dependencies, *requires) if isinstance(item, dict)]
 
-        # Inline skills are still supported (catalog samples). Bundle skills are
-        # discovered from provides.skills paths and appended.
+        # 内置 catalog 可以直接内联定义能力；bundle 则通过 provides 引用独立声明文件。
         skills = [dict(item) for item in raw.get("skills", []) if isinstance(item, dict)]
         tools: list[dict[str, Any]] = [dict(item) for item in raw.get("tools", []) if isinstance(item, dict)]
         plugins: list[dict[str, Any]] = [dict(item) for item in raw.get("plugins", []) if isinstance(item, dict)]

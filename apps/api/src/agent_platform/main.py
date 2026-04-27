@@ -25,6 +25,7 @@ logger = logging.getLogger("agent_platform.api")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 启动阶段只做运行必需的基础设施初始化，避免请求进入后才暴露数据库或默认配置缺失。
     await db_runtime.initialize()
     await initialize_runtime_state()
     yield
@@ -48,6 +49,7 @@ app.include_router(auth_router, prefix=settings.api_prefix)
 
 @app.exception_handler(ValueError)
 async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+    # 业务校验错误统一收敛为 400，接口层不再重复包装同类异常。
     logger.warning("ValueError on %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
@@ -56,6 +58,7 @@ async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, HTTPException):
         raise exc
+    # 未预期异常保留服务端日志，响应中带异常类型便于本地研发阶段快速定位。
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,

@@ -16,6 +16,7 @@ def validate_http_endpoint(
     executor_label: str,
     error_factory: Callable[[str, int | None, str], Exception],
 ) -> None:
+    # 出站治理校验最终 URL，防止业务包通过配置把 HTTP/MCP executor 指向本机或内网资源。
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise error_factory(
@@ -65,6 +66,7 @@ def _host_matches_allowlist(host: str, allowlist: list[str]) -> bool:
         entry = raw_entry.strip().lower()
         if not entry:
             continue
+        # allowlist 同时支持 CIDR、精确 IP、通配域名，满足本地联调和企业网段放行两类场景。
         if "/" in entry:
             if host_ip is None:
                 continue

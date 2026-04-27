@@ -19,7 +19,7 @@ class LLMRuntimeUpdateRequest(BaseModel):
     api_key: str = Field(default="")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     system_prompt: str = Field(default="")
-    # Embedding 子配置；为空表示不修改对应字段。
+    # Embedding 子配置；为空表示不修改对应字段，避免更新 LLM 文本配置时误清空向量配置。
     embedding_provider: Literal["openai-compatible", "openai", "azure"] | None = Field(default=None)
     embedding_base_url: str | None = Field(default=None)
     embedding_model: str | None = Field(default=None)
@@ -164,6 +164,7 @@ async def import_package_bundle(
     overwrite: bool = Query(default=False),
 ) -> dict[str, object]:
     tenant_id, user_id = auth
+    # 业务包导入是能力扩展入口，先在路由层拦截非 zip 和空文件，结构校验交给 installer。
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Bundle must be a .zip file")
     payload = await file.read()
@@ -203,6 +204,7 @@ async def uninstall_package_bundle(package_id: str, auth: AuthContext) -> dict[s
 async def import_package_knowledge(payload: PackageKnowledgeImportRequest, auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
     try:
+        # bundle 安装阶段不会静默写入知识库，必须通过该接口显式触发知识导入。
         return await chat_service.import_package_knowledge(
             package_id=payload.package_id,
             tenant_id=tenant_id,

@@ -62,6 +62,7 @@ type UsedRef = {
 };
 
 function aggregateUsedRefs(steps: RenderTraceStep[], type: "skill" | "tool"): UsedRef[] {
+  // Trace step 是后端运行过程的唯一来源，这里聚合出本轮真正触发过的 skill/tool。
   const map = new Map<string, UsedRef>();
   for (const step of steps) {
     if (step.node_type !== type || !step.ref) continue;
@@ -82,6 +83,7 @@ function aggregateUsedRefs(steps: RenderTraceStep[], type: "skill" | "tool"): Us
 }
 
 function readPackageContext() {
+  // 业务包上下文通过 URL 临时切换，只影响当前请求，不修改租户后台绑定。
   if (typeof window === "undefined") return undefined;
   const params = new URLSearchParams(window.location.search);
   const primary = params.get("primary") || undefined;
@@ -142,6 +144,7 @@ function renderInlineMarkdown(text: string): ReactNode[] {
 }
 
 function renderMarkdown(content: string): ReactNode {
+  // 对话区只支持当前需要的轻量 Markdown 子集，避免引入完整渲染器扩大前端依赖面。
   const lines = content.split(/\r?\n/);
   const nodes: ReactNode[] = [];
   let index = 0;
@@ -284,6 +287,7 @@ export function ChatWorkbench() {
 
     async function loadLatestConversation() {
       try {
+        // 首屏恢复最近会话；如果用户已在本地新建/发送，则不再用历史结果覆盖当前状态。
         const conversations = await getChatConversations();
         if (cancelled) return;
         setConversations(conversations.items);
@@ -315,6 +319,7 @@ export function ChatWorkbench() {
   }
 
   function resetConversationState(nextConversationId?: string) {
+    // 切换会话时同步清理 Trace、增量缓冲和打字机定时器，防止旧流式内容串到新会话。
     setConversationId(nextConversationId);
     setMessages([]);
     setTrace(null);
@@ -417,6 +422,7 @@ export function ChatWorkbench() {
     const userMessageId = crypto.randomUUID();
     const assistantMessageId = crypto.randomUUID();
     hasStartedLocalConversationRef.current = true;
+    // 先乐观插入用户消息和空助手消息，后续 SSE 增量会持续填充助手气泡。
     setError(null);
     setLatestResponse(null);
     setTrace({
@@ -441,6 +447,7 @@ export function ChatWorkbench() {
 
     let failed = false;
     try {
+      // 后端 SSE 会依次返回 trace_step、response_meta、message_delta 和 message_done。
       await streamChatCompletion(
         trimmed,
         retrievalMode,
@@ -502,6 +509,7 @@ export function ChatWorkbench() {
     if (typewriterTimersRef.current[messageId]) return;
 
     typewriterTimersRef.current[messageId] = window.setInterval(() => {
+      // 网络增量先进入 buffer，再由本地定时器平滑输出，避免 UI 因 chunk 大小抖动。
       const buffer = deltaBuffersRef.current[messageId] ?? "";
       if (!buffer) {
         const finalContent = finalContentRef.current[messageId];
@@ -546,6 +554,7 @@ export function ChatWorkbench() {
 
   function handleStreamEvent(event: ChatStreamEvent, assistantMessageId: string, userMessage: string) {
     if (event.event === "trace_step") {
+      // Trace step 先到达，右侧执行链路可以早于最终回答逐步展示。
       setTrace((prev) => ({
         trace_id: event.trace_id,
         tenant_id: prev?.tenant_id ?? "",
@@ -562,6 +571,7 @@ export function ChatWorkbench() {
     }
 
     if (event.event === "response_meta") {
+      // 元数据到达后补齐 conversation_id、intent、routing 和引用来源。
       setConversationId(event.conversation_id);
       setTrace((prev) => ({
         trace_id: event.trace_id,
@@ -598,6 +608,7 @@ export function ChatWorkbench() {
     }
 
     if (event.event === "message_done") {
+      // 最终内容以 message_done 为准，用它覆盖本地打字机可能尚未完全输出的缓冲。
       finishAssistantMessage(assistantMessageId, event.content);
       setLatestResponse((prev) =>
         prev

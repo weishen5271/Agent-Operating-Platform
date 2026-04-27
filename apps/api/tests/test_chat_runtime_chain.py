@@ -725,6 +725,7 @@ def test_fault_diagnosis_chat_runs_declarative_skill_steps(monkeypatch) -> None:
             message="3 号注塑机昨晚报 AX-203，怎么处理？",
             tenant_id="tenant-demo",
             user_id="user-demo",
+            primary_package="pkg.test_fault_triage",
         )
     )
 

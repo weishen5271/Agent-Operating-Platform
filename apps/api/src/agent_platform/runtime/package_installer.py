@@ -18,17 +18,17 @@ REQUIRED_MANIFEST_FIELDS = ("package_id", "name", "version", "owner", "status", 
 
 
 class PackageInstallError(ValueError):
-    """Raised when an uploaded bundle fails validation."""
+    """上传的业务包 bundle 未通过安全或结构校验时抛出。"""
 
 
 class PackageInstaller:
-    """Install business package bundles uploaded as zip archives.
+    """安装以 zip 上传的业务包 bundle。
 
-    The installer is intentionally conservative for the first stage:
-    - only declarative artefacts (json / yaml / txt / md) are accepted
-    - no Python code is unpacked or imported
-    - extraction is sandboxed via a safe-join check that rejects ``..``
-    - extracted bundle is moved into ``packages/installed/<package_id>/``
+    这里是业务包进入平台的安全边界：
+    - 只接受 json/yaml/txt/md 等声明式文件。
+    - 不解压或导入 Python 代码，避免上传即获得执行能力。
+    - 所有路径都经过安全拼接校验，拒绝 ``..`` 越界写入。
+    - 校验通过后才移动到 ``packages/installed/<package_id>/``。
     """
 
     def __init__(self, installed_dir: Path, *, temp_dir: Path | None = None) -> None:
@@ -46,6 +46,7 @@ class PackageInstaller:
                 f"Bundle exceeds size limit ({MAX_BUNDLE_BYTES // (1024 * 1024)}MB)"
             )
 
+        # 先解压到临时目录并完成完整校验，避免半成品 bundle 出现在 installed 目录中。
         temp_parent = self._temp_dir or Path(tempfile.gettempdir())
         temp_root = temp_parent / f"aop_bundle_{uuid4().hex[:12]}"
         try:
@@ -65,6 +66,7 @@ class PackageInstaller:
                     raise PackageInstallError(
                         f"Package already installed: {package_id} (pass overwrite=true to replace)"
                     )
+                # 覆盖安装只在 manifest 和引用文件全部校验通过后执行，降低误删可用版本的概率。
                 shutil.rmtree(target_dir)
 
             shutil.move(str(bundle_root), str(target_dir))
@@ -102,7 +104,7 @@ class PackageInstaller:
                     name = member.filename
                     if not name or name.endswith("/"):
                         continue
-                    # Reject absolute / parent-traversal paths.
+                    # 先解析到目标目录下，再校验相对关系，阻止绝对路径和父目录穿越。
                     candidate = (staging / name).resolve()
                     try:
                         candidate.relative_to(staging.resolve())
@@ -124,8 +126,7 @@ class PackageInstaller:
 
     @staticmethod
     def _locate_bundle_root(staging: Path) -> Path:
-        # Manifest may be at the staging root, or one level deep when the zip
-        # was created with a top-level directory.
+        # 兼容两种常见压缩方式：manifest 在 zip 根目录，或在唯一一级顶层目录内。
         if (staging / "manifest.json").exists():
             return staging
         children = [p for p in staging.iterdir() if p.is_dir()]
@@ -147,6 +148,7 @@ class PackageInstaller:
         provides = manifest.get("provides") or {}
         if not isinstance(provides, dict):
             raise PackageInstallError("manifest.provides must be an object")
+        # provides 中声明的能力文件必须真实存在且是 JSON 对象，后续注册表会直接读取这些声明。
         for kind in ("skills", "tools", "plugins"):
             for rel_path in provides.get(kind, []) or []:
                 if not isinstance(rel_path, str):
@@ -172,6 +174,7 @@ class PackageInstaller:
         knowledge_imports = manifest.get("knowledge_imports", []) or []
         if not isinstance(knowledge_imports, list):
             raise PackageInstallError("manifest.knowledge_imports must be a list")
+        # 知识导入只校验文件与元数据结构，不在安装阶段静默写入知识库。
         for index, item in enumerate(knowledge_imports):
             if not isinstance(item, dict):
                 raise PackageInstallError(f"knowledge_imports[{index}] must be an object")

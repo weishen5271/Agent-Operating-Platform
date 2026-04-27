@@ -23,6 +23,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 def _sse(event: dict[str, object]) -> str:
+    # 前端按 event 字段分流处理 Trace、增量文本和最终元数据；这里统一序列化 SSE 帧。
     name = str(event.get("event", "message"))
     return f"event: {name}\ndata: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
@@ -31,6 +32,7 @@ def _sse(event: dict[str, object]) -> str:
 async def create_completion(payload: ChatCompletionRequest, auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
     try:
+        # 同步接口仍复用 ChatService 主链路，避免和流式接口出现两套规划/治理逻辑。
         return await chat_service.complete(
             message=payload.message,
             conversation_id=payload.conversation_id,
@@ -52,6 +54,7 @@ async def stream_completion(payload: ChatCompletionRequest, auth: AuthContext) -
 
     async def events() -> AsyncIterator[str]:
         try:
+            # 流式接口只负责把运行时事件转成 SSE，具体执行阶段仍由 ChatService 产生可审计 Trace。
             async for event in chat_service.stream_complete(
                 message=payload.message,
                 conversation_id=payload.conversation_id,

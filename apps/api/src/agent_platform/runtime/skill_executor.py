@@ -21,7 +21,7 @@ class SkillExecutionResult:
 
 
 class SkillExecutor:
-    """Execute declarative skill.steps without changing legacy skill behavior."""
+    """执行声明式 skill.steps，并保持旧的单步 skill 行为不变。"""
 
     def __init__(
         self,
@@ -43,6 +43,7 @@ class SkillExecutor:
         sources: list[SourceReference] = []
 
         for raw_step in skill.steps:
+            # 每个 step 的输出会进入 steps/prev_step，后续 step 可以通过 DSL 引用前序结果。
             step_id = str(raw_step.get("id") or "").strip()
             if not step_id:
                 raise ValueError("skill.steps[] missing id")
@@ -63,6 +64,7 @@ class SkillExecutor:
 
             capability_name = str(raw_step.get("capability") or "").strip()
             tool_name = str(raw_step.get("tool") or "").strip()
+            # 一个 step 只能绑定一种执行目标，避免同一节点同时产生 capability 和 tool 两套治理语义。
             if capability_name and tool_name:
                 raise ValueError(f"Skill step cannot define both capability and tool: {step_id}")
             if capability_name:
@@ -91,6 +93,7 @@ class SkillExecutor:
             },
             config={},
         )
+        # outputs_mapping 是 skill 的对外合同；未声明时回退为完整 step 结果，便于排障和前端展示。
         outputs = render_mapping(skill.outputs_mapping or {}, output_ctx)
         if not isinstance(outputs, dict):
             outputs = {"result": outputs}
@@ -108,6 +111,7 @@ class SkillExecutor:
         capability_name: str,
         payload: dict[str, object],
     ) -> dict[str, object]:
+        # capability 调用前加载租户级插件配置，HTTP/MCP 等执行器会从这里取得 endpoint/secrets。
         tenant_config = await self._load_tenant_config(capability_name)
         result = self._registry.invoke(capability_name, payload, tenant_config=tenant_config)
         if self._add_step is not None:
@@ -130,6 +134,7 @@ class SkillExecutor:
         tool_name: str,
         payload: dict[str, object],
     ) -> dict[str, object]:
+        # 平台 tool 不依赖租户插件配置，但同样写入 Trace，保持审计视图的 step 粒度一致。
         result = self._tools.invoke(tool_name, payload)
         if self._add_step is not None:
             tool = self._tools.get(tool_name)

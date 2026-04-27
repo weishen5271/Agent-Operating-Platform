@@ -1,17 +1,15 @@
-"""Declarative HTTP capability executor.
+"""声明式 HTTP capability 执行器。
 
-Bundles ship a JSON ``binding`` block per capability; the executor reads
-``tenant_config`` (endpoint / secrets / timeout) from the platform's
-``plugin_config`` table and synthesises a real HTTP call without any code
-upload. The DSL is intentionally minimal:
+业务包只提供 JSON binding，不上传代码。执行器从租户插件配置中读取 endpoint、secrets、
+timeout 等运行参数，再把 binding 渲染成真实 HTTP 请求。
 
-Reference syntax (anywhere in binding string values):
-    ``$input.<dot.path>``     payload supplied by the planner
-    ``$config.<dot.path>``    tenant-scoped plugin config
-    ``$secret.<name>``        ``tenant_config['secrets'][<name>]``
-    ``$response.<dot.path>``  HTTP response body — only valid in ``response_map``
+引用语法可出现在 binding 字符串中：
+    ``$input.<dot.path>``     Planner 生成的入参。
+    ``$config.<dot.path>``    租户级插件配置。
+    ``$secret.<name>``        ``tenant_config['secrets'][<name>]``。
+    ``$response.<dot.path>``  HTTP 响应体，仅允许在 ``response_map`` 中使用。
 
-Binding shape::
+Binding 形态::
 
     {
         "method": "GET",
@@ -63,7 +61,7 @@ _RATE_LIMIT_LOCK = threading.Lock()
 
 
 class HttpExecutorError(RuntimeError):
-    """Raised when an HTTP capability invocation fails after translation."""
+    """HTTP capability 调用失败，并已转换为平台可识别错误码时抛出。"""
 
     def __init__(self, code: str, status: int | None, detail: str) -> None:
         super().__init__(f"{code}: {detail}")
@@ -73,7 +71,7 @@ class HttpExecutorError(RuntimeError):
 
 
 class HttpExecutor(CapabilityPlugin):
-    """Run a single capability via a declarative HTTP binding."""
+    """通过声明式 HTTP binding 执行单个 capability。"""
 
     def __init__(
         self,
@@ -97,8 +95,7 @@ class HttpExecutor(CapabilityPlugin):
 
     # ------------------------------------------------------------------ invoke
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
-        # The base class abstract demands this; HTTP executor needs tenant
-        # config so we route through ``invoke_with_config``.
+        # 基类要求实现 invoke；HTTP 执行需要租户配置，因此统一转到 invoke_with_config。
         return self.invoke_with_config(payload, tenant_config=None)
 
     def invoke_with_config(
@@ -111,6 +108,7 @@ class HttpExecutor(CapabilityPlugin):
             inputs=dict(payload),
             config=self._merge_config(tenant_config),
         )
+        # 先完成 binding 渲染，再做出站 URL 校验，确保最终请求地址才是安全判断对象。
         method = str(self._binding.get("method") or "GET").upper()
         endpoint = ctx.require_config("endpoint", error_factory=HttpExecutorError)
         path = render_template(self._binding.get("path") or "", ctx)
@@ -125,6 +123,7 @@ class HttpExecutor(CapabilityPlugin):
         idempotency_key = self._resolve_idempotency_key(ctx)
         idempotency_cache_key = self._idempotency_cache_key(idempotency_key) if idempotency_key else None
         if idempotency_key:
+            # 幂等缓存用于保护外部写接口，重复请求直接返回短期缓存结果。
             headers["Idempotency-Key"] = idempotency_key
             cached = self._get_cached_idempotency_result(idempotency_cache_key)
             if cached is not None:
@@ -134,6 +133,7 @@ class HttpExecutor(CapabilityPlugin):
 
         rate_limit = self._resolve_rate_limit(ctx)
         if rate_limit is not None:
+            # 本地限流是租户侧保护，不替代上游系统自己的 quota。
             self._check_rate_limit(rate_limit)
 
         retry_policy = self._resolve_retry_policy()
@@ -143,6 +143,7 @@ class HttpExecutor(CapabilityPlugin):
         with self._open_client(timeout_seconds) as client:
             for attempt in range(1, retry_policy["max_attempts"] + 1):
                 try:
+                    # 重试只围绕一次已渲染请求进行，不在重试期间重新读取配置或重算入参。
                     response = client.request(
                         method=method,
                         url=url,
@@ -194,6 +195,7 @@ class HttpExecutor(CapabilityPlugin):
             raise HttpExecutorError(translation, response.status_code, _truncate(body_text, 500))
 
         ctx.response = {"status": response.status_code, "body": response_body}
+        # response_map 是业务包对平台的输出合同，未声明时保持空对象并补充执行元数据。
         result = render_mapping(self._binding.get("response_map") or {}, ctx)
         if not isinstance(result, dict):
             result = {"data": result}

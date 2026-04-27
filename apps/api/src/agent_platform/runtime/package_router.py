@@ -7,6 +7,8 @@ from agent_platform.runtime.package_loader import PackageLoader
 
 
 class PackageRouter:
+    """根据租户绑定、通用业务包和意图规则，为一次请求选择最相关的业务包。"""
+
     def __init__(self, loader: PackageLoader) -> None:
         self._loader = loader
 
@@ -18,11 +20,13 @@ class PackageRouter:
         active_ids = self._active_package_ids(tenant)
         packages = [item for item in self._loader.list_packages() if str(item.get("package_id")) in active_ids]
         if not packages and tenant and tenant.package:
+            # loader 未读到清单时仍保留租户绑定信息，避免路由结果完全丢失业务包上下文。
             packages = [{"package_id": tenant.package, "intents": []}]
 
         scored: list[tuple[str, float, list[str]]] = []
         for package in packages:
             package_id = str(package.get("package_id", ""))
+            # 主业务包天然比通用包更贴近当前租户场景；关键词只作为意图命中的微调信号。
             base_score = 0.75 if tenant and package_id == tenant.package else 0.62
             score = base_score
             signals = [f"package={package_id}"]

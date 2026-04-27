@@ -26,6 +26,8 @@ from agent_platform.wiki.service import WikiService
 from agent_platform.wiki.repository import PostgresWikiRepository
 
 
+# 全局运行时对象在这里集中装配，API 路由层只依赖 service，避免各路由重复创建仓储和客户端。
+# 这些实例会在应用生命周期内复用，因此只放无请求态对象，请求上下文通过方法参数向下传递。
 llm_config_repository = PostgresLLMConfigRepository(db_runtime)
 llm_client = OpenAICompatibleLLMClient()
 embedding_client = OpenAICompatibleEmbeddingClient()
@@ -86,4 +88,5 @@ chat_service = ChatService(
 
 
 async def initialize_runtime_state() -> None:
+    # 启动时写入默认租户、管理员、基础配置等幂等数据，保证本地环境首次启动即可进入主流程。
     await seed_postgres_defaults(db_runtime)
