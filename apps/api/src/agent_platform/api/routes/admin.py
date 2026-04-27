@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from agent_platform.api.deps import AuthContext
@@ -140,6 +140,48 @@ async def package_impact(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/packages/import")
+async def import_package_bundle(
+    auth: AuthContext,
+    file: UploadFile = File(...),
+    overwrite: bool = Query(default=False),
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Bundle must be a .zip file")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    try:
+        return await chat_service.install_package_bundle(
+            zip_bytes=payload,
+            overwrite=overwrite,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 409 if "already installed" in message else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.delete("/packages/{package_id:path}/bundle")
+async def uninstall_package_bundle(package_id: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.uninstall_package_bundle(
+            package_id=package_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/packages/{package_id:path}")

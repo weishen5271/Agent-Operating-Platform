@@ -1,0 +1,81 @@
+{
+  "name": "cmms.work_order",
+  "version": "1.1.0",
+  "description": "CMMS 工单系统对接：查询历史工单、创建工单草稿。executor=http，绑定声明式调用 CMMS REST API；上线前需在「业务包管理 → 能力 → 插件配置」填入 endpoint + secrets。",
+  "executor": "http",
+  "config_schema": {
+    "endpoint":   { "type": "string",  "required": true, "description": "CMMS REST API 根地址，例如 https://cmms.acme.local" },
+    "secrets":    { "type": "object",  "required": true, "description": "{\"cmms_token\": \"<bearer token>\"}" },
+    "timeout_ms": { "type": "integer", "default": 5000 }
+  },
+  "default_config": {
+    "timeout_ms": 5000
+  },
+  "capabilities": [
+    {
+      "name": "cmms.work_order.history",
+      "description": "查询某设备 / 某故障码的最近 N 条工单记录。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema":  { "required": ["equipment_id"] },
+      "output_schema": { "required": ["workorders"] },
+      "binding": {
+        "method": "GET",
+        "path":   "/api/v1/workorders",
+        "query":  {
+          "equipment_id": "$input.equipment_id",
+          "fault_code":   "$input.fault_code",
+          "limit":        "$input.last_n"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.cmms_token",
+          "Accept":        "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "workorders": "$response.body.data",
+          "total":      "$response.body.total"
+        },
+        "error_translation": {
+          "401": "CMMS_AUTH_FAILED",
+          "404": "CMMS_NOT_FOUND",
+          "5xx": "CMMS_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
+      "name": "cmms.work_order.draft.create",
+      "description": "起草新工单（不直接落库，需经审批确认）。",
+      "risk_level": "medium",
+      "side_effect_level": "draft",
+      "required_scope": "cmms:write",
+      "input_schema":  { "required": ["equipment_id", "fault_code", "summary"] },
+      "output_schema": { "required": ["draft_id"] },
+      "binding": {
+        "method": "POST",
+        "path":   "/api/v1/workorders/drafts",
+        "headers": {
+          "Authorization": "Bearer $secret.cmms_token",
+          "Content-Type":  "application/json"
+        },
+        "body": {
+          "equipment_id": "$input.equipment_id",
+          "fault_code":   "$input.fault_code",
+          "title":        "$input.summary",
+          "source":       "agent_operating_platform"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "draft_id":   "$response.body.id",
+          "url":        "$response.body.html_url"
+        },
+        "error_translation": {
+          "401": "CMMS_AUTH_FAILED",
+          "409": "CMMS_DUPLICATE_DRAFT",
+          "5xx": "CMMS_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    }
+  ]
+}

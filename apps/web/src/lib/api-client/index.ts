@@ -344,6 +344,46 @@ export function getAdminPackages(): Promise<AdminPackagesResponse> {
   return request<AdminPackagesResponse>("/admin/packages");
 }
 
+export type PackageImportResult = {
+  package_id: string;
+  version: string;
+  name: string;
+  installed_path: string;
+  skills: number;
+  tools: number;
+  plugins: number;
+};
+
+export async function importPackageBundle(
+  file: File,
+  options: { overwrite?: boolean } = {},
+): Promise<PackageImportResult> {
+  const overwrite = options.overwrite ? "true" : "false";
+  const url = withAuthContext(`/admin/packages/import?overwrite=${overwrite}`);
+  const formData = new FormData();
+  formData.append("file", file);
+  const headers = buildAuthHeaders();
+  // Let the browser set multipart Content-Type with boundary.
+  delete (headers as Record<string, string>)["Content-Type"];
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: formData,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      detail = await response.text();
+    }
+    throw new Error(detail || `导入失败 (HTTP ${response.status})`);
+  }
+  return (await response.json()) as PackageImportResult;
+}
+
 export function getPackageDetail(packageId: string): Promise<PackageDetailResponse> {
   return request<PackageDetailResponse>(`/admin/packages/${encodeURIComponent(packageId)}`);
 }

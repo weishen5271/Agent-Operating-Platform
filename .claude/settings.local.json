@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from agent_platform.runtime.package_loader import PackageLoader; from agent_platform.runtime.package_installer import PackageInstaller; print\\(PackageLoader.default\\(\\).list_packages\\(\\)[0]['package_id'] if PackageLoader.default\\(\\).list_packages\\(\\) else 'empty'\\)\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

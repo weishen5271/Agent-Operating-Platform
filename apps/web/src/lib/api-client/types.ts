@@ -183,6 +183,8 @@ export type AdminPackagesResponse = {
     risk_level: string;
     side_effect_level: string;
     required_scope: string;
+    source?: string;
+    package_id?: string | null;
   }>;
   skills?: SkillSummary[];
   tools?: ToolSummary[];

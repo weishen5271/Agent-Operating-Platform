@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { getAdminPackages, getAdminReleases } from "@/lib/api-client";
+import { getAdminPackages, getAdminReleases, importPackageBundle } from "@/lib/api-client";
 import { Shell } from "@/components/shared/shell";
 import { PackageImpactView } from "@/components/packages/package-impact-view";
 import { PluginConfigForm } from "@/components/packages/plugin-config-form";
@@ -44,6 +44,10 @@ export default function PackagesPage() {
   const [adminPackages, setAdminPackages] = useState<AdminPackagesResponse | null>(null);
   const [adminReleases, setAdminReleases] = useState<AdminReleasesResponse | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [importMessage, setImportMessage] = useState("");
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [reloadCounter, setReloadCounter] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -70,7 +74,33 @@ export default function PackagesPage() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [reloadCounter]);
+
+  async function handleBundleSelected(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setImportMessage("仅支持 .zip 业务包");
+      return;
+    }
+    setImporting(true);
+    setImportMessage("");
+    try {
+      const overwrite = window.confirm(
+        `即将导入业务包 ${file.name}。\n\n如果该业务包 ID 已存在，是否覆盖现有版本？\n确定 = 覆盖，取消 = 仅在不存在时安装`,
+      );
+      const result = await importPackageBundle(file, { overwrite });
+      setImportMessage(
+        `已导入 ${result.name} (${result.version}) · skills ${result.skills} / tools ${result.tools} / plugins ${result.plugins}`,
+      );
+      setReloadCounter((value) => value + 1);
+    } catch (exc) {
+      setImportMessage(exc instanceof Error ? exc.message : "导入失败");
+    } finally {
+      setImporting(false);
+    }
+  }
 
   const packages: PackageRow[] = adminPackages?.packages.length
     ? adminPackages.packages.map((item, index) => ({
@@ -126,9 +156,21 @@ export default function PackagesPage() {
             <p>统一维护业务包生命周期，结合灰度与插件健康度推进稳妥发布。</p>
           </div>
           <div className="page-head-actions">
-            <button type="button" className="secondary-button">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip,application/zip"
+              style={{ display: "none" }}
+              onChange={handleBundleSelected}
+            />
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={importing}
+              onClick={() => fileInputRef.current?.click()}
+            >
               <span className="material-symbols-outlined">upload</span>
-              导入契约
+              {importing ? "导入中..." : "导入业务包"}
             </button>
             <button type="button" className="primary-button">
               <span className="material-symbols-outlined">add</span>
@@ -138,6 +180,7 @@ export default function PackagesPage() {
         </div>
 
         {loadError ? <p className="inline-error">{loadError}</p> : null}
+        {importMessage ? <p className="inline-error">{importMessage}</p> : null}
 
         <div className="bento-grid three">
           <article className="stat-card hero">
@@ -277,20 +320,33 @@ export default function PackagesPage() {
                 </div>
               </div>
               <div className="data-table">
-                <div className="data-table-head four-cols">
+                <div className="data-table-head five-cols">
                   <span>能力</span>
                   <span>副作用</span>
                   <span>风险</span>
                   <span>所需权限</span>
+                  <span>来源</span>
                 </div>
-                {capabilities.map((item) => (
-                  <div key={item.name} className="data-table-row four-cols">
-                    <strong>{item.name}</strong>
-                    <span className="status-chip plain">{item.side_effect_level}</span>
-                    <span className="mono">{item.risk_level}</span>
-                    <span>{item.required_scope}</span>
-                  </div>
-                ))}
+                {capabilities.map((item) => {
+                  const source = "source" in item ? (item as { source?: string }).source : undefined;
+                  const packageId =
+                    "package_id" in item
+                      ? (item as { package_id?: string | null }).package_id
+                      : undefined;
+                  const sourceLabel =
+                    source === "package" && packageId
+                      ? `bundle · ${packageId}`
+                      : source ?? "_platform";
+                  return (
+                    <div key={item.name} className="data-table-row five-cols">
+                      <strong>{item.name}</strong>
+                      <span className="status-chip plain">{item.side_effect_level}</span>
+                      <span className="mono">{item.risk_level}</span>
+                      <span>{item.required_scope}</span>
+                      <span className="status-chip plain">{sourceLabel}</span>
+                    </div>
+                  );
+                })}
               </div>
             </section>
             <section className="panel-card">

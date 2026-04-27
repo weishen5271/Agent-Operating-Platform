@@ -1,0 +1,30 @@
+{
+  "name": "spare_parts.catalog",
+  "version": "1.0.6",
+  "description": "备件库存与供应商查询。",
+  "executor": "stub",
+  "config_schema": {
+    "endpoint": { "type": "string", "required": true },
+    "auth_ref": { "type": "string", "required": true, "format": "secret-ref" }
+  },
+  "capabilities": [
+    {
+      "name": "spare_parts.catalog.query",
+      "description": "按物料号查询库存、库位与单价。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "spare:read",
+      "input_schema": { "required": ["material_id"] },
+      "output_schema": { "required": ["stock"] }
+    },
+    {
+      "name": "spare_parts.catalog.alternatives",
+      "description": "按物料号查询替代件清单。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "spare:read",
+      "input_schema": { "required": ["material_id"] },
+      "output_schema": { "required": ["alternatives"] }
+    }
+  ]
+}

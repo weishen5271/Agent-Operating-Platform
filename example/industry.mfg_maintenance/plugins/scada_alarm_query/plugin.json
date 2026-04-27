@@ -1,0 +1,21 @@
+{
+  "name": "scada.alarm_query",
+  "version": "0.4.3",
+  "description": "SCADA 报警实时检索（只读）。",
+  "executor": "stub",
+  "config_schema": {
+    "endpoint": { "type": "string", "required": true },
+    "auth_ref": { "type": "string", "required": true, "format": "secret-ref" }
+  },
+  "capabilities": [
+    {
+      "name": "scada.alarm_query",
+      "description": "按设备号 / 时间窗口查询 SCADA 报警流水。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "scada:read",
+      "input_schema": { "required": ["equipment_id"] },
+      "output_schema": { "required": ["alarms"] }
+    }
+  ]
+}

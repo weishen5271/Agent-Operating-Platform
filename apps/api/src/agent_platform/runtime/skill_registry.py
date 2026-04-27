@@ -180,24 +180,46 @@ class SkillRegistry:
     def get(self, name: str) -> SkillDefinition | None:
         return self._skills.get(name)
 
+    def refresh(self) -> None:
+        """Re-scan packages from disk. Call after a bundle is installed/uninstalled."""
+        self._skills = self._load_skills()
+
     def _load_skills(self) -> dict[str, SkillDefinition]:
         skills: dict[str, SkillDefinition] = {}
         for package in self._loader.list_packages():
             package_id = str(package.get("package_id", ""))
+            source_kind = str(package.get("source_kind") or "catalog")
             for raw_skill in package.get("skills", []):
-                skill = self._normalize_skill(raw_skill, fallback_package_id=package_id)
-                if skill.name in skills:
-                    raise ValueError(f"Duplicate skill definition: {skill.name}")
-                skills[skill.name] = skill
+                skill = self._normalize_skill(
+                    raw_skill,
+                    fallback_package_id=package_id,
+                    bundle_default=source_kind == "bundle",
+                )
+                # Bundle-private skills are namespaced by package_id to avoid
+                # cross-package collisions; catalog/platform skills keep their
+                # global name.
+                key = f"{skill.package_id}::{skill.name}" if skill.source == "package" and skill.package_id else skill.name
+                if key in skills:
+                    raise ValueError(f"Duplicate skill definition: {key}")
+                skills[key] = skill
         return skills
 
     @staticmethod
-    def _normalize_skill(raw: dict[str, Any], *, fallback_package_id: str) -> SkillDefinition:
-        required = ["name", "description", "version", "source"]
+    def _normalize_skill(
+        raw: dict[str, Any],
+        *,
+        fallback_package_id: str,
+        bundle_default: bool = False,
+    ) -> SkillDefinition:
+        required = ["name", "description", "version"]
         missing = [field for field in required if not str(raw.get(field, "")).strip()]
         if missing:
             raise ValueError(f"Skill definition missing fields: {', '.join(missing)}")
-        source = str(raw["source"])
+        # Bundle skills omit ``source`` — default it to "package" so the skill
+        # is registered as private to the owning bundle.
+        source = str(raw.get("source") or ("package" if bundle_default else ""))
+        if not source:
+            raise ValueError("Skill definition missing fields: source")
         package_id = raw.get("package_id")
         if source in {"_common", "package"} and not package_id:
             package_id = fallback_package_id

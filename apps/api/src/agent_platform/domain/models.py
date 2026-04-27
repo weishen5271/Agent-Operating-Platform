@@ -70,6 +70,8 @@ class CapabilityDefinition:
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
     enabled: bool = True
+    source: str = "_platform"
+    package_id: str | None = None
 
 
 @dataclass(slots=True)

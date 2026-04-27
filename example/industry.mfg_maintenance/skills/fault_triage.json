@@ -1,0 +1,12 @@
+{
+  "name": "fault_triage",
+  "description": "根据设备号与故障码，输出故障语义、安全等级、推荐处置摘要。",
+  "version": "1.0.0",
+  "depends_on_capabilities": [
+    "scada.alarm_query",
+    "knowledge.search",
+    "cmms.work_order.history"
+  ],
+  "depends_on_tools": ["text.extract"],
+  "enabled": true
+}

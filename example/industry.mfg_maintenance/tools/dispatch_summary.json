@@ -1,0 +1,12 @@
+{
+  "name": "mfg.dispatch_summary",
+  "description": "把多步处置结果整理成派工摘要文本，专供制造业派单意图使用。",
+  "version": "1.0.0",
+  "executor": "alias",
+  "alias_of": "text.extract",
+  "default_input_template": {
+    "schema": "dispatch_summary_schema"
+  },
+  "timeout_ms": 1000,
+  "quota_per_minute": 120
+}

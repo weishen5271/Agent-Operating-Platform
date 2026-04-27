@@ -6,100 +6,78 @@
   "status": "灰度中",
   "domain": "industry",
   "description": "面向离散制造与流程行业的设备运维场景，覆盖故障诊断、SOP 检索、点检巡检、备件采购与停机分析。提供面向产线工程师与设备主管的多轮问答与决策支持。",
+
   "intents": [
     {
       "name": "knowledge_query",
       "score": 0.9,
-      "keywords": [
-        "设备", "故障", "维修", "SOP", "点检", "巡检",
-        "报警", "停机", "异常", "告警代码", "处理步骤",
-        "operation manual", "fault code"
-      ]
+      "keywords": ["设备", "故障", "维修", "SOP", "点检", "巡检", "报警", "停机", "异常", "告警代码", "处理步骤"]
     },
     {
       "name": "fault_diagnosis",
       "score": 0.88,
-      "keywords": [
-        "诊断", "排查", "根因", "为什么", "怎么办",
-        "电机过热", "振动异常", "压力超限", "传感器漂移"
-      ]
+      "keywords": ["诊断", "排查", "根因", "为什么", "怎么办", "电机过热", "振动异常", "压力超限", "传感器漂移"]
     },
     {
       "name": "procurement_draft",
       "score": 0.8,
-      "keywords": [
-        "采购", "备件", "替换", "供应商", "BOM",
-        "轴承", "皮带", "滤芯", "传感器更换"
-      ]
+      "keywords": ["采购", "备件", "替换", "供应商", "BOM", "轴承", "皮带", "滤芯", "传感器更换"]
     },
     {
       "name": "maintenance_plan",
       "score": 0.78,
-      "keywords": [
-        "保养计划", "PM", "预防性维护", "周保", "月保", "年检",
-        "停机窗口", "排程", "工单"
-      ]
+      "keywords": ["保养计划", "PM", "预防性维护", "周保", "月保", "年检", "停机窗口", "排程", "工单"]
     },
     {
       "name": "downtime_analysis",
       "score": 0.75,
-      "keywords": [
-        "OEE", "停机率", "MTBF", "MTTR", "可用率",
-        "停机分析", "效率", "瓶颈"
-      ]
+      "keywords": ["OEE", "停机率", "MTBF", "MTTR", "可用率", "停机分析", "效率", "瓶颈"]
     }
   ],
-  "dependencies": [
+
+  "requires": [
     {
       "kind": "common_package",
       "name": "_common/knowledge",
-      "version_range": ">=1.0 <2.0",
-      "current_version": "1.0.3",
-      "compatible": true
+      "version_range": ">=1.0 <2.0"
     },
     {
       "kind": "common_package",
       "name": "_common/report_gen",
-      "version_range": ">=0.5",
-      "current_version": "0.5.2",
-      "compatible": true
+      "version_range": ">=0.5"
     },
     {
       "kind": "platform_skill",
       "name": "kb_grounded_qa",
-      "version_range": ">=1.2 <2.0",
-      "current_version": "1.3.1",
-      "compatible": true
+      "version_range": ">=1.2 <2.0"
     },
     {
       "kind": "platform_skill",
       "name": "report_compose",
-      "version_range": ">=0.5 <1.0",
-      "current_version": "0.5.2",
-      "compatible": true
-    },
-    {
-      "kind": "plugin",
-      "name": "cmms.work_order",
-      "version_range": ">=1.0",
-      "current_version": "1.1.0",
-      "compatible": true
-    },
-    {
-      "kind": "plugin",
-      "name": "scada.alarm_query",
-      "version_range": ">=0.4",
-      "current_version": "0.4.3",
-      "compatible": true
-    },
-    {
-      "kind": "plugin",
-      "name": "spare_parts.catalog",
-      "version_range": ">=1.0",
-      "current_version": "1.0.6",
-      "compatible": true
+      "version_range": ">=0.5 <1.0"
     }
   ],
+
+  "provides": {
+    "skills": [
+      "skills/fault_triage.json",
+      "skills/spare_lookup_with_alt.json"
+    ],
+    "tools": [
+      "tools/dispatch_summary.json"
+    ],
+    "plugins": [
+      "plugins/cmms_work_order/plugin.json",
+      "plugins/scada_alarm_query/plugin.json",
+      "plugins/spare_parts_catalog/plugin.json"
+    ]
+  },
+
+  "prompts": {
+    "system": "prompts/system_prompt.txt",
+    "planner": "prompts/planner_prompt.txt"
+  },
+
   "knowledge_bindings": [
     {
       "source": "equipment_sop",
@@ -120,9 +98,6 @@
       "filters": ["equipment_id", "fault_type", "year"]
     }
   ],
-  "default_outputs": [
-    "report",
-    "recommendation",
-    "action_plan"
-  ]
+
+  "default_outputs": ["report", "recommendation", "action_plan"]
 }

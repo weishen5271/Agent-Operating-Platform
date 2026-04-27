@@ -427,7 +427,15 @@ class ChatService:
                         query=payload["query"],
                     )
                 else:
-                    result = self._registry.invoke(capability_name, payload)
+                    tenant_config = await self._load_capability_tenant_config(
+                        tenant_id=context.tenant_id,
+                        capability_name=capability_name,
+                    )
+                    result = self._registry.invoke(
+                        capability_name,
+                        payload,
+                        tenant_config=tenant_config,
+                    )
                 await add_step(
                     TraceStep(
                         name="executed",
@@ -811,6 +819,8 @@ class ChatService:
                     "risk_level": item.risk_level,
                     "side_effect_level": item.side_effect_level,
                     "required_scope": item.required_scope,
+                    "source": item.source,
+                    "package_id": item.package_id,
                 }
                 for item in capabilities
             ],
@@ -904,6 +914,51 @@ class ChatService:
         await self._tenants.update(updated)
         return await self.list_tenant_packages(target_tenant_id, tenant_id=tenant_id, user_id=user_id)
 
+    async def install_package_bundle(
+        self,
+        zip_bytes: bytes,
+        *,
+        overwrite: bool = False,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        from agent_platform.runtime.package_installer import (
+            PackageInstaller,
+            PackageInstallError,
+        )
+
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        installer = PackageInstaller.default()
+        try:
+            result = installer.install_zip(zip_bytes, overwrite=overwrite)
+        except PackageInstallError as exc:
+            raise ValueError(str(exc)) from exc
+        # Skill + capability registries cache at construction — refresh so the
+        # new bundle's private skills and stub capabilities become visible
+        # without a process restart.
+        self._skills.refresh()
+        self._registry.refresh_package_capabilities()
+        return result
+
+    async def uninstall_package_bundle(
+        self,
+        package_id: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        from agent_platform.runtime.package_installer import PackageInstaller
+
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        removed = PackageInstaller.default().uninstall(package_id)
+        if not removed:
+            raise ValueError("Package bundle not found")
+        self._skills.refresh()
+        self._registry.refresh_package_capabilities()
+        return {"package_id": package_id, "removed": True}
+
     async def get_package_detail(self, package_id: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="admin:read")
@@ -952,6 +1007,24 @@ class ChatService:
             },
             "affected_packages": affected_packages,
         }
+
+    async def _load_capability_tenant_config(
+        self,
+        *,
+        tenant_id: str,
+        capability_name: str,
+    ) -> dict[str, object]:
+        """Resolve the tenant-scoped plugin config for a capability.
+
+        HttpExecutor needs ``endpoint`` / ``secrets`` / ``timeout_ms`` from
+        ``plugin_config``; built-in plugins ignore the kwarg, so this is safe
+        to call unconditionally.
+        """
+        plugin_name = self._registry.get_plugin_name_for_capability(capability_name)
+        record = await self._plugin_configs.get(tenant_id, plugin_name)
+        if record is None:
+            return {}
+        return dict(record.config) if record.config else {}
 
     async def get_plugin_config_schema(self, plugin_name: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
