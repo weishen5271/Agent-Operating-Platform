@@ -157,6 +157,8 @@ export type SkillSummary = {
   package_id?: string | null;
   depends_on_capabilities: string[];
   depends_on_tools: string[];
+  steps?: Array<Record<string, unknown>>;
+  outputs_mapping?: Record<string, unknown>;
 };
 
 export type ToolSummary = {
@@ -177,6 +179,7 @@ export type AdminPackagesResponse = {
     status: string;
     domain?: "industry" | "common" | "platform";
     dependencies?: PackageDependency[];
+    knowledge_imports?: KnowledgeImportDeclaration[];
   }>;
   capabilities: Array<{
     name: string;
@@ -204,6 +207,38 @@ export type PackageDetailResponse = {
     plugins: number;
     tools: number;
   };
+  knowledge_imports?: KnowledgeImportDeclaration[];
+  source_kind?: "catalog" | "bundle";
+  bundle_path?: string | null;
+};
+
+export type KnowledgeImportDeclaration = {
+  file: string;
+  name: string;
+  source_type: string;
+  knowledge_base_code: string;
+  owner: string;
+  auto_import: boolean;
+  attributes: Record<string, unknown>;
+};
+
+export type PackageKnowledgeImportResult = {
+  package_id: string;
+  imported_count: number;
+  skipped_count: number;
+  imported: Array<{
+    file: string;
+    source: KnowledgeSource;
+  }>;
+  skipped: Array<{
+    file: string;
+    reason: string;
+  }>;
+};
+
+export type PackageBundleUninstallResult = {
+  package_id: string;
+  removed: boolean;
 };
 
 export type PackageImpactResponse = {
@@ -249,17 +284,23 @@ export type PluginConfigSchemaResponse = {
   };
   config_schema: {
     type: "object";
-    properties: Record<string, {
-      type?: string;
-      format?: string;
-      default?: unknown;
-      items?: { type?: string };
-    }>;
+    properties: Record<string, PluginConfigFieldSchema>;
     required?: string[];
     additionalProperties?: boolean;
   };
   config: Record<string, unknown>;
   auth_refs: string[];
+};
+
+export type PluginConfigFieldSchema = {
+  type?: string;
+  format?: string;
+  default?: unknown;
+  items?: { type?: string };
+  description?: string;
+  properties?: Record<string, PluginConfigFieldSchema>;
+  required?: string[];
+  additionalProperties?: boolean;
 };
 
 export type TenantPackageOption = {
@@ -291,6 +332,20 @@ export type AdminSystemResponse = {
     member_count: number;
   }>;
   llm_runtime?: LLMRuntimeConfig;
+};
+
+export type McpServer = {
+  server_id: string;
+  name: string;
+  transport: "streamable-http" | "http";
+  endpoint: string;
+  auth_ref: string;
+  headers: Record<string, string>;
+  status: "active" | "disabled";
+};
+
+export type McpServersResponse = {
+  servers: McpServer[];
 };
 
 export type AdminSecurityResponse = {

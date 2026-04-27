@@ -1,6 +1,7 @@
 import { Shell } from "@/components/shared/shell";
 import { systemData } from "@/lib/workspace-fixtures";
 import { TenantManagement } from "@/components/admin/tenant-management";
+import { McpServerManagement } from "@/components/admin/mcp-server-management";
 
 const summaryIcons = ["apartment", "group", "badge", "payments"];
 
@@ -83,6 +84,8 @@ export default async function SystemPage() {
         </section>
 
         <TenantManagement />
+
+        <McpServerManagement />
 
         <div className="info-card-grid">
           <div className="info-card">

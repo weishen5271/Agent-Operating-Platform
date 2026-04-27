@@ -24,8 +24,12 @@ import type {
   HomeSnapshot,
   LLMRuntimeConfig,
   KnowledgeIngestResponse,
+  McpServer,
+  McpServersResponse,
+  PackageBundleUninstallResult,
   PackageDetailResponse,
   PackageImpactResponse,
+  PackageKnowledgeImportResult,
   PluginConfigSchemaResponse,
   TenantListResponse,
   TenantPackagesResponse,
@@ -388,6 +392,25 @@ export function getPackageDetail(packageId: string): Promise<PackageDetailRespon
   return request<PackageDetailResponse>(`/admin/packages/${encodeURIComponent(packageId)}`);
 }
 
+export function importPackageKnowledge(
+  packageId: string,
+  options: { autoOnly?: boolean } = {},
+): Promise<PackageKnowledgeImportResult> {
+  return request<PackageKnowledgeImportResult>("/admin/packages/knowledge/import", {
+    method: "POST",
+    body: JSON.stringify({
+      package_id: packageId,
+      auto_only: options.autoOnly ?? false,
+    }),
+  });
+}
+
+export function uninstallPackageBundle(packageId: string): Promise<PackageBundleUninstallResult> {
+  return request<PackageBundleUninstallResult>(`/admin/packages/${encodeURIComponent(packageId)}/bundle`, {
+    method: "DELETE",
+  });
+}
+
 export function getPackageImpact(target: string): Promise<PackageImpactResponse> {
   return request<PackageImpactResponse>(`/admin/packages/impact?target=${encodeURIComponent(target)}`);
 }
@@ -407,6 +430,37 @@ export function updatePluginConfig(
       body: JSON.stringify({ config }),
     },
   );
+}
+
+export function listMcpServers(): Promise<McpServersResponse> {
+  return request<McpServersResponse>("/admin/mcp-servers");
+}
+
+export function upsertMcpServer(payload: {
+  name: string;
+  transport: "streamable-http" | "http";
+  endpoint: string;
+  auth_ref?: string;
+  headers?: Record<string, string>;
+  status?: "active" | "disabled";
+}): Promise<McpServer> {
+  return request<McpServer>(`/admin/mcp-servers/${encodeURIComponent(payload.name)}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      name: payload.name,
+      transport: payload.transport,
+      endpoint: payload.endpoint,
+      auth_ref: payload.auth_ref ?? "",
+      headers: payload.headers ?? {},
+      status: payload.status ?? "active",
+    }),
+  });
+}
+
+export function deleteMcpServer(name: string): Promise<{ name: string; deleted: boolean }> {
+  return request<{ name: string; deleted: boolean }>(`/admin/mcp-servers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
 }
 
 export function getTenantPackages(tenantId: string): Promise<TenantPackagesResponse> {

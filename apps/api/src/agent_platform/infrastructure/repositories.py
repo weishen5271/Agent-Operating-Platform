@@ -21,6 +21,7 @@ from agent_platform.domain.models import (
     KnowledgeSourceDetail,
     KnowledgeSearchResult,
     LLMRuntimeConfig,
+    McpServer,
     OutputGuardRule,
     PluginConfig,
     ReleasePlan,
@@ -34,6 +35,7 @@ from agent_platform.domain.models import (
     utc_now,
 )
 from agent_platform.infrastructure.auth import get_password_hash
+from agent_platform.infrastructure.config_crypto import PluginConfigCrypto
 from agent_platform.infrastructure.db import DatabaseRuntime
 from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
 from agent_platform.infrastructure.db_models import (
@@ -53,6 +55,7 @@ from agent_platform.infrastructure.db_models import (
     KnowledgeWikiSourceChunkRecord,
     KnowledgeWikiSourceRecord,
     LLMRuntimeConfigRecord,
+    McpServerRecord,
     OutputGuardRuleRecord,
     PluginConfigRecord,
     ReleasePlanRecord,
@@ -125,6 +128,7 @@ class KnowledgeRepository(Protocol):
         source_type: str,
         owner: str,
         knowledge_base_code: str,
+        attributes: dict[str, object] | None = None,
     ) -> KnowledgeSource: ...
 
 
@@ -184,6 +188,16 @@ class PluginConfigRepository(Protocol):
     async def get(self, tenant_id: str, plugin_name: str) -> PluginConfig | None: ...
 
     async def upsert(self, plugin_config: PluginConfig) -> PluginConfig: ...
+
+
+class McpServerRepository(Protocol):
+    async def list_all(self) -> list[McpServer]: ...
+
+    async def get(self, name: str) -> McpServer | None: ...
+
+    async def upsert(self, server: McpServer) -> McpServer: ...
+
+    async def delete(self, name: str) -> bool: ...
 
 
 class ReleasePlanRepository(Protocol):
@@ -783,6 +797,7 @@ class PostgresOutputGuardRuleRepository:
 class PostgresPluginConfigRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:
         self._runtime = runtime
+        self._crypto = PluginConfigCrypto()
 
     async def get(self, tenant_id: str, plugin_name: str) -> PluginConfig | None:
         async with self._runtime.session() as session:
@@ -797,7 +812,7 @@ class PostgresPluginConfigRepository:
             return PluginConfig(
                 tenant_id=record.tenant_id,
                 plugin_name=record.plugin_name,
-                config=dict(record.config or {}),
+                config=self._crypto.decrypt_config(dict(record.config or {})),
             )
 
     async def upsert(self, plugin_config: PluginConfig) -> PluginConfig:
@@ -813,13 +828,72 @@ class PostgresPluginConfigRepository:
                     config_id=f"pcfg-{uuid4().hex[:12]}",
                     tenant_id=plugin_config.tenant_id,
                     plugin_name=plugin_config.plugin_name,
-                    config=dict(plugin_config.config),
+                    config=self._crypto.encrypt_config(dict(plugin_config.config)),
                 )
                 session.add(record)
             else:
-                record.config = dict(plugin_config.config)
+                record.config = self._crypto.encrypt_config(dict(plugin_config.config))
             await session.commit()
             return plugin_config
+
+
+class PostgresMcpServerRepository:
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def list_all(self) -> list[McpServer]:
+        async with self._runtime.session() as session:
+            result = await session.execute(select(McpServerRecord).order_by(McpServerRecord.name))
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    async def get(self, name: str) -> McpServer | None:
+        async with self._runtime.session() as session:
+            result = await session.execute(select(McpServerRecord).where(McpServerRecord.name == name))
+            record = result.scalar_one_or_none()
+            return self._to_domain(record) if record else None
+
+    async def upsert(self, server: McpServer) -> McpServer:
+        async with self._runtime.session() as session:
+            result = await session.execute(select(McpServerRecord).where(McpServerRecord.name == server.name))
+            record = result.scalar_one_or_none()
+            if record is None:
+                record = McpServerRecord(
+                    server_id=server.server_id or f"mcp-{uuid4().hex[:12]}",
+                    name=server.name,
+                    transport=server.transport,
+                    endpoint=server.endpoint,
+                    auth_ref=server.auth_ref,
+                    headers=dict(server.headers),
+                    status=server.status,
+                )
+                session.add(record)
+            else:
+                record.transport = server.transport
+                record.endpoint = server.endpoint
+                record.auth_ref = server.auth_ref
+                record.headers = dict(server.headers)
+                record.status = server.status
+                server.server_id = record.server_id
+            await session.commit()
+            return server
+
+    async def delete(self, name: str) -> bool:
+        async with self._runtime.session() as session:
+            result = await session.execute(delete(McpServerRecord).where(McpServerRecord.name == name))
+            await session.commit()
+            return bool(result.rowcount)
+
+    @staticmethod
+    def _to_domain(record: McpServerRecord) -> McpServer:
+        return McpServer(
+            server_id=record.server_id,
+            name=record.name,
+            transport=record.transport,
+            endpoint=record.endpoint,
+            auth_ref=record.auth_ref,
+            headers=dict(record.headers or {}),
+            status=record.status,
+        )
 
 
 class PostgresReleasePlanRepository:
@@ -1208,6 +1282,7 @@ class PostgresKnowledgeRepository:
         source_type: str,
         owner: str,
         knowledge_base_code: str,
+        attributes: dict[str, object] | None = None,
     ) -> KnowledgeSource:
         chunked = chunk_text(content)
         if not chunked:
@@ -1245,6 +1320,8 @@ class PostgresKnowledgeRepository:
                     "locator": item.get("locator") or f"chunk:{index + 1}",
                     "parents": item.get("parents") or [],
                 }
+                if attributes:
+                    metadata_payload["attributes"] = dict(attributes)
                 session.add(
                     KnowledgeChunkRecord(
                         chunk_id=f"kc-{uuid4().hex[:12]}",

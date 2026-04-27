@@ -3,9 +3,11 @@ import asyncio
 import pytest
 
 from agent_platform.domain.models import (
+    CapabilityDefinition,
     KnowledgeChunk,
     KnowledgeSource,
     KnowledgeSourceDetail,
+    McpServer,
     OutputGuardRule,
     PluginConfig,
     ReleasePlan,
@@ -15,6 +17,7 @@ from agent_platform.domain.models import (
     UserContext,
     utc_now,
 )
+from agent_platform.plugins.executors import HttpExecutor, McpExecutor
 from agent_platform.runtime.skill_registry import ToolRegistry
 from agent_platform.runtime.registry import CapabilityRegistry
 from agent_platform.runtime.chat_service import ChatService
@@ -172,6 +175,27 @@ class FakePluginConfigs:
         return plugin_config
 
 
+class FakeMcpServers:
+    def __init__(self) -> None:
+        self.items: list[McpServer] = []
+
+    async def list_all(self) -> list[McpServer]:
+        return list(self.items)
+
+    async def get(self, name: str) -> McpServer | None:
+        return next((item for item in self.items if item.name == name), None)
+
+    async def upsert(self, server: McpServer) -> McpServer:
+        self.items = [item for item in self.items if item.name != server.name]
+        self.items.append(server)
+        return server
+
+    async def delete(self, name: str) -> bool:
+        before = len(self.items)
+        self.items = [item for item in self.items if item.name != name]
+        return len(self.items) < before
+
+
 class FakeReleasePlans:
     def __init__(self) -> None:
         self.items = [
@@ -237,6 +261,7 @@ def build_service(scopes: list[str]) -> ChatService:
     service._tool_overrides = FakeToolOverrides()
     service._output_guard_rules = FakeOutputGuardRules()
     service._plugin_configs = FakePluginConfigs()
+    service._mcp_servers = FakeMcpServers()
     service._releases = FakeReleasePlans()
     service._drafts = FakeDrafts()
     service._security_events = FakeSecurityEvents()
@@ -384,6 +409,140 @@ def test_plugin_config_update_persists_to_repository() -> None:
         "timeout_ms": 3000,
     }
     assert schema["config"] == updated["config"]
+
+
+def test_plugin_config_masks_nested_secrets_and_preserves_existing_value() -> None:
+    service = build_service(scopes=["admin:read", "tenant:manage"])
+    plugin = HttpExecutor(
+        CapabilityDefinition(
+            name="cmms.work_order.history",
+            description="CMMS work order history",
+            risk_level="low",
+            side_effect_level="read",
+            required_scope="cmms:read",
+            input_schema={"required": ["equipment_id"]},
+            output_schema={"required": ["workorders"]},
+            source="package",
+            package_id="industry.mfg_maintenance",
+        ),
+        package_id="industry.mfg_maintenance",
+        plugin_name="cmms.work_order",
+        binding={},
+        plugin_config_schema={
+            "endpoint": {"type": "string", "required": True},
+            "secrets": {
+                "type": "object",
+                "required": True,
+                "properties": {
+                    "cmms_token": {"type": "string", "required": True},
+                },
+            },
+            "timeout_ms": {"type": "integer", "default": 5000},
+        },
+    )
+    service._registry._package_plugins = {"cmms.work_order.history": plugin}
+
+    updated = asyncio.run(
+        service.update_plugin_config(
+            "cmms.work_order",
+            config={
+                "endpoint": "https://cmms.local",
+                "secrets": {"cmms_token": "token-123456"},
+                "timeout_ms": 3000,
+            },
+            tenant_id="tenant-default",
+            user_id="user-admin",
+        )
+    )
+    saved = asyncio.run(service._plugin_configs.get("tenant-default", "cmms.work_order"))
+    schema = asyncio.run(
+        service.get_plugin_config_schema("cmms.work_order", tenant_id="tenant-default", user_id="user-admin")
+    )
+
+    assert updated["config"]["secrets"] == {"cmms_token": "***3456"}
+    assert schema["config"]["secrets"] == {"cmms_token": "***3456"}
+    assert saved is not None
+    assert saved.config["secrets"] == {"cmms_token": "token-123456"}
+
+    preserved = asyncio.run(
+        service.update_plugin_config(
+            "cmms.work_order",
+            config={
+                "endpoint": "https://cmms.local",
+                "secrets": {"cmms_token": "***3456"},
+                "timeout_ms": 4000,
+            },
+            tenant_id="tenant-default",
+            user_id="user-admin",
+        )
+    )
+    saved_after_mask_submit = asyncio.run(service._plugin_configs.get("tenant-default", "cmms.work_order"))
+
+    assert preserved["config"]["timeout_ms"] == 4000
+    assert saved_after_mask_submit is not None
+    assert saved_after_mask_submit.config["secrets"] == {"cmms_token": "token-123456"}
+
+
+def test_mcp_server_registry_resolves_into_capability_tenant_config() -> None:
+    service = build_service(scopes=["admin:read", "tenant:manage"])
+    service._registry._package_plugins = {
+        "mcp.test.search": McpExecutor(
+            CapabilityDefinition(
+                name="mcp.test.search",
+                description="MCP registry resolution test capability",
+                risk_level="low",
+                side_effect_level="read",
+                required_scope="mcp:read",
+                input_schema={"required": ["query"]},
+                output_schema={"required": ["answer"]},
+                source="package",
+                package_id="pkg.test_mcp",
+            ),
+            package_id="pkg.test_mcp",
+            plugin_name="mcp.test",
+            binding={},
+        )
+    }
+    asyncio.run(
+        service._mcp_servers.upsert(
+            McpServer(
+                server_id="mcp-test",
+                name="registered",
+                transport="streamable-http",
+                endpoint="https://mcp.test/mcp",
+                auth_ref="",
+                headers={"Authorization": "Bearer $secret.token"},
+                status="active",
+            )
+        )
+    )
+    asyncio.run(
+        service._plugin_configs.upsert(
+            PluginConfig(
+                tenant_id="tenant-default",
+                plugin_name="mcp.test",
+                config={"mcp_server": "registered", "secrets": {"token": "secret-token"}},
+            )
+        )
+    )
+
+    config = asyncio.run(
+        service._load_capability_tenant_config(
+            tenant_id="tenant-default",
+            capability_name="mcp.test.search",
+        )
+    )
+
+    assert config["mcp_server"] == "registered"
+    assert config["secrets"] == {"token": "secret-token"}
+    assert config["mcp_servers"] == {
+        "registered": {
+            "transport": "streamable-http",
+            "endpoint": "https://mcp.test/mcp",
+            "headers": {"Authorization": "Bearer $secret.token"},
+            "status": "active",
+        }
+    }
 
 
 def test_tool_override_update_persists_override() -> None:

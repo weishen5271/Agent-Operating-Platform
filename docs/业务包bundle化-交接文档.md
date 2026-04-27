@@ -100,7 +100,7 @@
 |---|---|---|---|
 | `stub` | [plugins/stub.py](../apps/api/src/agent_platform/plugins/stub.py) | ✅ 完成 | 上传后立即可调，按 `output_schema.required` 合成 fixture |
 | `http` | [plugins/executors/http.py](../apps/api/src/agent_platform/plugins/executors/http.py) | ✅ 完成 | REST 系统。binding DSL 见 §2.4 |
-| `mcp` | — | ❌ 未做 | 见 §3.2 |
+| `mcp` | [plugins/executors/mcp.py](../apps/api/src/agent_platform/plugins/executors/mcp.py) | 🟡 已完成 streamable-http/http 最小闭环 | 见 §3.2 |
 | `platform` | — | 🟡 用 `_builtin_plugins` 隐式做了，未字段化 | 见 §3.5 |
 
 `CapabilityRegistry._build_executor` 按 `plugin.json.executor` 字段分发；未识别值落回 stub。
@@ -178,17 +178,20 @@ POST /api/v1/chat/complete
 
 ---
 
-### 3.2 【P0】实现 `executor: "mcp"`
+### 3.2 【P0】完善 `executor: "mcp"`
 
 **目标**：覆盖 GitHub MCP / Slack MCP 等已 MCP 化的系统，与设计文档 §5.7 对齐。
 
-**做什么**：
-1. 新建 [apps/api/src/agent_platform/plugins/executors/mcp.py](../apps/api/src/agent_platform/plugins/executors/mcp.py) ，参考 http.py 的结构
-2. 平台层先做一个轻量 MCP server 注册表：
-   - 数据模型：`mcp_server` 表（id / name / transport / endpoint / auth_ref / status）
-   - 管理 API：`POST/PUT/DELETE /admin/mcp-servers`
-   - UI：「系统配置 → MCP Servers」一张表
-3. binding DSL 子集：
+**已完成**：
+- 新增 [apps/api/src/agent_platform/plugins/executors/mcp.py](../apps/api/src/agent_platform/plugins/executors/mcp.py)，支持 `streamable-http` / `http` JSON-RPC 调用链：`initialize` → `notifications/initialized` → `tools/call`
+- 新增共享 DSL：[apps/api/src/agent_platform/plugins/executors/dsl.py](../apps/api/src/agent_platform/plugins/executors/dsl.py)，HTTP / MCP 复用 `$input` / `$config` / `$secret` / `$response`
+- `CapabilityRegistry` 已按 `executor: "mcp"` 构造 `McpExecutor`
+- 新增 `mcp_server` 平台注册表、管理 API 与 UI：
+  - `GET/POST/PUT/DELETE /admin/mcp-servers`
+  - 「系统配置 → MCP Servers」管理面板
+- `PluginConfigForm` 对 `mcp_server` 字段已支持从平台注册表下拉选择
+
+**当前 binding DSL 子集**：
 
    ```jsonc
    {
@@ -202,24 +205,37 @@ POST /api/v1/chat/complete
    }
    ```
 
-4. `McpExecutor.invoke_with_config` 用 MCP client（推荐 `mcp` 官方 Python SDK）按 `tools/call` 协议发起调用
+**剩余项**：
+1. 用真实 MCP server 做端到端联调，确认不同服务的 `tools/call` 返回结构与 `response_map` 约定
+2. 补充正式 pytest 覆盖：registry 分发、MCP initialize、tools/call、错误翻译、disabled server
+3. 评估是否引入官方 `mcp` Python SDK；当前实现基于既有 `httpx`，未新增依赖
+4. 扩展 stdio / sse transport、连接池、健康检查
+5. 为写操作补幂等键、超时策略和审计字段
 
-**验收**：用本地启一个 MCP server（如 `mcp-server-fetch`）跑通"业务包声明 capability → 平台 MCP executor 代理调用 → 返回结果"全链路。
+**验收**：用真实或用户明确许可的测试 MCP server 跑通"业务包声明 capability → 平台 MCP server 注册表解析 → MCP executor 代理调用 → 返回结果"全链路。
 
 **风险**：MCP transport 有 stdio / sse / streamable-http 三种，连接池管理 + 健康检查需要单独考虑；写操作的幂等键与超时策略与 HTTP 不完全相同。
 
 ---
 
-### 3.3 【P1】Skill steps 真编排器
+### 3.3 【P1】完善 Skill steps 真编排器
 
 **目标**：把 [example/.../skills/fault_triage.json](../example/industry.mfg_maintenance/skills/fault_triage.json) 里的 `depends_on_capabilities` 升级为真正的 `steps[]` 数据流编排，对齐设计文档 §5.4.2 的 yaml 示例（`$inputs.x` / `$prev_step.y`）。
 
-**现状**：
-- [chat_service.py L381-393](../apps/api/src/agent_platform/runtime/chat_service.py) 只在 Trace 里写"命中 Skill: xxx"，并不真按 skill.steps 调度
-- 当前是 "intent → 单个 capability" 的简化版 —— skill 只是个标签
+**当前状态**：
+- `SkillDefinition` 已支持 `inputs` / `outputs` / `steps` / `outputs_mapping`
+- [apps/api/src/agent_platform/runtime/skill_executor.py](../apps/api/src/agent_platform/runtime/skill_executor.py) 已实现最小编排器：
+  - 顺序执行 `steps[]`
+  - 支持 capability / tool 两类 step
+  - 支持 `$inputs` / `$steps` / `$prev_step` 引用
+  - 每步写入 `skill_step:<id>` TraceStep
+- [chat_service.py](../apps/api/src/agent_platform/runtime/chat_service.py) 已接入：选中 skill 且存在 `steps[]` 时走新执行器；无 `steps[]` 的旧 skill 继续保留原逻辑
+- 已补 [apps/api/tests/test_skill_executor.py](../apps/api/tests/test_skill_executor.py) 协议级单测
+- [example/industry.mfg_maintenance/skills/fault_triage.json](../example/industry.mfg_maintenance/skills/fault_triage.json) 已迁移为真实 `steps[]`
+- 已补 chat 主链路测试：`fault_diagnosis` 可命中 `fault_triage`，Trace 中出现 `skill_step:alarms/history/knowledge`
 
-**做什么**：
-1. 升级 skill JSON 结构为 `steps[]` 形态：
+**剩余要做**：
+1. 后续业务包继续按以下结构扩展更多 `steps[]`：
 
    ```jsonc
    {
@@ -240,17 +256,14 @@ POST /api/v1/chat/complete
    }
    ```
 
-2. 新文件 [apps/api/src/agent_platform/runtime/skill_executor.py](../apps/api/src/agent_platform/runtime/skill_executor.py)：
-   - 按拓扑顺序遍历 steps，每步调 capability 或 tool
-   - 维护一个 `step_results: dict[step_id, result]` 字典
-   - 引用解析复用 HttpExecutor 的 `_render_template` 思路（提取成共享 util）
-   - 每步独立一个 TraceStep（`node_type="capability"`，`parent_step_id=skill_step_id`）
-3. chat_service：当选中的 skill 有 `steps` 字段时，走新 executor；没有则保留 fallback 行为
-4. 失败处理：单步失败默认中断；后续可加 `on_error` 字段支持降级
+2. Trace 父子关系：当前每步是平铺 `skill_step:<id>`，还没有 `parent_step_id` 字段化展示。
+3. 失败处理：当前单步失败默认中断；后续可加 `on_error` 字段支持降级。
+4. 拓扑排序 / 并行：当前按声明顺序执行，尚不支持 DAG 并行。
+5. 与 Planner 输入结构对齐：当前 `fault_diagnosis` 仅做设备号 / 故障码的保守正则提取；复杂 skill 的结构化输入需要 Planner 输出更准确的 arguments。
 
 **验收**：上传 example bundle，提问"3 号注塑机昨晚报 AX-203，怎么处理？"，Trace 树展开能看到 fault_triage 下面 4 个子步骤都执行，最终回答里有 alarms / SOP 引用 / 历史工单的拼合。
 
-**与 HTTP executor 共享代码**：把 `_render_template` / `_walk_path` / `_BindingContext` 从 http.py 抽到 [apps/api/src/agent_platform/plugins/executors/dsl.py](../apps/api/src/agent_platform/plugins/executors/dsl.py) ，skill_executor 复用。
+**与 HTTP executor 共享代码**：已抽到 [apps/api/src/agent_platform/plugins/executors/dsl.py](../apps/api/src/agent_platform/plugins/executors/dsl.py)，HTTP / MCP / SkillExecutor 复用。
 
 ---
 
@@ -258,12 +271,18 @@ POST /api/v1/chat/complete
 
 **目标**：生产可用。
 
-**现状**：[http.py](../apps/api/src/agent_platform/plugins/executors/http.py) 没有重试、幂等、速率限制；binding 已留 `idempotency_key` 字段位但未消费。
+**现状**：[http.py](../apps/api/src/agent_platform/plugins/executors/http.py) 已支持 `binding.retry`、`binding.idempotency_key` 与 `binding.rate_limit`。`idempotency_key` 会渲染到 `Idempotency-Key` 请求头，并在进程内做 5 分钟短期结果缓存；缓存 key 会额外纳入 `package_id/plugin_name/capability`，避免不同业务包互相命中。
 
-**做什么**：
+**已完成**：
 - `binding.retry`：`{ "policy": "exponential", "max_attempts": 3, "retry_on": ["5xx", "UPSTREAM_TIMEOUT"] }`
-- `binding.idempotency_key`：渲染后写入 `Idempotency-Key` 请求头；同时在内存 + Redis（如可用）做"同 key 短期幂等缓存"
-- 速率限制走 ToolOverride 一类的现成机制，按 plugin_name 限流；可复用 [SkillRegistry/ToolRegistry](../apps/api/src/agent_platform/runtime/skill_registry.py) 的 `quota_per_minute` 思路
+- `binding.idempotency_key`：渲染后写入 `Idempotency-Key` 请求头；同 key 成功响应短期复用，第二次返回 `_meta.idempotency_cache_hit=true`
+- `binding.rate_limit`：`{ "requests_per_minute": 60, "scope": "tenant" }`，支持 `tenant` / `plugin` / `capability` / 自定义 `key`；默认不启用，只有 bundle 显式声明才执行
+- `example/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json` 已为历史查询 / 草稿创建声明 retry，为草稿创建声明基于真实输入字段的幂等键
+- [apps/api/tests/test_http_executor.py](../apps/api/tests/test_http_executor.py) 已覆盖 5xx 重试、timeout 重试、4xx 不重试、幂等请求头、幂等缓存命中、租户限流和租户隔离
+
+**后续替换点**：
+- 当前幂等缓存是进程内短期缓存，只解决单进程最小生产保护；多进程 / 多副本部署时应替换为 Redis 或数据库唯一约束。
+- 当前速率限制也是进程内滑动窗口，只解决单进程最小保护；多进程 / 多副本部署时应替换为 Redis 计数器，或接入 ToolOverride / quota 一类的统一机制，按 `plugin_name` / capability 限流；可复用 [SkillRegistry/ToolRegistry](../apps/api/src/agent_platform/runtime/skill_registry.py) 的 `quota_per_minute` 思路。
 
 **验收**：mock server 故意 503 两次后 200，executor 重试两次拿到结果；同样 payload 调两次看到第二次走幂等命中。
 
@@ -273,12 +292,19 @@ POST /api/v1/chat/complete
 
 **目标**：让 bundle 显式声明"我引用平台预装的 plugin <name>@<version>"，校验存在性 + 版本范围，对齐 §3.4 设计文档表格。
 
-**做什么**：
-- bundle plugin.json 支持 `{"executor":"platform","platform_plugin":"cmms_v2_legacy@1.4.0"}`
-- registry refresh 时检查 `_builtin_plugins` 是否有该名称、版本是否满足
-- 不满足时不注册，并在 admin packages 列表里给出告警
+**已完成**：
+- bundle plugin.json 支持 `{"executor":"platform","platform_plugin":"knowledge.search@>=1.0.0 <2.0.0"}` 这类显式引用
+- [registry.py](../apps/api/src/agent_platform/runtime/registry.py) 在 refresh 时检查 `_builtin_plugins` 是否存在目标 plugin / capability，并校验版本范围
+- 引用有效时注册 [PlatformProxyPlugin](../apps/api/src/agent_platform/plugins/executors/platform.py)，bundle capability 走平台内置插件真实 executor
+- 引用不存在、缺少 `platform_plugin` 或版本不满足时不注册，并通过 `CapabilityRegistry.list_diagnostics()` 暴露诊断
+- `list_admin_packages` 已返回 `package_diagnostics`，供管理端展示告警
+- [apps/api/tests/test_platform_executor_registry.py](../apps/api/tests/test_platform_executor_registry.py) 已覆盖有效引用、缺失引用、版本不兼容
 
-**验收**：bundle 引用一个不存在的 platform plugin → 安装时给出明确错误；引用存在的 → capability 走真插件 executor。
+**后续替换点**：
+- 当前校验发生在 registry refresh / 管理端诊断阶段，不在 zip 安装阶段硬阻断；如果要实现“上传即失败”，需要让 PackageInstaller 获得平台插件索引或把安装校验上移到 service 层。
+- 当前内置插件默认版本为 `1.0.0`；后续平台插件应显式声明 `plugin_version`。
+
+**验收**：bundle 引用一个不存在的 platform plugin → 不注册并给出明确诊断；引用存在的 → capability 走真插件 executor。
 
 ---
 
@@ -286,15 +312,21 @@ POST /api/v1/chat/complete
 
 **目标**：plugin_config.config 里的 secrets 子项不再明文落库。
 
-**现状**：明文。`secret_key` 在 [bootstrap/settings.py](../apps/api/src/agent_platform/bootstrap/settings.py) 里只是 JWT 用的占位字符串。
+**现状**：已做应用层子字段加密。Postgres 仓储写入 `plugin_config.config` 时会加密 `secrets` 子树，读取时解密给 executor；旧的明文 `secrets` 保持可读，下一次保存会写回密文。
 
-**做什么**：
-- 选型：KMS（AWS KMS / GCP KMS / Vault）vs 应用层 AES（with envelope key from settings.secret_key）
-- 推荐：先用应用层 AES-GCM + envelope key 在环境变量里，留 KMS 接入位
-- 需要：`secrets` 字段在 upsert 时加密、读取时解密；`get_plugin_config_schema` 返回掩码不解密
-- 数据库迁移：plugin_config.config 改为加密 BYTEA 或保留 JSONB 内的子字段加密
+**已完成**：
+- 新增 [config_crypto.py](../apps/api/src/agent_platform/infrastructure/config_crypto.py)，使用 Fernet 对 `config.secrets` 内的字符串值逐项加密
+- 新增 `AOP_PLUGIN_CONFIG_ENCRYPTION_KEY` / `plugin_config_encryption_key` 配置；未设置时兼容使用 `settings.secret_key` 派生密钥
+- [PostgresPluginConfigRepository](../apps/api/src/agent_platform/infrastructure/repositories.py) 已在 upsert/get 边界加密/解密
+- [apps/api/tests/test_plugin_config_crypto.py](../apps/api/tests/test_plugin_config_crypto.py) 已覆盖嵌套 secrets 加密、旧明文兼容、错误密钥拒绝解密
+- API 层仍返回掩码，executor 仍拿到解密后的真实值
 
-**验收**：直接 SQL 看 plugin_config 表，`secrets.cmms_token` 字段不可读；通过 API 取出来 HttpExecutor 仍能拿到原值。
+**后续替换点**：
+- 生产环境必须配置独立的 `AOP_PLUGIN_CONFIG_ENCRYPTION_KEY`，不能依赖默认 `secret_key`。
+- 当前没有做密钥轮换和 KMS envelope key；后续接 Vault / 云 KMS 时可替换 `PluginConfigCrypto` 的密钥提供器。
+- 当前不需要数据库迁移，仍保留 JSON 结构；如果后续要整列加密或审计密钥版本，再新增字段/迁移。
+
+**验收**：直接 SQL 看 plugin_config 表，`secrets.cmms_token` 字段不可读；通过 API/Executor 读取时仍能拿到原值。
 
 ---
 
@@ -302,14 +334,20 @@ POST /api/v1/chat/complete
 
 **目标**：把交互验证脚本固化为 pytest，CI 可跑。
 
-**现状**：[apps/api/tests/](../apps/api/tests) 已有结构，但没覆盖 bundle/executor 链路。
+**现状**：已补 bundle 上传/加载/注册和 executor 关键链路覆盖。
 
-**做什么**：
-- `tests/runtime/test_package_installer.py`：合法 zip / 大小超限 / 路径越界 / overwrite 行为
-- `tests/runtime/test_package_loader.py`：bundle 优先级、provides 解析、prompts 注入
-- `tests/runtime/test_capability_registry.py`：refresh / 内置避让 stub 的优先级 / get_plugin 双向反查
-- `tests/plugins/test_http_executor.py`：用 `respx` 或 stdlib HTTPServer mock，覆盖 binding 渲染所有引用类型 / 错误翻译 / response_map 各路径
-- `tests/runtime/test_chat_service_install.py`：完整 install_package_bundle → /chat 调用流程
+**已完成**：
+- [apps/api/tests/test_package_bundle_pipeline.py](../apps/api/tests/test_package_bundle_pipeline.py)：覆盖合法 zip 安装、overwrite、路径越界、installed 覆盖 catalog、provides 解析、prompts 注入、CapabilityRegistry 注册、SkillRegistry 加载、内置 capability 不被 bundle shadow
+- [apps/api/tests/test_http_executor.py](../apps/api/tests/test_http_executor.py)：覆盖 HTTP binding、错误翻译、retry、幂等、限流
+- [apps/api/tests/test_mcp_executor.py](../apps/api/tests/test_mcp_executor.py)：覆盖 MCP initialize / initialized / tools/call、SSE response、disabled server、JSON-RPC 错误
+- [apps/api/tests/test_skill_executor.py](../apps/api/tests/test_skill_executor.py)：覆盖 Skill steps 输入映射、`$prev_step`、outputs_mapping
+- [apps/api/tests/test_platform_executor_registry.py](../apps/api/tests/test_platform_executor_registry.py)：覆盖 platform executor 字段化、版本校验、诊断
+- [apps/api/tests/test_chat_runtime_chain.py](../apps/api/tests/test_chat_runtime_chain.py)：覆盖 fault_triage skill steps 进入 chat 主链路
+
+**剩余项**：
+- 完整 `install_package_bundle → 配置插件 → /chat 调用` API 级端到端测试还未补，当前已有 runtime 层组合测试。
+- `pytest --cov` 覆盖率门槛尚未接入 CI。
+- 当前全量 `apps/api/tests` 在本地仍会受环境依赖 / 缓存权限影响，相关链路套件已独立跑通。
 
 **验收**：`pytest -q` 全绿；`pytest --cov` 覆盖 bundle/executor 相关代码 ≥ 80%。
 
@@ -319,12 +357,21 @@ POST /api/v1/chat/complete
 
 **目标**：HttpExecutor 不能打到任意外网，仅允许租户配置中显式声明的 endpoint host + 私网段白名单。
 
-**现状**：endpoint 由 plugin_config 提供，运维实际控制；但没有第二层约束。
+**现状**：已增加 HTTP executor 出站地址校验。endpoint 由 plugin_config 提供，但 executor 会在发起请求前校验最终 URL，absolute path 覆盖也绕不过校验。
 
-**做什么**：
-- 全局白名单：[bootstrap/settings.py](../apps/api/src/agent_platform/bootstrap/settings.py) 加 `http_executor_allowlist: list[str]`（CIDR / 域名 glob）
-- 解析 endpoint 时校验，命中黑名单（如 `169.254.169.254` AWS metadata）直接拒绝
-- 防 SSRF：禁用 redirect、禁止 file:// / data:// scheme（HttpExecutor 已 `follow_redirects=False`）
+**已完成**：
+- [bootstrap/settings.py](../apps/api/src/agent_platform/bootstrap/settings.py) 已增加 `http_executor_allowlist: list[str]`，支持域名 glob / IP / CIDR
+- [outbound_guard.py](../apps/api/src/agent_platform/plugins/executors/outbound_guard.py) 抽出共享出站 URL 校验，HTTP / MCP executor 复用
+- [http.py](../apps/api/src/agent_platform/plugins/executors/http.py) 请求前校验最终 URL scheme 和 host
+- [mcp.py](../apps/api/src/agent_platform/plugins/executors/mcp.py) 已在 initialize/tools/call 前校验 MCP endpoint scheme 和 host
+- 默认拒绝 `localhost`、`*.localhost`、私网 / loopback / link-local / reserved / unspecified / multicast 字面 IP
+- 配置 allowlist 后，公网 host 也必须显式匹配；私网地址只有命中 allowlist 才允许
+- `follow_redirects=False` 已保持，禁止通过跳转绕行
+- [apps/api/tests/test_http_executor.py](../apps/api/tests/test_http_executor.py) 已覆盖 metadata IP、localhost、私网 CIDR 放行、allowlist 收窄公网 host、absolute path 覆盖拦截
+- [apps/api/tests/test_mcp_executor.py](../apps/api/tests/test_mcp_executor.py) 已覆盖 MCP metadata IP、localhost、私网 CIDR 放行、allowlist 收窄公网 host
+
+**后续替换点**：
+- 当前不做 DNS 解析后的 IP 校验，无法完全防 DNS rebinding；生产上建议在网络层 egress policy / proxy 再做一层。
 
 **验收**：运维误填 `endpoint=http://169.254.169.254` 时调用立即拒，不发出请求。
 
@@ -334,15 +381,25 @@ POST /api/v1/chat/complete
 
 **目标**：上传 bundle 时把 `knowledge/*.md` 自动批量进 `/knowledge`，并按 manifest.knowledge_bindings.source 自动归类。
 
-**现状**：仍要手动上传。
+**现状**：后端已完成保守闭环；bundle 可声明 `knowledge_imports[]`，但上传时默认不自动写入知识库，避免未经用户确认把业务知识变成长期数据。
 
 **做什么**：
-- `manifest.json` 里加 `knowledge_imports[]`：`[{"file":"knowledge/SOP-CNC-轴承更换.md","source":"equipment_sop","attributes":{"model":"CNC-650"}}]`
-- `package_installer.install_zip` 末尾批量调 `chat_service.ingest_knowledge_source` 写入
+- `manifest.json` 支持 `knowledge_imports[]`：`[{"file":"knowledge/SOP-CNC-轴承更换.md","source":"equipment_sop","attributes":{"model":"CNC-650"},"auto_import":false}]`
+- [package_installer.py](../apps/api/src/agent_platform/runtime/package_installer.py) 安装时校验 `knowledge_imports[].file` 不能逃逸 bundle，且目标文件必须存在
+- [package_loader.py](../apps/api/src/agent_platform/runtime/package_loader.py) 加载时规范化 `knowledge_imports`，默认 `knowledge_base_code=knowledge`、`owner=bundle:{package_id}`、`auto_import=false`
+- [chat_service.py](../apps/api/src/agent_platform/runtime/chat_service.py) 增加 `import_package_knowledge(...)`，仅在 API / UI 显式触发时读取 bundle 内文件并调用知识入库
+- [repositories.py](../apps/api/src/agent_platform/infrastructure/repositories.py) 的 `ingest_text` 支持把 `attributes` 写入 chunk metadata
 
-**验收**：上传 bundle 后，知识库治理里 4 份 SOP 已自动分类，无需手动操作。
+**验收**：
+- 上传 bundle 后，包详情能看到 `knowledge_imports` 声明，但知识库不会静默新增来源。
+- 调用 `POST /admin/packages/knowledge/import` 后，才把对应 bundle 文件导入知识库。
+- `auto_only=true` 时，只导入 manifest 中 `auto_import=true` 的条目。
 
-**风险**：知识更新节奏 ≠ bundle 升级节奏，强绑定可能反而难维护。建议默认 `auto_import: false`，由用户在 UI 勾选后再触发。
+**风险**：知识更新节奏 ≠ bundle 升级节奏，强绑定可能反而难维护。因此当前实现默认 `auto_import: false`，下一阶段在 UI 上提供“导入 bundle 知识”按钮和二次确认，再由用户显式触发。
+
+**已完成**：
+- [apps/api/tests/test_package_bundle_pipeline.py](../apps/api/tests/test_package_bundle_pipeline.py) 覆盖 bundle 声明加载、路径逃逸拒绝、显式导入传递 attributes。
+- 局部验证：`8 passed`。
 
 ---
 
@@ -350,9 +407,20 @@ POST /api/v1/chat/complete
 
 **目标**：UI 上能直接卸载 bundle。
 
-**现状**：[admin.py](../apps/api/src/agent_platform/api/routes/admin.py) 已有 `DELETE /admin/packages/{id}/bundle`，但 [packages 详情页](../apps/web/src/app/(workspace)/packages/[packageId]) 没接。
+**现状**：已完成。后端已有 `DELETE /admin/packages/{id}/bundle`，前端 [packages 详情页](../apps/web/src/app/(workspace)/packages/[packageId]) 已接入“卸载 bundle”按钮。
 
 **做什么**：详情页加"卸载 bundle"按钮 + 二次确认弹窗 + 调 API + 列表自动刷新。
+
+**已完成**：
+- [apps/web/src/lib/api-client/index.ts](../apps/web/src/lib/api-client/index.ts) 新增 `uninstallPackageBundle(...)`
+- [apps/web/src/lib/api-client/types.ts](../apps/web/src/lib/api-client/types.ts) 新增 `PackageBundleUninstallResult`
+- 包详情页仅对已安装 bundle 展示卸载按钮，catalog 示例包不展示
+- 卸载前二次确认，并明确不会删除已导入知识库的数据
+- 卸载成功后跳回业务包列表并刷新
+
+**边界**：
+- 当前卸载只删除本地安装的 bundle 文件，并刷新后端能力 / Skill 注册表。
+- 不删除知识库中已导入的知识来源，不修改租户已绑定的业务包字段，不触碰外部系统数据。
 
 ---
 

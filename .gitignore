@@ -1,6 +1,7 @@
 .DS_Store
 .next
 .pytest_cache
+.pytest-workspace-tmp/
 __pycache__/
 node_modules/
 dist/

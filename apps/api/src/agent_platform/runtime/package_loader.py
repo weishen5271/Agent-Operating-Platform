@@ -112,6 +112,13 @@ class PackageLoader:
             tools.extend(cls._load_provided(bundle_dir, provides.get("tools", []), "tool"))
             plugins.extend(cls._load_provided(bundle_dir, provides.get("plugins", []), "plugin"))
 
+        knowledge_imports = cls._normalize_knowledge_imports(
+            raw.get("knowledge_imports", []),
+            manifest_path=manifest_path,
+            bundle_dir=bundle_dir,
+            package_id=str(raw["package_id"]),
+        )
+
         prompts: dict[str, str] = {}
         prompt_refs = raw.get("prompts") or {}
         if isinstance(prompt_refs, dict) and bundle_dir is not None:
@@ -135,6 +142,7 @@ class PackageLoader:
             "knowledge_bindings": [
                 dict(item) for item in raw.get("knowledge_bindings", []) if isinstance(item, dict)
             ],
+            "knowledge_imports": knowledge_imports,
             "default_outputs": [str(item) for item in raw.get("default_outputs", []) if str(item).strip()],
             "skills": skills,
             "tools": tools,
@@ -166,6 +174,57 @@ class PackageLoader:
                 raise ValueError(f"{artefact_kind} file must be a JSON object: {rel_path}")
             artefacts.append(payload)
         return artefacts
+
+    @classmethod
+    def _normalize_knowledge_imports(
+        cls,
+        entries: Any,
+        *,
+        manifest_path: Path,
+        bundle_dir: Path | None,
+        package_id: str,
+    ) -> list[dict[str, Any]]:
+        if entries in (None, ""):
+            return []
+        if not isinstance(entries, list):
+            raise ValueError(f"Package manifest knowledge_imports must be a list: {manifest_path}")
+
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(entries):
+            if not isinstance(item, dict):
+                raise ValueError(f"knowledge_imports[{index}] must be an object: {manifest_path}")
+
+            rel_path = str(item.get("file", "")).strip()
+            if not rel_path:
+                raise ValueError(f"knowledge_imports[{index}].file is required: {manifest_path}")
+            if bundle_dir is not None:
+                target = cls._safe_join(bundle_dir, rel_path)
+                if not target.exists():
+                    raise ValueError(f"knowledge_imports[{index}] references missing file: {rel_path}")
+
+            attributes = item.get("attributes", {})
+            if attributes is None:
+                attributes = {}
+            if not isinstance(attributes, dict):
+                raise ValueError(f"knowledge_imports[{index}].attributes must be an object: {manifest_path}")
+
+            source_type = str(item.get("source_type") or item.get("source") or "Markdown").strip() or "Markdown"
+            knowledge_base_code = str(item.get("knowledge_base_code") or "knowledge").strip() or "knowledge"
+            owner = str(item.get("owner") or f"bundle:{package_id}").strip() or f"bundle:{package_id}"
+            name = str(item.get("name") or Path(rel_path).name).strip() or Path(rel_path).name
+
+            normalized.append(
+                {
+                    "file": rel_path,
+                    "name": name,
+                    "source_type": source_type,
+                    "knowledge_base_code": knowledge_base_code,
+                    "owner": owner,
+                    "auto_import": bool(item.get("auto_import", False)),
+                    "attributes": dict(attributes),
+                }
+            )
+        return normalized
 
     @staticmethod
     def _safe_join(bundle_dir: Path, rel_path: str) -> Path:

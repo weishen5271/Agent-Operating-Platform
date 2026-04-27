@@ -171,6 +171,25 @@ class PluginConfigRecord(Base):
     )
 
 
+class McpServerRecord(Base):
+    __tablename__ = "mcp_server"
+
+    server_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    transport: Mapped[str] = mapped_column(String(64), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(1024), nullable=False)
+    auth_ref: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    headers: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class ReleasePlanRecord(Base):
     __tablename__ = "release_plan"
 
@@ -462,5 +481,6 @@ def import_db_models() -> None:
         KnowledgeWikiFeedbackRecord,
         KnowledgeBaseRecord,
         LLMRuntimeConfigRecord,
+        McpServerRecord,
         BusinessOutputRecord,
     )

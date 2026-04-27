@@ -2,11 +2,56 @@
   "name": "fault_triage",
   "description": "根据设备号与故障码，输出故障语义、安全等级、推荐处置摘要。",
   "version": "1.0.0",
+  "inputs": {
+    "query": { "type": "string", "required": true },
+    "equipment_id": { "type": "string", "required": true },
+    "fault_code": { "type": "string", "required": false },
+    "last_n": { "type": "integer", "default": 5 }
+  },
+  "outputs": {
+    "summary": { "type": "string" },
+    "alarms": { "type": "array" },
+    "workorders": { "type": "array" },
+    "knowledge_matches": { "type": "array" }
+  },
+  "steps": [
+    {
+      "id": "alarms",
+      "capability": "scada.alarm_query",
+      "input": {
+        "equipment_id": "$inputs.equipment_id"
+      }
+    },
+    {
+      "id": "history",
+      "capability": "cmms.work_order.history",
+      "input": {
+        "equipment_id": "$inputs.equipment_id",
+        "fault_code": "$inputs.fault_code",
+        "last_n": "$inputs.last_n"
+      }
+    },
+    {
+      "id": "knowledge",
+      "capability": "knowledge.search",
+      "input": {
+        "query": "$inputs.query"
+      }
+    }
+  ],
+  "outputs_mapping": {
+    "summary": "已完成设备 $inputs.equipment_id 的故障排查编排。",
+    "equipment_id": "$inputs.equipment_id",
+    "fault_code": "$inputs.fault_code",
+    "alarms": "$steps.alarms.alarms",
+    "workorders": "$steps.history.workorders",
+    "knowledge_matches": "$steps.knowledge.matches"
+  },
   "depends_on_capabilities": [
     "scada.alarm_query",
     "knowledge.search",
     "cmms.work_order.history"
   ],
-  "depends_on_tools": ["text.extract"],
+  "depends_on_tools": [],
   "enabled": true
 }

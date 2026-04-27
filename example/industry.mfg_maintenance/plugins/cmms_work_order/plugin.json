@@ -5,7 +5,18 @@
   "executor": "http",
   "config_schema": {
     "endpoint":   { "type": "string",  "required": true, "description": "CMMS REST API 根地址，例如 https://cmms.acme.local" },
-    "secrets":    { "type": "object",  "required": true, "description": "{\"cmms_token\": \"<bearer token>\"}" },
+    "secrets": {
+      "type": "object",
+      "required": true,
+      "description": "CMMS 凭据配置",
+      "properties": {
+        "cmms_token": {
+          "type": "string",
+          "required": true,
+          "description": "CMMS Bearer Token"
+        }
+      }
+    },
     "timeout_ms": { "type": "integer", "default": 5000 }
   },
   "default_config": {
@@ -33,6 +44,11 @@
           "Accept":        "application/json"
         },
         "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 3,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
         "response_map": {
           "workorders": "$response.body.data",
           "total":      "$response.body.total"
@@ -55,6 +71,7 @@
       "binding": {
         "method": "POST",
         "path":   "/api/v1/workorders/drafts",
+        "idempotency_key": "cmms-draft:$input.equipment_id:$input.fault_code:$input.summary",
         "headers": {
           "Authorization": "Bearer $secret.cmms_token",
           "Content-Type":  "application/json"
@@ -66,6 +83,11 @@
           "source":       "agent_operating_platform"
         },
         "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 3,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
         "response_map": {
           "draft_id":   "$response.body.id",
           "url":        "$response.body.html_url"

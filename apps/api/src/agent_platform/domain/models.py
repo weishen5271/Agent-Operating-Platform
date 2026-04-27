@@ -261,6 +261,17 @@ class PluginConfig:
 
 
 @dataclass(slots=True)
+class McpServer:
+    server_id: str
+    name: str
+    transport: str
+    endpoint: str
+    auth_ref: str = ""
+    headers: dict[str, Any] = field(default_factory=dict)
+    status: str = "active"
+
+
+@dataclass(slots=True)
 class ReleasePlan:
     release_id: str
     package_id: str
@@ -284,6 +295,10 @@ class SkillDefinition:
     package_id: str | None = None
     depends_on_capabilities: list[str] = field(default_factory=list)
     depends_on_tools: list[str] = field(default_factory=list)
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    outputs_mapping: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
 
 

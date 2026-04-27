@@ -3208,6 +3208,11 @@ select {
   gap: 8px;
 }
 
+.plugin-config-field.nested {
+  padding-left: 12px;
+  border-left: 2px solid var(--outline-variant);
+}
+
 .plugin-config-field > span {
   font-size: 0.78rem;
   font-weight: 800;
@@ -3219,7 +3224,8 @@ select {
 }
 
 .plugin-config-field input,
-.plugin-config-field select {
+.plugin-config-field select,
+.plugin-config-field textarea {
   min-height: 40px;
   width: 100%;
   padding: 0 12px;
@@ -3228,6 +3234,25 @@ select {
   background: var(--surface-container-lowest);
   color: var(--on-surface);
   outline: none;
+}
+
+.plugin-config-field textarea {
+  min-height: 110px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.stack-item.selectable {
+  width: 100%;
+  border: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.stack-item.selectable.active {
+  border-color: var(--primary);
+  background: var(--primary-fixed);
 }
 
 .tool-override-layout {

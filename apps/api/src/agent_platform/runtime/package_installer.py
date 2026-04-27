@@ -7,6 +7,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from agent_platform.runtime.package_loader import PackageLoader
 
@@ -30,8 +31,9 @@ class PackageInstaller:
     - extracted bundle is moved into ``packages/installed/<package_id>/``
     """
 
-    def __init__(self, installed_dir: Path) -> None:
+    def __init__(self, installed_dir: Path, *, temp_dir: Path | None = None) -> None:
         self._installed_dir = installed_dir
+        self._temp_dir = temp_dir
 
     @classmethod
     def default(cls) -> "PackageInstaller":
@@ -44,8 +46,11 @@ class PackageInstaller:
                 f"Bundle exceeds size limit ({MAX_BUNDLE_BYTES // (1024 * 1024)}MB)"
             )
 
-        with tempfile.TemporaryDirectory(prefix="aop_bundle_") as tmp:
-            staging = Path(tmp) / "extract"
+        temp_parent = self._temp_dir or Path(tempfile.gettempdir())
+        temp_root = temp_parent / f"aop_bundle_{uuid4().hex[:12]}"
+        try:
+            temp_root.mkdir(parents=True, exist_ok=False)
+            staging = temp_root / "extract"
             staging.mkdir(parents=True, exist_ok=True)
             self._extract_zip(zip_bytes, staging)
             bundle_root = self._locate_bundle_root(staging)
@@ -63,6 +68,8 @@ class PackageInstaller:
                 shutil.rmtree(target_dir)
 
             shutil.move(str(bundle_root), str(target_dir))
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
         return {
             "package_id": package_id,
@@ -161,6 +168,32 @@ class PackageInstaller:
                     raise PackageInstallError(
                         f"{kind[:-1]} artefact missing 'name': {rel_path}"
                     )
+
+        knowledge_imports = manifest.get("knowledge_imports", []) or []
+        if not isinstance(knowledge_imports, list):
+            raise PackageInstallError("manifest.knowledge_imports must be a list")
+        for index, item in enumerate(knowledge_imports):
+            if not isinstance(item, dict):
+                raise PackageInstallError(f"knowledge_imports[{index}] must be an object")
+            rel_path = item.get("file")
+            if not isinstance(rel_path, str) or not rel_path.strip():
+                raise PackageInstallError(f"knowledge_imports[{index}].file is required")
+            target = (bundle_root / rel_path).resolve()
+            try:
+                target.relative_to(bundle_root.resolve())
+            except ValueError as exc:
+                raise PackageInstallError(
+                    f"knowledge_imports[{index}] path escapes bundle: {rel_path}"
+                ) from exc
+            if not target.exists():
+                raise PackageInstallError(
+                    f"knowledge_imports[{index}] references missing file: {rel_path}"
+                )
+            attributes = item.get("attributes", {})
+            if attributes is not None and not isinstance(attributes, dict):
+                raise PackageInstallError(f"knowledge_imports[{index}].attributes must be an object")
+            if "auto_import" in item and not isinstance(item["auto_import"], bool):
+                raise PackageInstallError(f"knowledge_imports[{index}].auto_import must be a boolean")
         return manifest
 
     @staticmethod
@@ -169,5 +202,3 @@ class PackageInstaller:
         if not cleaned or any(c in cleaned for c in ("/", "\\", "..")):
             raise PackageInstallError(f"Invalid package_id: {package_id!r}")
         return cleaned
-
-

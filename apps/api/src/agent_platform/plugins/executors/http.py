@@ -33,7 +33,9 @@ Binding shape::
 
 from __future__ import annotations
 
-import re
+import copy
+import threading
+import time
 from typing import Any
 from urllib.parse import urljoin
 
@@ -41,10 +43,23 @@ import httpx
 
 from agent_platform.domain.models import CapabilityDefinition, SourceReference
 from agent_platform.plugins.base import CapabilityPlugin
+from agent_platform.plugins.executors.dsl import BindingContext, render_mapping, render_template
+from agent_platform.plugins.executors.outbound_guard import validate_http_endpoint
 
-_REF_PATTERN = re.compile(r"\$(input|config|secret|response)(?:\.([A-Za-z0-9_.\-]+))?")
 _DEFAULT_TIMEOUT_MS = 5000
 _MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MB
+_MAX_RETRY_ATTEMPTS = 5
+_DEFAULT_RETRY_BASE_DELAY_SECONDS = 0.1
+_MAX_RETRY_DELAY_SECONDS = 1.0
+_IDEMPOTENCY_CACHE_TTL_SECONDS = 300
+_RATE_LIMIT_WINDOW_SECONDS = 60
+_MAX_RATE_LIMIT_PER_MINUTE = 10000
+
+
+_IDEMPOTENCY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_IDEMPOTENCY_CACHE_LOCK = threading.Lock()
+_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
 
 
 class HttpExecutorError(RuntimeError):
@@ -92,34 +107,75 @@ class HttpExecutor(CapabilityPlugin):
         *,
         tenant_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        ctx = _BindingContext(
+        ctx = BindingContext(
             inputs=dict(payload),
             config=self._merge_config(tenant_config),
         )
         method = str(self._binding.get("method") or "GET").upper()
-        endpoint = ctx.require_config("endpoint")
-        path = self._render_template(self._binding.get("path") or "", ctx)
+        endpoint = ctx.require_config("endpoint", error_factory=HttpExecutorError)
+        path = render_template(self._binding.get("path") or "", ctx)
         url = self._join_url(endpoint, path)
+        self._validate_url(url)
 
-        query = self._render_mapping(self._binding.get("query") or {}, ctx)
-        headers = self._render_mapping(self._binding.get("headers") or {}, ctx)
+        query = render_mapping(self._binding.get("query") or {}, ctx)
+        headers = render_mapping(self._binding.get("headers") or {}, ctx)
         timeout_seconds = self._resolve_timeout(ctx)
         body = self._binding.get("body")
-        json_body = self._render_mapping(body, ctx) if isinstance(body, (dict, list)) else None
+        json_body = render_mapping(body, ctx) if isinstance(body, (dict, list)) else None
+        idempotency_key = self._resolve_idempotency_key(ctx)
+        idempotency_cache_key = self._idempotency_cache_key(idempotency_key) if idempotency_key else None
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+            cached = self._get_cached_idempotency_result(idempotency_cache_key)
+            if cached is not None:
+                cached.setdefault("_meta", {})
+                cached["_meta"]["idempotency_cache_hit"] = True
+                return cached
 
-        try:
-            with self._open_client(timeout_seconds) as client:
-                response = client.request(
-                    method=method,
-                    url=url,
-                    params=_drop_none(query),
-                    headers=_stringify_headers(headers),
-                    json=json_body,
-                )
-        except httpx.TimeoutException as exc:
-            raise HttpExecutorError("UPSTREAM_TIMEOUT", None, str(exc)) from exc
-        except httpx.RequestError as exc:
-            raise HttpExecutorError("UPSTREAM_UNREACHABLE", None, str(exc)) from exc
+        rate_limit = self._resolve_rate_limit(ctx)
+        if rate_limit is not None:
+            self._check_rate_limit(rate_limit)
+
+        retry_policy = self._resolve_retry_policy()
+        last_error: HttpExecutorError | None = None
+        response: httpx.Response | None = None
+
+        with self._open_client(timeout_seconds) as client:
+            for attempt in range(1, retry_policy["max_attempts"] + 1):
+                try:
+                    response = client.request(
+                        method=method,
+                        url=url,
+                        params=_drop_none(query),
+                        headers=_stringify_headers(headers),
+                        json=json_body,
+                    )
+                except httpx.TimeoutException as exc:
+                    last_error = HttpExecutorError("UPSTREAM_TIMEOUT", None, str(exc))
+                    if self._should_retry_error(last_error.code, retry_policy, attempt):
+                        self._sleep_before_retry(attempt, retry_policy)
+                        continue
+                    raise last_error from exc
+                except httpx.RequestError as exc:
+                    last_error = HttpExecutorError("UPSTREAM_UNREACHABLE", None, str(exc))
+                    if self._should_retry_error(last_error.code, retry_policy, attempt):
+                        self._sleep_before_retry(attempt, retry_policy)
+                        continue
+                    raise last_error from exc
+
+                if response.status_code >= 400 and self._should_retry_status(
+                    response.status_code,
+                    retry_policy,
+                    attempt,
+                ):
+                    self._sleep_before_retry(attempt, retry_policy)
+                    continue
+                break
+
+        if response is None:
+            if last_error is not None:
+                raise last_error
+            raise HttpExecutorError("UPSTREAM_UNREACHABLE", None, "HTTP 请求未返回响应。")
 
         if int(response.headers.get("content-length") or 0) > _MAX_RESPONSE_BYTES:
             raise HttpExecutorError("RESPONSE_TOO_LARGE", response.status_code, "")
@@ -138,7 +194,7 @@ class HttpExecutor(CapabilityPlugin):
             raise HttpExecutorError(translation, response.status_code, _truncate(body_text, 500))
 
         ctx.response = {"status": response.status_code, "body": response_body}
-        result = self._render_mapping(self._binding.get("response_map") or {}, ctx)
+        result = render_mapping(self._binding.get("response_map") or {}, ctx)
         if not isinstance(result, dict):
             result = {"data": result}
 
@@ -156,6 +212,8 @@ class HttpExecutor(CapabilityPlugin):
             "plugin": self.plugin_name,
             "status": response.status_code,
         })
+        if idempotency_cache_key:
+            self._set_cached_idempotency_result(idempotency_cache_key, result)
         return result
 
     # -------------------------------------------------------------- internals
@@ -171,16 +229,146 @@ class HttpExecutor(CapabilityPlugin):
             return self._client_factory(timeout=timeout_seconds)
         return httpx.Client(timeout=timeout_seconds, follow_redirects=False)
 
-    def _resolve_timeout(self, ctx: "_BindingContext") -> float:
+    def _resolve_timeout(self, ctx: BindingContext) -> float:
         raw = self._binding.get("timeout_ms")
         if isinstance(raw, str):
-            raw = self._render_template(raw, ctx)
+            raw = render_template(raw, ctx)
         if raw is None:
             raw = ctx.config.get("timeout_ms", _DEFAULT_TIMEOUT_MS)
         try:
             return max(int(raw) / 1000.0, 0.1)
         except (TypeError, ValueError):
             return _DEFAULT_TIMEOUT_MS / 1000.0
+
+    def _resolve_retry_policy(self) -> dict[str, Any]:
+        raw = self._binding.get("retry") or {}
+        if not isinstance(raw, dict):
+            return {"policy": "none", "max_attempts": 1, "retry_on": set()}
+        try:
+            max_attempts = int(raw.get("max_attempts") or 1)
+        except (TypeError, ValueError):
+            max_attempts = 1
+        max_attempts = min(max(max_attempts, 1), _MAX_RETRY_ATTEMPTS)
+        retry_on = raw.get("retry_on") or []
+        if not isinstance(retry_on, list):
+            retry_on = []
+        return {
+            "policy": str(raw.get("policy") or "none").lower(),
+            "max_attempts": max_attempts,
+            "retry_on": {str(item).upper() for item in retry_on if item is not None},
+        }
+
+    def _should_retry_status(self, status: int, retry_policy: dict[str, Any], attempt: int) -> bool:
+        if attempt >= retry_policy["max_attempts"]:
+            return False
+        retry_on = retry_policy["retry_on"]
+        if str(status) in retry_on:
+            return True
+        bucket = f"{status // 100}XX"
+        return bucket in retry_on
+
+    def _should_retry_error(self, code: str, retry_policy: dict[str, Any], attempt: int) -> bool:
+        if attempt >= retry_policy["max_attempts"]:
+            return False
+        return code.upper() in retry_policy["retry_on"]
+
+    def _sleep_before_retry(self, attempt: int, retry_policy: dict[str, Any]) -> None:
+        if retry_policy["policy"] != "exponential":
+            return
+        delay = min(_DEFAULT_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0)), _MAX_RETRY_DELAY_SECONDS)
+        time.sleep(delay)
+
+    def _resolve_idempotency_key(self, ctx: BindingContext) -> str | None:
+        raw = self._binding.get("idempotency_key")
+        if not raw:
+            return None
+        key = render_template(str(raw), ctx)
+        if key is None:
+            return None
+        key = str(key).strip()
+        if not key:
+            return None
+        return key
+
+    def _idempotency_cache_key(self, rendered_key: str) -> str:
+        return f"{self.package_id}:{self.plugin_name}:{self.capability.name}:{rendered_key}"
+
+    def _resolve_rate_limit(self, ctx: BindingContext) -> dict[str, Any] | None:
+        raw = self._binding.get("rate_limit") or {}
+        if not isinstance(raw, dict):
+            return None
+        limit_value = raw.get("requests_per_minute", raw.get("quota_per_minute"))
+        if isinstance(limit_value, str):
+            limit_value = render_template(limit_value, ctx)
+        try:
+            requests_per_minute = int(limit_value)
+        except (TypeError, ValueError):
+            return None
+        requests_per_minute = min(max(requests_per_minute, 0), _MAX_RATE_LIMIT_PER_MINUTE)
+        scope = str(raw.get("scope") or "tenant").strip().lower()
+        custom_key = raw.get("key")
+        rendered_key = render_template(str(custom_key), ctx) if custom_key else None
+        return {
+            "requests_per_minute": requests_per_minute,
+            "key": self._rate_limit_key(scope=scope, tenant_id=ctx.config.get("tenant_id"), custom_key=rendered_key),
+        }
+
+    def _rate_limit_key(self, *, scope: str, tenant_id: Any, custom_key: Any = None) -> str:
+        if custom_key is not None and str(custom_key).strip():
+            key_suffix = str(custom_key).strip()
+        elif scope == "capability":
+            key_suffix = f"{tenant_id or '_default'}:{self.capability.name}"
+        elif scope == "plugin":
+            key_suffix = self.plugin_name
+        else:
+            key_suffix = f"{tenant_id or '_default'}:{self.plugin_name}"
+        return f"{self.package_id}:{self.plugin_name}:{scope}:{key_suffix}"
+
+    def _check_rate_limit(self, rate_limit: dict[str, Any]) -> None:
+        limit = int(rate_limit["requests_per_minute"])
+        key = str(rate_limit["key"])
+        now = time.monotonic()
+        cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
+        with _RATE_LIMIT_LOCK:
+            bucket = [timestamp for timestamp in _RATE_LIMIT_BUCKETS.get(key, []) if timestamp > cutoff]
+            if len(bucket) >= limit:
+                _RATE_LIMIT_BUCKETS[key] = bucket
+                raise HttpExecutorError(
+                    "RATE_LIMITED",
+                    None,
+                    f"HTTP executor rate limit exceeded: {limit}/minute",
+                )
+            bucket.append(now)
+            _RATE_LIMIT_BUCKETS[key] = bucket
+
+    def _get_cached_idempotency_result(self, key: str) -> dict[str, Any] | None:
+        now = time.monotonic()
+        with _IDEMPOTENCY_CACHE_LOCK:
+            cached = _IDEMPOTENCY_CACHE.get(key)
+            if cached is None:
+                return None
+            expires_at, result = cached
+            if expires_at <= now:
+                _IDEMPOTENCY_CACHE.pop(key, None)
+                return None
+            return copy.deepcopy(result)
+
+    def _set_cached_idempotency_result(self, key: str, result: dict[str, Any]) -> None:
+        with _IDEMPOTENCY_CACHE_LOCK:
+            _IDEMPOTENCY_CACHE[key] = (
+                time.monotonic() + _IDEMPOTENCY_CACHE_TTL_SECONDS,
+                copy.deepcopy(result),
+            )
+
+    @staticmethod
+    def clear_idempotency_cache() -> None:
+        with _IDEMPOTENCY_CACHE_LOCK:
+            _IDEMPOTENCY_CACHE.clear()
+
+    @staticmethod
+    def clear_rate_limit_buckets() -> None:
+        with _RATE_LIMIT_LOCK:
+            _RATE_LIMIT_BUCKETS.clear()
 
     def _translate_error(self, status: int, body: Any) -> str:
         translation = self._binding.get("error_translation") or {}
@@ -204,85 +392,9 @@ class HttpExecutor(CapabilityPlugin):
             path = "/" + path
         return urljoin(endpoint + "/", path.lstrip("/"))
 
-    # ---------- DSL rendering -------------------------------------------------
-    def _render_mapping(self, value: Any, ctx: "_BindingContext") -> Any:
-        if isinstance(value, dict):
-            return {key: self._render_mapping(item, ctx) for key, item in value.items()}
-        if isinstance(value, list):
-            return [self._render_mapping(item, ctx) for item in value]
-        if isinstance(value, str):
-            return self._render_template(value, ctx)
-        return value
-
     @staticmethod
-    def _render_template(template: str, ctx: "_BindingContext") -> Any:
-        # Pure single-token template (e.g. "$input.equipment_id") preserves the
-        # original Python type instead of stringifying.
-        match = _REF_PATTERN.fullmatch(template.strip())
-        if match:
-            return ctx.resolve(match.group(1), match.group(2))
-
-        # Otherwise inline-substitute every $... reference as a string.
-        def _replace(match: re.Match[str]) -> str:
-            value = ctx.resolve(match.group(1), match.group(2))
-            return "" if value is None else str(value)
-
-        return _REF_PATTERN.sub(_replace, template)
-
-
-class _BindingContext:
-    __slots__ = ("inputs", "config", "response")
-
-    def __init__(self, *, inputs: dict[str, Any], config: dict[str, Any]) -> None:
-        self.inputs = inputs
-        self.config = config
-        self.response: dict[str, Any] | None = None
-
-    def require_config(self, key: str) -> str:
-        value = self.config.get(key)
-        if not value:
-            raise HttpExecutorError(
-                "MISSING_CONFIG",
-                None,
-                f"plugin_config.{key} 未配置；请先在「业务包管理 → 能力 → 插件配置」填入。",
-            )
-        return str(value)
-
-    def resolve(self, scope: str, dotted_path: str | None) -> Any:
-        if scope == "secret":
-            secrets = self.config.get("secrets") or {}
-            if not isinstance(secrets, dict):
-                return None
-            return secrets.get(dotted_path or "")
-        source: Any
-        if scope == "input":
-            source = self.inputs
-        elif scope == "config":
-            source = self.config
-        elif scope == "response":
-            source = self.response or {}
-        else:
-            return None
-        if not dotted_path:
-            return source
-        return _walk_path(source, dotted_path)
-
-
-def _walk_path(source: Any, dotted_path: str) -> Any:
-    cursor: Any = source
-    for segment in dotted_path.split("."):
-        if cursor is None:
-            return None
-        if isinstance(cursor, dict):
-            cursor = cursor.get(segment)
-            continue
-        if isinstance(cursor, list) and segment.isdigit():
-            index = int(segment)
-            cursor = cursor[index] if 0 <= index < len(cursor) else None
-            continue
-        return None
-    return cursor
-
+    def _validate_url(url: str) -> None:
+        validate_http_endpoint(url, executor_label="HTTP", error_factory=HttpExecutorError)
 
 def _drop_none(mapping: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in mapping.items() if value is not None}

@@ -429,6 +429,7 @@ export default function PackagesPage() {
                         依赖能力：{skill.depends_on_capabilities.join(", ") || "—"} · 依赖工具：
                         {skill.depends_on_tools.join(", ") || "—"}
                       </p>
+                      {skill.steps?.length ? <p className="row-meta">编排步骤：{skill.steps.length}</p> : null}
                     </div>
                     <span className="status-chip plain">{skill.source}</span>
                   </article>

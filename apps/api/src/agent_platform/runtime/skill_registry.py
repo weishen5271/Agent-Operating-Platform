@@ -239,5 +239,9 @@ class SkillRegistry:
                 for item in raw.get("depends_on_tools", [])
                 if str(item).strip()
             ],
+            inputs=dict(raw.get("inputs") or {}),
+            outputs=dict(raw.get("outputs") or {}),
+            steps=[dict(item) for item in raw.get("steps", []) if isinstance(item, dict)],
+            outputs_mapping=dict(raw.get("outputs_mapping") or {}),
             enabled=bool(raw.get("enabled", True)),
         )

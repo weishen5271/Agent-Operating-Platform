@@ -15,6 +15,7 @@ from agent_platform.domain.models import (
 )
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 from agent_platform.runtime.chat_service import ChatService
+from agent_platform.runtime.package_loader import PackageLoader
 from agent_platform.runtime.registry import CapabilityRegistry
 
 
@@ -237,6 +238,17 @@ class FakeLLMClient:
         return f"模型回复：{user_message}"
 
 
+class MemoryPackageLoader:
+    def __init__(self, packages: list[dict[str, object]]) -> None:
+        self._packages = packages
+
+    def list_packages(self) -> list[dict[str, object]]:
+        return list(self._packages)
+
+    def get_package(self, package_id: str) -> dict[str, object] | None:
+        return next((item for item in self._packages if item.get("package_id") == package_id), None)
+
+
 def build_service(
     *,
     traces: FakeTraceRepository,
@@ -267,6 +279,98 @@ def build_service(
         llm_config=llm_config,
         llm_client=llm_client,
     )
+
+
+def build_fault_triage_package() -> dict[str, object]:
+    return {
+        "package_id": "pkg.test_fault_triage",
+        "name": "Test Fault Triage Package",
+        "version": "1.0.0",
+        "owner": "test",
+        "status": "test",
+        "domain": "industry",
+        "source_kind": "bundle",
+        "intents": [
+            {
+                "name": "fault_diagnosis",
+                "score": 0.9,
+                "keywords": ["注塑机", "AX-203", "怎么处理"],
+            }
+        ],
+        "skills": [
+            {
+                "name": "fault_triage",
+                "description": "Test-only fault triage skill",
+                "version": "1.0.0",
+                "steps": [
+                    {
+                        "id": "alarms",
+                        "capability": "scada.alarm_query",
+                        "input": {"equipment_id": "$inputs.equipment_id"},
+                    },
+                    {
+                        "id": "history",
+                        "capability": "cmms.work_order.history",
+                        "input": {
+                            "equipment_id": "$inputs.equipment_id",
+                            "fault_code": "$inputs.fault_code",
+                            "last_n": "$inputs.last_n",
+                        },
+                    },
+                    {
+                        "id": "knowledge",
+                        "capability": "knowledge.search",
+                        "input": {"query": "$inputs.query"},
+                    },
+                ],
+                "outputs_mapping": {
+                    "summary": "已完成设备 $inputs.equipment_id 的故障排查编排。",
+                    "alarms": "$steps.alarms.alarms",
+                    "workorders": "$steps.history.workorders",
+                    "knowledge_matches": "$steps.knowledge.matches",
+                },
+                "depends_on_capabilities": [
+                    "scada.alarm_query",
+                    "cmms.work_order.history",
+                    "knowledge.search",
+                ],
+                "depends_on_tools": [],
+                "enabled": True,
+            }
+        ],
+        "plugins": [
+            {
+                "name": "scada.alarm_query",
+                "executor": "stub",
+                "capabilities": [
+                    {
+                        "name": "scada.alarm_query",
+                        "description": "Test-only SCADA alarm query contract",
+                        "risk_level": "low",
+                        "side_effect_level": "read",
+                        "required_scope": "scada:read",
+                        "input_schema": {"required": ["equipment_id"]},
+                        "output_schema": {"required": ["alarms"]},
+                    }
+                ],
+            },
+            {
+                "name": "cmms.work_order",
+                "executor": "stub",
+                "capabilities": [
+                    {
+                        "name": "cmms.work_order.history",
+                        "description": "Test-only CMMS history contract",
+                        "risk_level": "low",
+                        "side_effect_level": "read",
+                        "required_scope": "cmms:read",
+                        "input_schema": {"required": ["equipment_id"]},
+                        "output_schema": {"required": ["workorders"]},
+                    }
+                ],
+            },
+        ],
+    }
 
 
 def test_chat_completion_records_standard_query_chain_steps() -> None:
@@ -582,3 +686,57 @@ def test_dialogue_can_invoke_platform_json_path_tool() -> None:
     assert traces.saved is not None
     tool_step = next(step for step in traces.saved.steps if step.name == "tool_executed")
     assert tool_step.ref == "json_path"
+
+
+def test_fault_diagnosis_plan_extracts_equipment_and_fault_code_from_message() -> None:
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+
+    capability_name, payload = service._plan("3 号注塑机昨晚报 AX-203，怎么处理？", "fault_diagnosis")
+
+    assert capability_name == "knowledge.search"
+    assert payload["equipment_id"] == "3号注塑机"
+    assert payload["fault_code"] == "AX-203"
+    assert payload["last_n"] == 5
+    assert payload["query"] == "3 号注塑机昨晚报 AX-203，怎么处理？"
+
+
+def test_fault_diagnosis_chat_runs_declarative_skill_steps(monkeypatch) -> None:
+    from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
+
+    loader = MemoryPackageLoader([build_fault_triage_package()])
+    monkeypatch.setattr(PackageLoader, "default", classmethod(lambda cls: loader))
+    traces = FakeTraceRepository()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=False),
+        llm_client=OpenAICompatibleLLMClient(),
+    )
+    service._registry = CapabilityRegistry(loader=loader)
+    service._skills = SkillRegistry(loader=loader)
+    service._tools = ToolRegistry()
+
+    response = asyncio.run(
+        service.complete(
+            message="3 号注塑机昨晚报 AX-203，怎么处理？",
+            tenant_id="tenant-demo",
+            user_id="user-demo",
+        )
+    )
+
+    assert response["intent"] == "fault_diagnosis"
+    assert "已完成设备 3号注塑机 的故障排查编排" in response["message"]["content"]
+    assert traces.saved is not None
+    step_names = [step.name for step in traces.saved.steps]
+    assert "skill_step:alarms" in step_names
+    assert "skill_step:history" in step_names
+    assert "skill_step:knowledge" in step_names
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    assert skill_step.ref == "fault_triage"
+    executed_step = next(step for step in traces.saved.steps if step.name == "executed")
+    assert executed_step.node_type == "skill"
+    assert executed_step.ref == "fault_triage"

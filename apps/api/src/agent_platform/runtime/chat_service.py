@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, replace
 import json
+from pathlib import Path
 import re
 from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
@@ -15,6 +16,7 @@ from agent_platform.domain.models import (
     DraftAction,
     KnowledgeBase,
     LLMRuntimeConfig,
+    McpServer,
     OutputGuardRule,
     PluginConfig,
     ReleasePlan,
@@ -37,6 +39,7 @@ from agent_platform.infrastructure.repositories import (
     KnowledgeRepository,
     KnowledgeBaseRepository,
     LLMConfigRepository,
+    McpServerRepository,
     OutputGuardRuleRepository,
     PluginConfigRepository,
     ReleasePlanRepository,
@@ -49,6 +52,7 @@ from agent_platform.infrastructure.repositories import (
 from agent_platform.runtime.registry import CapabilityRegistry
 from agent_platform.runtime.package_loader import PackageLoader
 from agent_platform.runtime.package_router import PackageRouter
+from agent_platform.runtime.skill_executor import SkillExecutor
 from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
 from agent_platform.wiki.service import WikiService
 
@@ -89,6 +93,7 @@ class ChatService:
         llm_config: LLMConfigRepository,
         llm_client: OpenAICompatibleLLMClient,
         business_outputs: "BusinessOutputRepository | None" = None,
+        mcp_servers: McpServerRepository | None = None,
     ) -> None:
         self._registry = registry
         self._skills = skills
@@ -99,6 +104,7 @@ class ChatService:
         self._tool_overrides = tool_overrides
         self._output_guard_rules = output_guard_rules
         self._plugin_configs = plugin_configs
+        self._mcp_servers = mcp_servers
         self._releases = releases
         self._users = users
         self._drafts = drafts
@@ -393,61 +399,90 @@ class ChatService:
                     )
 
                 capability_name, payload = self._plan(message, intent)
-                if capability_name not in {item.name for item in candidate_capabilities}:
-                    raise PermissionError(f"Missing scope for capability: {capability_name}")
-                await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。", node_type="runtime"))
-                capability = self._registry.get(capability_name)
-                autonomy = self._evaluate_risk(capability)
-                await add_step(
-                    TraceStep(
-                        name="risk",
-                        status="completed",
-                        summary=f"风险等级 {capability.risk_level}，自主度上限：{autonomy}。",
-                        node_type="guard",
-                    )
-                )
-                self._ensure_scope(context=context, required_scope=capability.required_scope)
-                self._check_quota(message)
-                await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。", node_type="guard"))
-
-                if selected_skill is not None and selected_skill.name == "report_compose":
-                    result = await self._run_report_compose_skill(
+                if selected_skill is not None and selected_skill.steps:
+                    await add_step(TraceStep(name="planned", status="completed", summary=f"命中 Skill steps: {selected_skill.name}。", node_type="runtime"))
+                    await add_step(TraceStep(name="risk", status="completed", summary="Skill steps 将逐步执行，每步按 capability/tool 自身治理约束处理。", node_type="guard"))
+                    self._check_quota(message)
+                    await add_step(TraceStep(name="governance", status="completed", summary="请求配额校验通过，进入 Skill steps 编排。", node_type="guard"))
+                    result = await self._run_declarative_skill(
+                        skill=selected_skill,
+                        inputs=payload,
                         tenant_id=context.tenant_id,
-                        query=payload["query"],
                         add_step=add_step,
                     )
-                elif intent == "knowledge_query":
-                    result = await self._run_knowledge_search(
-                        context.tenant_id, payload["query"], add_step=add_step
+                    await add_step(
+                        TraceStep(
+                            name="executed",
+                            status="completed",
+                            summary=f"Skill {selected_skill.name} steps 执行完成。",
+                            node_type="skill",
+                            ref=selected_skill.name,
+                            ref_source=selected_skill.source,
+                            ref_version=selected_skill.version,
+                        )
                     )
-                elif intent == "wiki_query":
-                    result = await self._run_wiki_search(
-                        tenant_id=context.tenant_id,
-                        user_id=context.user_id,
-                        query=payload["query"],
-                    )
+                    answer, sources = self._compose_skill_answer(selected_skill, result)
+                    capability = None
+                    continue_to_post_model = False
                 else:
-                    tenant_config = await self._load_capability_tenant_config(
-                        tenant_id=context.tenant_id,
-                        capability_name=capability_name,
-                    )
-                    result = self._registry.invoke(
-                        capability_name,
-                        payload,
-                        tenant_config=tenant_config,
-                    )
-                await add_step(
-                    TraceStep(
-                        name="executed",
-                        status="completed",
-                        summary=self._execution_summary(capability_name, result),
-                        node_type="capability",
-                        ref=capability_name,
-                        ref_source="package",
-                    )
-                )
+                    continue_to_post_model = True
 
-                answer, sources = self._compose_answer(intent, result)
+                if continue_to_post_model and capability_name not in {item.name for item in candidate_capabilities}:
+                    raise PermissionError(f"Missing scope for capability: {capability_name}")
+                if continue_to_post_model:
+                    await add_step(TraceStep(name="planned", status="completed", summary=f"命中 capability: {capability_name}。", node_type="runtime"))
+                    capability = self._registry.get(capability_name)
+                    autonomy = self._evaluate_risk(capability)
+                    await add_step(
+                        TraceStep(
+                            name="risk",
+                            status="completed",
+                            summary=f"风险等级 {capability.risk_level}，自主度上限：{autonomy}。",
+                            node_type="guard",
+                        )
+                    )
+                    self._ensure_scope(context=context, required_scope=capability.required_scope)
+                    self._check_quota(message)
+                    await add_step(TraceStep(name="governance", status="completed", summary="权限与请求配额校验通过。", node_type="guard"))
+
+                    if selected_skill is not None and selected_skill.name == "report_compose":
+                        result = await self._run_report_compose_skill(
+                            tenant_id=context.tenant_id,
+                            query=payload["query"],
+                            add_step=add_step,
+                        )
+                    elif intent == "knowledge_query":
+                        result = await self._run_knowledge_search(
+                            context.tenant_id, payload["query"], add_step=add_step
+                        )
+                    elif intent == "wiki_query":
+                        result = await self._run_wiki_search(
+                            tenant_id=context.tenant_id,
+                            user_id=context.user_id,
+                            query=payload["query"],
+                        )
+                    else:
+                        tenant_config = await self._load_capability_tenant_config(
+                            tenant_id=context.tenant_id,
+                            capability_name=capability_name,
+                        )
+                        result = self._registry.invoke(
+                            capability_name,
+                            payload,
+                            tenant_config=tenant_config,
+                        )
+                    await add_step(
+                        TraceStep(
+                            name="executed",
+                            status="completed",
+                            summary=self._execution_summary(capability_name, result),
+                            node_type="capability",
+                            ref=capability_name,
+                            ref_source="package",
+                        )
+                    )
+
+                    answer, sources = self._compose_answer(intent, result)
             if intent == "knowledge_query":
                 llm_answer = await self._generate_rag_llm_answer(
                     tenant_id=context.tenant_id,
@@ -813,6 +848,7 @@ class ChatService:
         packages = self._admin_package_catalog()
         return {
             "packages": packages,
+            "package_diagnostics": self._registry.list_diagnostics(),
             "capabilities": [
                 {
                     "name": item.name,
@@ -833,6 +869,8 @@ class ChatService:
                     "package_id": item.package_id,
                     "depends_on_capabilities": list(item.depends_on_capabilities),
                     "depends_on_tools": list(item.depends_on_tools),
+                    "steps": list(item.steps),
+                    "outputs_mapping": dict(item.outputs_mapping),
                 }
                 for item in skills
             ],
@@ -1023,8 +1061,111 @@ class ChatService:
         plugin_name = self._registry.get_plugin_name_for_capability(capability_name)
         record = await self._plugin_configs.get(tenant_id, plugin_name)
         if record is None:
-            return {}
-        return dict(record.config) if record.config else {}
+            return {"tenant_id": tenant_id}
+        config = dict(record.config) if record.config else {}
+        config["tenant_id"] = tenant_id
+        mcp_servers = getattr(self, "_mcp_servers", None)
+        if mcp_servers is not None:
+            server_name = str(config.get("mcp_server") or "").strip()
+            if server_name:
+                server = await mcp_servers.get(server_name)
+                if server is not None:
+                    servers = config.get("mcp_servers")
+                    if not isinstance(servers, dict):
+                        servers = {}
+                    servers[server.name] = self._serialize_mcp_server_for_executor(server)
+                    config["mcp_servers"] = servers
+        return config
+
+    async def list_mcp_servers(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+        mcp_servers = getattr(self, "_mcp_servers", None)
+        if mcp_servers is None:
+            return {"servers": []}
+        servers = await mcp_servers.list_all()
+        return {"servers": [self._serialize_mcp_server(item) for item in servers]}
+
+    async def upsert_mcp_server(
+        self,
+        *,
+        name: str,
+        transport: str,
+        endpoint: str,
+        auth_ref: str = "",
+        headers: dict[str, object] | None = None,
+        status: str = "active",
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        mcp_servers = getattr(self, "_mcp_servers", None)
+        if mcp_servers is None:
+            raise ValueError("MCP server registry is not configured")
+        normalized_name = name.strip()
+        normalized_transport = transport.strip().lower()
+        normalized_endpoint = endpoint.strip()
+        normalized_auth_ref = auth_ref.strip()
+        normalized_status = status.strip().lower()
+        if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", normalized_name):
+            raise ValueError("name only supports letters, numbers, dot, underscore, colon and hyphen")
+        if normalized_transport not in {"streamable-http", "http"}:
+            raise ValueError("Unsupported MCP transport")
+        if not normalized_endpoint.startswith(("http://", "https://")):
+            raise ValueError("endpoint must start with http:// or https://")
+        if normalized_status not in {"active", "disabled"}:
+            raise ValueError("Unsupported MCP server status")
+        normalized_headers = headers or {}
+        if not isinstance(normalized_headers, dict):
+            raise ValueError("headers must be an object")
+        for key, value in normalized_headers.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("headers keys must be non-empty strings")
+            if not isinstance(value, str):
+                raise ValueError("headers values must be strings")
+
+        existing = await mcp_servers.get(normalized_name)
+        server = await mcp_servers.upsert(
+            McpServer(
+                server_id=existing.server_id if existing else f"mcp-{uuid4().hex[:12]}",
+                name=normalized_name,
+                transport=normalized_transport,
+                endpoint=normalized_endpoint,
+                auth_ref=normalized_auth_ref,
+                headers=dict(normalized_headers),
+                status=normalized_status,
+            )
+        )
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"MCP Server 已更新：{normalized_name}",
+            status="已记录",
+        )
+        return self._serialize_mcp_server(server)
+
+    async def delete_mcp_server(
+        self,
+        name: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        mcp_servers = getattr(self, "_mcp_servers", None)
+        if mcp_servers is None:
+            raise ValueError("MCP server registry is not configured")
+        normalized_name = name.strip()
+        removed = await mcp_servers.delete(normalized_name)
+        if not removed:
+            raise ValueError("MCP server not found")
+        await self._record_admin_audit_event(
+            context=context,
+            title=f"MCP Server 已删除：{normalized_name}",
+            status="已记录",
+        )
+        return {"name": normalized_name, "deleted": True}
 
     async def get_plugin_config_schema(self, plugin_name: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -1032,11 +1173,12 @@ class ChatService:
         plugin = self._registry.get_plugin(plugin_name)
         schema = self._normalize_plugin_config_schema(plugin.config_schema or {})
         saved_config = await self._plugin_configs.get(context.tenant_id, plugin_name)
+        config = dict(saved_config.config) if saved_config else {}
         return {
             "plugin_name": plugin_name,
             "capability": asdict(plugin.capability),
             "config_schema": schema,
-            "config": saved_config.config if saved_config else {},
+            "config": self._mask_plugin_config(config, schema),
             "auth_refs": self._available_auth_refs(plugin.auth_ref),
         }
 
@@ -1051,7 +1193,13 @@ class ChatService:
         self._ensure_tenant_management_scope(context)
         plugin = self._registry.get_plugin(plugin_name)
         schema = self._normalize_plugin_config_schema(plugin.config_schema or {})
-        normalized = self._validate_plugin_config(config, schema, self._available_auth_refs(plugin.auth_ref))
+        existing_config = await self._plugin_configs.get(context.tenant_id, plugin_name)
+        normalized = self._validate_plugin_config(
+            config,
+            schema,
+            self._available_auth_refs(plugin.auth_ref),
+            existing_config=dict(existing_config.config) if existing_config else None,
+        )
         saved_config = await self._plugin_configs.upsert(
             PluginConfig(
                 tenant_id=context.tenant_id,
@@ -1066,7 +1214,7 @@ class ChatService:
         )
         return {
             "plugin_name": plugin_name,
-            "config": saved_config.config,
+            "config": self._mask_plugin_config(dict(saved_config.config), schema),
         }
 
     async def list_system_overview(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
@@ -1359,6 +1507,7 @@ class ChatService:
         source_type: str,
         owner: str,
         knowledge_base_code: str,
+        attributes: dict[str, object] | None = None,
         tenant_id: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, object]:
@@ -1371,8 +1520,74 @@ class ChatService:
             source_type=source_type,
             owner=owner,
             knowledge_base_code=knowledge_base_code,
+            attributes=attributes,
         )
         return {"source": asdict(source)}
+
+    async def import_package_knowledge(
+        self,
+        package_id: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        auto_only: bool = False,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="admin:read")
+
+        package = self._find_package(package_id)
+        if package is None:
+            raise ValueError("Package not found")
+        bundle_path = package.get("bundle_path")
+        if not bundle_path:
+            raise ValueError("Package is not an installed bundle")
+
+        imports = package.get("knowledge_imports", [])
+        if not isinstance(imports, list):
+            raise ValueError("Package knowledge_imports is invalid")
+
+        imported: list[dict[str, object]] = []
+        skipped: list[dict[str, object]] = []
+        bundle_dir = Path(str(bundle_path))
+        for item in imports:
+            if not isinstance(item, dict):
+                continue
+            rel_path = str(item.get("file", "")).strip()
+            if auto_only and not bool(item.get("auto_import", False)):
+                skipped.append({"file": rel_path, "reason": "auto_import is false"})
+                continue
+            knowledge_path = PackageLoader._safe_join(bundle_dir, rel_path)
+            if not knowledge_path.exists():
+                raise ValueError(f"Knowledge file not found: {rel_path}")
+            content = knowledge_path.read_text(encoding="utf-8")
+            if not content.strip():
+                raise ValueError(f"Knowledge file is empty: {rel_path}")
+            attributes = item.get("attributes", {})
+            if attributes is not None and not isinstance(attributes, dict):
+                raise ValueError(f"Knowledge attributes must be an object: {rel_path}")
+            source = await self._knowledge_sources.ingest_text(
+                tenant_id=context.tenant_id,
+                name=str(item.get("name") or knowledge_path.name),
+                content=content,
+                source_type=str(item.get("source_type") or "Markdown"),
+                owner=str(item.get("owner") or f"bundle:{package_id}"),
+                knowledge_base_code=str(item.get("knowledge_base_code") or "knowledge"),
+                attributes=dict(attributes or {}),
+            )
+            imported.append(
+                {
+                    "file": rel_path,
+                    "source": asdict(source),
+                }
+            )
+
+        return {
+            "package_id": package_id,
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "imported": imported,
+            "skipped": skipped,
+        }
 
     async def create_knowledge_base(
         self,
@@ -1803,6 +2018,8 @@ class ChatService:
                 "package_id": item.package_id,
                 "depends_on_capabilities": item.depends_on_capabilities,
                 "depends_on_tools": item.depends_on_tools,
+                "steps": item.steps,
+                "outputs_mapping": item.outputs_mapping,
             }
             for item in self._skills.list_skills()
             if item.enabled
@@ -1921,7 +2138,7 @@ class ChatService:
                 return name
         return "张三"
 
-    def _plan(self, message: str, intent: str) -> tuple[str, dict[str, str]]:
+    def _plan(self, message: str, intent: str) -> tuple[str, dict[str, object]]:
         if intent == "procurement_draft":
             return (
                 "workflow.procurement.request.create",
@@ -1937,7 +2154,36 @@ class ChatService:
             return "wiki.search", {"query": message}
         if intent == "report_compose":
             return "knowledge.search", {"query": message}
+        if intent == "fault_diagnosis":
+            payload: dict[str, object] = {
+                "query": message,
+                "last_n": 5,
+            }
+            equipment_id = self._extract_equipment_id(message)
+            fault_code = self._extract_fault_code(message)
+            if equipment_id:
+                payload["equipment_id"] = equipment_id
+            if fault_code:
+                payload["fault_code"] = fault_code
+            return "knowledge.search", payload
         return "knowledge.search", {"query": message}
+
+    @staticmethod
+    def _extract_equipment_id(message: str) -> str | None:
+        patterns = [
+            r"([A-Za-z0-9_-]+(?:号)?(?:注塑机|机床|产线|设备|泵|电机|压缩机|机器人))",
+            r"(\d+\s*号\s*(?:注塑机|机床|产线|设备|泵|电机|压缩机|机器人))",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, message)
+            if match:
+                return re.sub(r"\s+", "", match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_fault_code(message: str) -> str | None:
+        match = re.search(r"\b[A-Z]{1,5}[-_]?\d{2,6}\b", message.upper())
+        return match.group(0) if match else None
 
     def _plan_platform_tool(
         self,
@@ -2011,8 +2257,17 @@ class ChatService:
             }
             if intent not in package_intents:
                 continue
+            package_id = str(package.get("package_id") or "").strip()
+            source_kind = str(package.get("source_kind") or "catalog")
             names.extend(
-                str(skill.get("name"))
+                (
+                    f"{package_id}::{str(skill.get('name'))}"
+                    if (
+                        package_id
+                        and str(skill.get("source") or ("package" if source_kind == "bundle" else "")) == "package"
+                    )
+                    else str(skill.get("name"))
+                )
                 for skill in package.get("skills", [])
                 if isinstance(skill, dict) and str(skill.get("name", "")).strip()
             )
@@ -2067,6 +2322,39 @@ class ChatService:
             )
         )
         return result
+
+    async def _run_declarative_skill(
+        self,
+        *,
+        skill: SkillDefinition,
+        inputs: dict[str, object],
+        tenant_id: str,
+        add_step: Callable[[TraceStep], Awaitable[None]],
+    ) -> dict[str, object]:
+        async def load_tenant_config(capability_name: str) -> dict[str, object]:
+            capability = self._registry.get(capability_name)
+            self._ensure_scope(
+                context=UserContext(
+                    tenant_id=tenant_id,
+                    user_id="skill_executor",
+                    role="runtime",
+                    scopes=[],
+                ),
+                required_scope=capability.required_scope,
+            )
+            return await self._load_capability_tenant_config(
+                tenant_id=tenant_id,
+                capability_name=capability_name,
+            )
+
+        executor = SkillExecutor(
+            registry=self._registry,
+            tools=self._tools,
+            load_tenant_config=load_tenant_config,
+            add_step=add_step,
+        )
+        result = await executor.execute(skill, inputs)
+        return result.outputs
 
     async def _run_report_compose_skill(
         self,
@@ -2139,6 +2427,24 @@ class ChatService:
                 ],
             )
         return (f"Tool {tool_name} 执行完成。", [])
+
+    @staticmethod
+    def _compose_skill_answer(skill: SkillDefinition, result: dict[str, object]) -> tuple[str, list[SourceReference]]:
+        sources = [item for item in result.get("sources", []) if isinstance(item, SourceReference)]
+        summary = result.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary, sources
+        visible_items = {
+            key: value
+            for key, value in result.items()
+            if key not in {"sources", "step_results"} and value not in (None, "", [], {})
+        }
+        if visible_items:
+            return (
+                f"Skill {skill.name} 执行完成：{json.dumps(visible_items, ensure_ascii=False, default=str)}",
+                sources,
+            )
+        return (f"Skill {skill.name} 执行完成。", sources)
 
     async def _run_knowledge_search(
         self,
@@ -2549,14 +2855,22 @@ class ChatService:
             upper = (base[0], base[1] + 1, 0)
             return target >= base and target < upper
         for constraint in constraints.split():
-            if constraint.startswith(">=") and target < ChatService._version_tuple(constraint[2:]):
-                return False
-            if constraint.startswith(">") and target <= ChatService._version_tuple(constraint[1:]):
-                return False
-            if constraint.startswith("<=") and target > ChatService._version_tuple(constraint[2:]):
-                return False
-            if constraint.startswith("<") and target >= ChatService._version_tuple(constraint[1:]):
-                return False
+            if constraint.startswith(">="):
+                if target < ChatService._version_tuple(constraint[2:]):
+                    return False
+                continue
+            if constraint.startswith(">"):
+                if target <= ChatService._version_tuple(constraint[1:]):
+                    return False
+                continue
+            if constraint.startswith("<="):
+                if target > ChatService._version_tuple(constraint[2:]):
+                    return False
+                continue
+            if constraint.startswith("<"):
+                if target >= ChatService._version_tuple(constraint[1:]):
+                    return False
+                continue
             if constraint[0].isdigit() and target != ChatService._version_tuple(constraint):
                 return False
         return True
@@ -2574,6 +2888,32 @@ class ChatService:
 
     @staticmethod
     def _normalize_plugin_config_schema(schema: dict[str, object]) -> dict[str, object]:
+        def normalize_field(field_name: str, raw_config: dict[str, object]) -> dict[str, object]:
+            field_config = dict(raw_config)
+            if "array<" in str(field_config.get("type")):
+                field_config["type"] = "array"
+                field_config.setdefault("items", {"type": "string"})
+            if field_config.pop("secret", False):
+                field_config["format"] = "secret-ref"
+            if field_config.get("type") == "object":
+                nested_properties: dict[str, object] = {}
+                nested_required: list[str] = []
+                raw_nested = field_config.get("properties")
+                if isinstance(raw_nested, dict):
+                    for nested_name, nested_config in raw_nested.items():
+                        if not isinstance(nested_config, dict):
+                            continue
+                        normalized_nested = normalize_field(str(nested_name), nested_config)
+                        if normalized_nested.pop("required", False):
+                            nested_required.append(str(nested_name))
+                        nested_properties[str(nested_name)] = normalized_nested
+                if isinstance(field_config.get("required"), list):
+                    nested_required.extend(str(item) for item in field_config["required"])  # type: ignore[index]
+                field_config["properties"] = nested_properties
+                field_config["required"] = list(dict.fromkeys(nested_required))
+                field_config.setdefault("additionalProperties", field_name == "secrets" and not nested_properties)
+            return field_config
+
         properties: dict[str, object] = {}
         required: list[str] = []
         raw_properties = schema.get("properties") if "properties" in schema else schema
@@ -2582,12 +2922,7 @@ class ChatService:
         for field_name, raw_config in raw_properties.items():
             if not isinstance(raw_config, dict):
                 continue
-            field_config = dict(raw_config)
-            if "array<" in str(field_config.get("type")):
-                field_config["type"] = "array"
-                field_config.setdefault("items", {"type": "string"})
-            if field_config.pop("secret", False):
-                field_config["format"] = "secret-ref"
+            field_config = normalize_field(str(field_name), raw_config)
             if field_config.pop("required", False):
                 required.append(str(field_name))
             properties[str(field_name)] = field_config
@@ -2617,6 +2952,8 @@ class ChatService:
         config: dict[str, object],
         schema: dict[str, object],
         auth_refs: list[str],
+        *,
+        existing_config: dict[str, object] | None = None,
     ) -> dict[str, object]:
         properties = schema.get("properties")
         required = schema.get("required", [])
@@ -2629,16 +2966,28 @@ class ChatService:
             if not isinstance(field_schema, dict):
                 continue
             value = config.get(field_name, field_schema.get("default"))
+            existing_value = (existing_config or {}).get(field_name)
             if field_name in required and value in (None, ""):
                 raise ValueError(f"Missing required config field: {field_name}")
             if value in (None, ""):
+                continue
+            field_type = field_schema.get("type")
+            if field_type == "object":
+                if not isinstance(value, dict):
+                    raise ValueError(f"Invalid object config field: {field_name}")
+                normalized[field_name] = ChatService._validate_object_config(
+                    field_name=field_name,
+                    value=value,
+                    schema=field_schema,
+                    auth_refs=auth_refs,
+                    existing_value=existing_value if isinstance(existing_value, dict) else None,
+                )
                 continue
             if field_schema.get("format") == "secret-ref":
                 if not isinstance(value, str) or value not in auth_refs:
                     raise ValueError(f"Invalid secret reference for field: {field_name}")
                 normalized[field_name] = value
                 continue
-            field_type = field_schema.get("type")
             if field_type == "integer":
                 normalized[field_name] = int(value)  # type: ignore[arg-type]
             elif field_type == "number":
@@ -2653,6 +3002,131 @@ class ChatService:
         if unknown_fields:
             raise ValueError(f"Unknown config fields: {', '.join(sorted(unknown_fields))}")
         return normalized
+
+    @staticmethod
+    def _validate_object_config(
+        *,
+        field_name: str,
+        value: dict[str, object],
+        schema: dict[str, object],
+        auth_refs: list[str],
+        existing_value: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        properties = schema.get("properties")
+        required = schema.get("required", [])
+        if not isinstance(properties, dict):
+            properties = {}
+        if not isinstance(required, list):
+            required = []
+
+        if not properties:
+            if not schema.get("additionalProperties", False):
+                if value:
+                    raise ValueError(f"Unknown config fields under {field_name}: {', '.join(sorted(value))}")
+                return {}
+            return {
+                key: ChatService._normalize_secret_value(key, raw_value, (existing_value or {}).get(key))
+                for key, raw_value in value.items()
+                if raw_value not in (None, "")
+            }
+
+        normalized: dict[str, object] = {}
+        for nested_name, nested_schema in properties.items():
+            if not isinstance(nested_schema, dict):
+                continue
+            raw_value = value.get(nested_name, nested_schema.get("default"))
+            existing_nested = (existing_value or {}).get(nested_name)
+            dotted_name = f"{field_name}.{nested_name}"
+            if nested_name in required and raw_value in (None, ""):
+                if existing_nested not in (None, ""):
+                    normalized[str(nested_name)] = existing_nested
+                    continue
+                raise ValueError(f"Missing required config field: {dotted_name}")
+            if raw_value in (None, ""):
+                continue
+            if field_name == "secrets":
+                normalized[str(nested_name)] = ChatService._normalize_secret_value(
+                    dotted_name,
+                    raw_value,
+                    existing_nested,
+                )
+                continue
+            if nested_schema.get("format") == "secret-ref":
+                if not isinstance(raw_value, str) or raw_value not in auth_refs:
+                    raise ValueError(f"Invalid secret reference for field: {dotted_name}")
+                normalized[str(nested_name)] = raw_value
+                continue
+            nested_type = nested_schema.get("type")
+            if nested_type == "integer":
+                normalized[str(nested_name)] = int(raw_value)  # type: ignore[arg-type]
+            elif nested_type == "number":
+                normalized[str(nested_name)] = float(raw_value)  # type: ignore[arg-type]
+            elif nested_type == "boolean":
+                normalized[str(nested_name)] = bool(raw_value)
+            elif nested_type == "array":
+                normalized[str(nested_name)] = raw_value if isinstance(raw_value, list) else [raw_value]
+            else:
+                normalized[str(nested_name)] = str(raw_value)
+        unknown_fields = set(value) - set(properties)
+        if unknown_fields and not schema.get("additionalProperties", False):
+            raise ValueError(f"Unknown config fields under {field_name}: {', '.join(sorted(unknown_fields))}")
+        if schema.get("additionalProperties", False):
+            for nested_name in sorted(unknown_fields):
+                raw_value = value[nested_name]
+                if raw_value in (None, ""):
+                    continue
+                normalized[str(nested_name)] = ChatService._normalize_secret_value(
+                    f"{field_name}.{nested_name}",
+                    raw_value,
+                    (existing_value or {}).get(nested_name),
+                )
+        return normalized
+
+    @staticmethod
+    def _normalize_secret_value(field_name: str, value: object, existing_value: object | None) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"Invalid secret value for field: {field_name}")
+        if ChatService._is_masked_secret(value) and isinstance(existing_value, str) and existing_value:
+            return existing_value
+        return value
+
+    @staticmethod
+    def _mask_plugin_config(config: dict[str, object], schema: dict[str, object]) -> dict[str, object]:
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return dict(config)
+        masked: dict[str, object] = {}
+        for field_name, value in config.items():
+            field_schema = properties.get(field_name)
+            if isinstance(field_schema, dict) and field_schema.get("type") == "object" and isinstance(value, dict):
+                masked[field_name] = ChatService._mask_object_config(field_name, value, field_schema)
+            else:
+                masked[field_name] = value
+        return masked
+
+    @staticmethod
+    def _mask_object_config(field_name: str, value: dict[str, object], schema: dict[str, object]) -> dict[str, object]:
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        masked: dict[str, object] = {}
+        for nested_name, nested_value in value.items():
+            nested_schema = properties.get(nested_name)
+            if field_name == "secrets":
+                masked[nested_name] = ChatService._mask_secret(str(nested_value))
+            else:
+                masked[nested_name] = nested_value
+        return masked
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        if not value:
+            return ""
+        return f"***{value[-4:]}" if len(value) > 4 else "***"
+
+    @staticmethod
+    def _is_masked_secret(value: str) -> bool:
+        return value == "***" or (value.startswith("***") and len(value) > 3)
 
     @staticmethod
     def _build_routing_decision(tenant: TenantProfile | None, intent: str, message: str = "") -> dict[str, object]:
@@ -3047,6 +3521,30 @@ class ChatService:
             "default_quota": default_quota,
             "default_timeout": default_timeout,
         }
+
+    @staticmethod
+    def _serialize_mcp_server(server: McpServer) -> dict[str, object]:
+        return {
+            "server_id": server.server_id,
+            "name": server.name,
+            "transport": server.transport,
+            "endpoint": server.endpoint,
+            "auth_ref": server.auth_ref,
+            "headers": dict(server.headers),
+            "status": server.status,
+        }
+
+    @staticmethod
+    def _serialize_mcp_server_for_executor(server: McpServer) -> dict[str, object]:
+        payload = {
+            "transport": server.transport,
+            "endpoint": server.endpoint,
+            "headers": dict(server.headers),
+            "status": server.status,
+        }
+        if server.auth_ref:
+            payload["auth_ref"] = server.auth_ref
+        return payload
 
     @staticmethod
     def _serialize_output_guard_rule(rule: OutputGuardRule, events: list[dict[str, object]]) -> dict[str, object]:

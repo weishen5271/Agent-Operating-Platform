@@ -64,6 +64,15 @@ class PluginConfigUpdateRequest(BaseModel):
     config: dict[str, object] = Field(default_factory=dict)
 
 
+class McpServerUpsertRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    transport: Literal["streamable-http", "http"] = Field(default="streamable-http")
+    endpoint: str = Field(..., min_length=1, max_length=1024)
+    auth_ref: str = Field(default="", max_length=255)
+    headers: dict[str, str] = Field(default_factory=dict)
+    status: Literal["active", "disabled"] = Field(default="active")
+
+
 class ToolOverrideUpdateRequest(BaseModel):
     tenant_id: str = Field(..., max_length=64)
     tool_name: str = Field(..., max_length=128)
@@ -92,6 +101,12 @@ class KnowledgeIngestRequest(BaseModel):
     content: str = Field(..., min_length=1)
     source_type: str = Field(default="Markdown", max_length=64)
     owner: str = Field(default="知识平台组", max_length=255)
+    attributes: dict[str, object] = Field(default_factory=dict)
+
+
+class PackageKnowledgeImportRequest(BaseModel):
+    package_id: str = Field(..., min_length=1, max_length=255)
+    auto_only: bool = Field(default=False)
 
 
 class WikiCompileRequest(BaseModel):
@@ -184,6 +199,22 @@ async def uninstall_package_bundle(package_id: str, auth: AuthContext) -> dict[s
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/packages/knowledge/import")
+async def import_package_knowledge(payload: PackageKnowledgeImportRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.import_package_knowledge(
+            package_id=payload.package_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            auto_only=payload.auto_only,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/packages/{package_id:path}")
 async def package_detail(package_id: str, auth: AuthContext) -> dict[str, object]:
     tenant_id, user_id = auth
@@ -230,6 +261,76 @@ async def update_plugin_config(
         raise HTTPException(status_code=404, detail="Plugin not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/mcp-servers")
+async def list_mcp_servers(auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.list_mcp_servers(tenant_id=tenant_id, user_id=user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/mcp-servers")
+async def upsert_mcp_server(payload: McpServerUpsertRequest, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.upsert_mcp_server(
+            name=payload.name,
+            transport=payload.transport,
+            endpoint=payload.endpoint,
+            auth_ref=payload.auth_ref,
+            headers=dict(payload.headers),
+            status=payload.status,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/mcp-servers/{server_name}")
+async def update_mcp_server(
+    server_name: str,
+    payload: McpServerUpsertRequest,
+    auth: AuthContext,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    if payload.name != server_name:
+        raise HTTPException(status_code=400, detail="Payload name must match path server_name")
+    try:
+        return await chat_service.upsert_mcp_server(
+            name=payload.name,
+            transport=payload.transport,
+            endpoint=payload.endpoint,
+            auth_ref=payload.auth_ref,
+            headers=dict(payload.headers),
+            status=payload.status,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/mcp-servers/{server_name}")
+async def delete_mcp_server(server_name: str, auth: AuthContext) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.delete_mcp_server(
+            name=server_name,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/system")
@@ -824,6 +925,7 @@ async def ingest_knowledge_source(payload: KnowledgeIngestRequest, auth: AuthCon
             content=payload.content,
             source_type=payload.source_type,
             owner=payload.owner,
+            attributes=payload.attributes,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

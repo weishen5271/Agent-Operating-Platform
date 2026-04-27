@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_system_prompt: str = "你是企业级 Agent 平台中的智能助手，回答要准确、结构清晰，并优先引用已知上下文。"
     secret_key: str = "your-secret-key-change-in-production"
+    plugin_config_encryption_key: str | None = None
+    http_executor_allowlist: list[str] = []
 
     model_config = SettingsConfigDict(env_prefix="AOP_", extra="ignore")
 
