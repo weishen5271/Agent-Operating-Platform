@@ -90,7 +90,9 @@ def base_binding() -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def clear_idempotency_cache() -> None:
+def clear_http_executor_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 单测使用 RecordingHttpClient，不应受本机 config.toml 的本地联调 allowlist 影响。
+    monkeypatch.setattr(settings, "http_executor_allowlist", [])
     HttpExecutor.clear_idempotency_cache()
     HttpExecutor.clear_rate_limit_buckets()
 
@@ -299,6 +301,20 @@ def test_http_executor_allowlist_can_permit_private_cidr(monkeypatch: pytest.Mon
 
     assert result["items"] == [{"id": "item-1"}]
     assert client.requests[0]["url"] == "http://10.2.3.4/api/items/eq-1"
+
+
+def test_http_executor_allowlist_can_permit_loopback_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "http_executor_allowlist", ["127.0.0.1"])
+    client = RecordingHttpClient(responses=[httpx.Response(200, json={"data": [{"id": "workorder-1"}]})])
+    executor = build_executor(client, base_binding())
+
+    result = executor.invoke_with_config(
+        {"equipment_id": "EQ-CNC-650-01", "summary": "history"},
+        tenant_config={"endpoint": "http://127.0.0.1:18081", "secrets": {"token": "secret-token"}},
+    )
+
+    assert result["items"] == [{"id": "workorder-1"}]
+    assert client.requests[0]["url"] == "http://127.0.0.1:18081/api/items/EQ-CNC-650-01"
 
 
 def test_http_executor_allowlist_restricts_public_hosts(monkeypatch: pytest.MonkeyPatch) -> None:

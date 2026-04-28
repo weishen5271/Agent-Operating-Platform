@@ -229,6 +229,11 @@ class SkillRegistry:
             version=str(raw["version"]),
             source=source,
             package_id=str(package_id) if package_id else None,
+            intents=[
+                str(item)
+                for item in raw.get("intents", [])
+                if str(item).strip()
+            ],
             depends_on_capabilities=[
                 str(item)
                 for item in raw.get("depends_on_capabilities", [])

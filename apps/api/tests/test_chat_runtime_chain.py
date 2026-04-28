@@ -292,6 +292,11 @@ def build_fault_triage_package() -> dict[str, object]:
         "source_kind": "bundle",
         "intents": [
             {
+                "name": "work_order_query",
+                "score": 0.95,
+                "keywords": ["维修工单", "工单信息", "历史工单"],
+            },
+            {
                 "name": "fault_diagnosis",
                 "score": 0.9,
                 "keywords": ["注塑机", "AX-203", "怎么处理"],
@@ -299,9 +304,46 @@ def build_fault_triage_package() -> dict[str, object]:
         ],
         "skills": [
             {
+                "name": "work_order_history_query",
+                "description": "Test-only work order history query skill",
+                "version": "1.0.0",
+                "intents": ["work_order_query"],
+                "inputs": {
+                    "query": {"type": "string", "required": True},
+                    "equipment_id": {"type": "string", "required": True},
+                    "last_n": {"type": "integer", "default": 5},
+                },
+                "steps": [
+                    {
+                        "id": "history",
+                        "capability": "cmms.work_order.history",
+                        "input": {
+                            "equipment_id": "$inputs.equipment_id",
+                            "last_n": "$inputs.last_n",
+                        },
+                    }
+                ],
+                "outputs_mapping": {
+                    "summary": "已查询设备 $inputs.equipment_id 的维修工单。",
+                    "equipment_id": "$inputs.equipment_id",
+                    "workorders": "$steps.history.workorders",
+                    "total": "$steps.history.total",
+                },
+                "depends_on_capabilities": ["cmms.work_order.history"],
+                "depends_on_tools": [],
+                "enabled": True,
+            },
+            {
                 "name": "fault_triage",
                 "description": "Test-only fault triage skill",
                 "version": "1.0.0",
+                "intents": ["fault_diagnosis"],
+                "inputs": {
+                    "query": {"type": "string", "required": True},
+                    "equipment_id": {"type": "string", "required": True},
+                    "fault_code": {"type": "string", "required": False},
+                    "last_n": {"type": "integer", "default": 5},
+                },
                 "steps": [
                     {
                         "id": "alarms",
@@ -688,7 +730,7 @@ def test_dialogue_can_invoke_platform_json_path_tool() -> None:
     assert tool_step.ref == "json_path"
 
 
-def test_fault_diagnosis_plan_extracts_equipment_and_fault_code_from_message() -> None:
+def test_fault_diagnosis_plan_only_keeps_runtime_context() -> None:
     traces = FakeTraceRepository()
     service = build_service(
         traces=traces,
@@ -699,13 +741,132 @@ def test_fault_diagnosis_plan_extracts_equipment_and_fault_code_from_message() -
     capability_name, payload = service._plan("3 号注塑机昨晚报 AX-203，怎么处理？", "fault_diagnosis")
 
     assert capability_name == "knowledge.search"
-    assert payload["equipment_id"] == "3号注塑机"
-    assert payload["fault_code"] == "AX-203"
+    assert "equipment_id" not in payload
+    assert "fault_code" not in payload
     assert payload["last_n"] == 5
     assert payload["query"] == "3 号注塑机昨晚报 AX-203，怎么处理？"
 
 
-def test_fault_diagnosis_chat_runs_declarative_skill_steps(monkeypatch) -> None:
+def test_fault_diagnosis_chat_resolves_inputs_then_runs_declarative_skill_steps(monkeypatch) -> None:
+    from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
+
+    loader = MemoryPackageLoader([build_fault_triage_package()])
+    monkeypatch.setattr(PackageLoader, "default", classmethod(lambda cls: loader))
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient(
+        [
+            '{"intent":"fault_diagnosis","action_type":"skill","action_name":"fault_triage","arguments":{},"reason":"设备故障诊断"}',
+            '{"equipment_id":"EQ-001"}',
+            "EQ-001故障诊断",
+        ]
+    )
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+    service._registry = CapabilityRegistry(loader=loader)
+    service._skills = SkillRegistry(loader=loader)
+    service._tools = ToolRegistry()
+
+    response = asyncio.run(
+        service.complete(
+            message="设备 EQ-001 出现电机过热，帮我判断原因和处置方案",
+            tenant_id="tenant-demo",
+            user_id="user-demo",
+            primary_package="pkg.test_fault_triage",
+        )
+    )
+
+    assert response["intent"] == "fault_diagnosis"
+    assert "已完成设备 EQ-001 的故障排查编排" in response["message"]["content"]
+    assert traces.saved is not None
+    step_names = [step.name for step in traces.saved.steps]
+    assert "slot_fill" in step_names
+    assert "skill_step:alarms" in step_names
+    assert "skill_step:history" in step_names
+    assert "skill_step:knowledge" in step_names
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    assert skill_step.ref == "fault_triage"
+    executed_step = next(step for step in traces.saved.steps if step.name == "executed")
+    assert executed_step.node_type == "skill"
+    assert executed_step.ref == "fault_triage"
+
+
+def test_work_order_query_routes_to_work_order_skill(monkeypatch) -> None:
+    from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
+
+    loader = MemoryPackageLoader([build_fault_triage_package()])
+    monkeypatch.setattr(PackageLoader, "default", classmethod(lambda cls: loader))
+    traces = FakeTraceRepository()
+    llm_client = FakeLLMClient(
+        [
+            '{"intent":"work_order_query","action_type":"skill","action_name":"work_order_history_query","arguments":{},"reason":"查询设备维修工单"}',
+            '{"equipment_id":"EQ-CNC-650-01"}',
+            "EQ-CNC-650-01维修工单",
+        ]
+    )
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+    service._registry = CapabilityRegistry(loader=loader)
+    service._skills = SkillRegistry(loader=loader)
+    service._tools = ToolRegistry()
+
+    response = asyncio.run(
+        service.complete(
+            message="EQ-CNC-650-01 这不就是业务号么 我要看它的维修工单信息",
+            tenant_id="tenant-demo",
+            user_id="user-demo",
+            primary_package="pkg.test_fault_triage",
+        )
+    )
+
+    assert response["intent"] == "work_order_query"
+    assert "设备 EQ-CNC-650-01" in response["message"]["content"]
+    assert traces.saved is not None
+    step_names = [step.name for step in traces.saved.steps]
+    assert "slot_fill" in step_names
+    assert "skill_step:history" in step_names
+    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
+    assert skill_step.ref == "work_order_history_query"
+
+
+def test_work_order_skill_answer_includes_returned_workorders() -> None:
+    from agent_platform.domain.models import SkillDefinition
+
+    answer, sources = ChatService._compose_skill_answer(
+        SkillDefinition(
+            name="work_order_history_query",
+            description="query work orders",
+            version="1.0.0",
+            source="package",
+        ),
+        {
+            "equipment_id": "EQ-CNC-650-01",
+            "workorders": [
+                {
+                    "work_order_id": "WO-20260418-0017",
+                    "status": "closed",
+                    "priority": "high",
+                    "created_at": "2026-04-18T08:42:00+08:00",
+                    "symptom": "X 轴伺服过载报警",
+                    "root_cause": "X 轴丝杆防护罩积屑",
+                    "actions": ["清理 X 轴导轨", "检查润滑泵"],
+                }
+            ],
+        },
+    )
+
+    assert sources == []
+    assert "WO-20260418-0017" in answer
+    assert "X 轴伺服过载报警" in answer
+    assert "清理 X 轴导轨" in answer
+
+
+def test_fault_diagnosis_missing_equipment_id_asks_for_required_input(monkeypatch) -> None:
     from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
 
     loader = MemoryPackageLoader([build_fault_triage_package()])
@@ -722,7 +883,7 @@ def test_fault_diagnosis_chat_runs_declarative_skill_steps(monkeypatch) -> None:
 
     response = asyncio.run(
         service.complete(
-            message="3 号注塑机昨晚报 AX-203，怎么处理？",
+            message="AX-203 怎么处理？",
             tenant_id="tenant-demo",
             user_id="user-demo",
             primary_package="pkg.test_fault_triage",
@@ -730,14 +891,9 @@ def test_fault_diagnosis_chat_runs_declarative_skill_steps(monkeypatch) -> None:
     )
 
     assert response["intent"] == "fault_diagnosis"
-    assert "已完成设备 3号注塑机 的故障排查编排" in response["message"]["content"]
+    assert "设备编号或设备名称" in response["message"]["content"]
+    assert any("equipment_id" in tip for tip in response["warnings"])
     assert traces.saved is not None
-    step_names = [step.name for step in traces.saved.steps]
-    assert "skill_step:alarms" in step_names
-    assert "skill_step:history" in step_names
-    assert "skill_step:knowledge" in step_names
-    skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
-    assert skill_step.ref == "fault_triage"
-    executed_step = next(step for step in traces.saved.steps if step.name == "executed")
-    assert executed_step.node_type == "skill"
-    assert executed_step.ref == "fault_triage"
+    assert "skill_step:alarms" not in [step.name for step in traces.saved.steps]
+    planned_step = next(step for step in traces.saved.steps if step.name == "planned")
+    assert planned_step.status == "skipped"

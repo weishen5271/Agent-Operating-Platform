@@ -436,6 +436,39 @@ class ChatService:
 
                 capability_name, payload = self._plan(message, intent)
                 if selected_skill is not None and selected_skill.steps:
+                    payload = await self._fill_skill_inputs_with_llm(
+                        tenant_id=context.tenant_id,
+                        message=message,
+                        skill=selected_skill,
+                        payload=payload,
+                        add_step=add_step,
+                    )
+                    missing_inputs = self._missing_skill_inputs(selected_skill, payload)
+                    if missing_inputs:
+                        await add_step(
+                            TraceStep(
+                                name="planned",
+                                status="skipped",
+                                summary=(
+                                    f"Skill {selected_skill.name} 缺少必填入参："
+                                    f"{', '.join(missing_inputs)}，已暂停调用外部能力。"
+                                ),
+                                node_type="runtime",
+                            )
+                        )
+                        answer = self._compose_missing_skill_inputs_answer(selected_skill, missing_inputs)
+                        sources = []
+                        warnings.append(
+                            f"当前问题缺少 {', '.join(missing_inputs)}，未调用业务包 API。"
+                        )
+                        capability = None
+                        continue_to_post_model = False
+                    else:
+                        continue_to_post_model = True
+                else:
+                    continue_to_post_model = True
+
+                if selected_skill is not None and selected_skill.steps and continue_to_post_model:
                     # 声明式 skill.steps 由 SkillExecutor 编排，每一步都会单独写 Trace 便于追踪。
                     await add_step(TraceStep(name="planned", status="completed", summary=f"命中 Skill steps: {selected_skill.name}。", node_type="runtime"))
                     await add_step(TraceStep(name="risk", status="completed", summary="Skill steps 将逐步执行，每步按 capability/tool 自身治理约束处理。", node_type="guard"))
@@ -461,8 +494,6 @@ class ChatService:
                     answer, sources = self._compose_skill_answer(selected_skill, result)
                     capability = None
                     continue_to_post_model = False
-                else:
-                    continue_to_post_model = True
 
                 if continue_to_post_model and capability_name not in {item.name for item in candidate_capabilities}:
                     raise PermissionError(f"Missing scope for capability: {capability_name}")
@@ -2076,9 +2107,15 @@ class ChatService:
                 skill_name = str(skill.get("name") or "").strip()
                 if not skill_name:
                     continue
-                mapping[skill_name] = primary_intent
+                declared_intents = [
+                    str(item).strip()
+                    for item in skill.get("intents", [])
+                    if str(item).strip()
+                ]
+                skill_intent = declared_intents[0] if declared_intents else primary_intent
+                mapping[skill_name] = skill_intent
                 if package_id and str(skill.get("source") or ("package" if source_kind == "bundle" else "")) == "package":
-                    mapping[f"{package_id}::{skill_name}"] = primary_intent
+                    mapping[f"{package_id}::{skill_name}"] = skill_intent
         return mapping
 
     @classmethod
@@ -2215,6 +2252,8 @@ class ChatService:
             "JSON 格式：{\"intent\":\"...\",\"action_type\":\"tool|skill|capability|chat\",\"action_name\":\"...\",\"arguments\":{},\"reason\":\"...\"}。\n"
             "如果用户只是普通聊天或开放闲聊，intent=general_chat, action_type=chat。\n"
             "当选择 Tool 时，必须根据用户问题填写 arguments；不要让服务端猜参数。\n"
+            "如果用户要求查询、查看、获取业务系统记录或业务对象状态，且当前业务包存在匹配的 Skill/Capability，"
+            "必须选择 skill 或 capability；不要选择 knowledge_query 去解释 API 文档。\n"
             "time_now 参数使用 IANA timezone：北京时间用 Asia/Shanghai；美国时间若未指定城市/州，返回美国主要时区 "
             "[America/New_York, America/Chicago, America/Denver, America/Los_Angeles]；"
             "纽约用 America/New_York，洛杉矶用 America/Los_Angeles，芝加哥用 America/Chicago，丹佛用 America/Denver。\n"
@@ -2254,6 +2293,7 @@ class ChatService:
                 "description": item.description,
                 "source": item.source,
                 "package_id": item.package_id,
+                "intents": item.intents,
                 "depends_on_capabilities": item.depends_on_capabilities,
                 "depends_on_tools": item.depends_on_tools,
                 "steps": item.steps,
@@ -2302,6 +2342,7 @@ class ChatService:
                     "tool.json_path": "用户要求对 JSON 执行 JSONPath 查询时使用 json_path。",
                     "tool.http_fetch": "用户要求抓取或读取 URL 时使用 http_fetch。",
                     "knowledge_query": "用户明确要求基于文档、知识库、资料、依据、引用或专业行业资料回答时使用 kb_grounded_qa。",
+                    "work_order_query": "用户要求查看、查询设备维修工单、历史工单或维修记录时使用 work_order_history_query。",
                     "report_compose": "用户要求报告、汇总、总结或导出时使用 report_compose。",
                     "general_chat": "普通聊天、解释、闲聊、未要求外部事实或工具时使用。",
                 },
@@ -2390,7 +2431,11 @@ class ChatService:
                 return name
         return "张三"
 
-    def _plan(self, message: str, intent: str) -> tuple[str, dict[str, object]]:
+    def _plan(
+        self,
+        message: str,
+        intent: str,
+    ) -> tuple[str, dict[str, object]]:
         if intent == "procurement_draft":
             return (
                 "workflow.procurement.request.create",
@@ -2407,35 +2452,157 @@ class ChatService:
         if intent == "report_compose":
             return "knowledge.search", {"query": message}
         if intent == "fault_diagnosis":
-            payload: dict[str, object] = {
+            return "knowledge.search", {
                 "query": message,
                 "last_n": 5,
             }
-            equipment_id = self._extract_equipment_id(message)
-            fault_code = self._extract_fault_code(message)
-            if equipment_id:
-                payload["equipment_id"] = equipment_id
-            if fault_code:
-                payload["fault_code"] = fault_code
-            return "knowledge.search", payload
         return "knowledge.search", {"query": message}
 
-    @staticmethod
-    def _extract_equipment_id(message: str) -> str | None:
-        patterns = [
-            r"([A-Za-z0-9_-]+(?:号)?(?:注塑机|机床|产线|设备|泵|电机|压缩机|机器人))",
-            r"(\d+\s*号\s*(?:注塑机|机床|产线|设备|泵|电机|压缩机|机器人))",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, message)
-            if match:
-                return re.sub(r"\s+", "", match.group(1))
-        return None
+    async def _fill_skill_inputs_with_llm(
+        self,
+        *,
+        tenant_id: str,
+        message: str,
+        skill: SkillDefinition,
+        payload: dict[str, object],
+        add_step: Callable[[TraceStep], Awaitable[None]] | None = None,
+    ) -> dict[str, object]:
+        payload = self._apply_skill_input_defaults(skill, payload)
+        missing_inputs = self._missing_skill_inputs(skill, payload)
+        if not missing_inputs:
+            return payload
+        try:
+            config, api_key = await self._llm_config.get(tenant_id=tenant_id)
+        except Exception:
+            config, api_key = None, ""
+        if config is None or not getattr(config, "enabled", False) or not api_key:
+            if add_step is not None:
+                await add_step(
+                    TraceStep(
+                        name="slot_fill",
+                        status="skipped",
+                        summary="LLM Runtime 未启用，无法自动抽取 Skill 必填入参。",
+                        node_type="runtime",
+                    )
+                )
+            return payload
+
+        input_contract = {
+            name: schema
+            for name, schema in skill.inputs.items()
+            if isinstance(schema, dict)
+        }
+        prompt = (
+            "你是业务包 Skill 的参数抽取器，只从用户原文抽取字段，不回答问题。\n"
+            "根据 Skill 输入合同，从用户问题中抽取可明确识别的参数，返回 JSON 对象。\n"
+            "要求：\n"
+            "1. 只返回 JSON 对象，不要 Markdown，不要解释。\n"
+            "2. 不确定或原文未出现的字段不要返回，禁止猜测或补默认业务数据。\n"
+            "3. 保留原文中的业务编号、设备编号、故障码、日期等关键值，不要改写。\n"
+            "4. 已有参数不要覆盖，除非用户原文有更明确的同名字段。\n\n"
+            f"Skill: {skill.name}\n"
+            f"输入合同: {json.dumps(input_contract, ensure_ascii=False)}\n"
+            f"已有参数: {json.dumps(payload, ensure_ascii=False, default=str)}\n"
+            f"用户问题: {message}"
+        )
+        try:
+            raw = await asyncio.to_thread(
+                self._llm_client.complete,
+                config=config,
+                api_key=api_key,
+                user_message=prompt,
+                context_blocks=[],
+            )
+        except Exception:
+            if add_step is not None:
+                await add_step(
+                    TraceStep(
+                        name="slot_fill",
+                        status="failed",
+                        summary="LLM 参数抽取失败，保留已有参数并进入必填校验。",
+                        node_type="runtime",
+                    )
+                )
+            return payload
+
+        extracted = self._parse_slot_fill_payload(raw)
+        allowed_names = set(input_contract)
+        enriched = dict(payload)
+        for name, value in extracted.items():
+            if name not in allowed_names or value in (None, "", []):
+                continue
+            enriched[name] = value
+        if add_step is not None:
+            filled = sorted(
+                name
+                for name in allowed_names
+                if payload.get(name) in (None, "", []) and enriched.get(name) not in (None, "", [])
+            )
+            await add_step(
+                TraceStep(
+                    name="slot_fill",
+                    status="completed" if filled else "skipped",
+                    summary=(
+                        f"已基于 Skill 输入合同抽取参数：{', '.join(filled)}。"
+                        if filled
+                        else "未从用户问题中抽取到新的 Skill 入参。"
+                    ),
+                    node_type="runtime",
+                )
+            )
+        return enriched
 
     @staticmethod
-    def _extract_fault_code(message: str) -> str | None:
-        match = re.search(r"\b[A-Z]{1,5}[-_]?\d{2,6}\b", message.upper())
-        return match.group(0) if match else None
+    def _apply_skill_input_defaults(skill: SkillDefinition, payload: dict[str, object]) -> dict[str, object]:
+        enriched = dict(payload)
+        for name, schema in skill.inputs.items():
+            if not isinstance(schema, dict) or "default" not in schema:
+                continue
+            if enriched.get(name) in (None, "", []):
+                enriched[name] = schema["default"]
+        return enriched
+
+    @staticmethod
+    def _parse_slot_fill_payload(raw: str) -> dict[str, object]:
+        cleaned = raw.strip()
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL)
+        if fenced:
+            cleaned = fenced.group(1)
+        else:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                cleaned = cleaned[start:end + 1]
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
+    @staticmethod
+    def _missing_skill_inputs(skill: SkillDefinition, payload: dict[str, object]) -> list[str]:
+        missing: list[str] = []
+        for name, schema in skill.inputs.items():
+            if not isinstance(schema, dict) or not schema.get("required"):
+                continue
+            if payload.get(name) in (None, "", []):
+                missing.append(str(name))
+        return missing
+
+    @staticmethod
+    def _compose_missing_skill_inputs_answer(skill: SkillDefinition, missing_inputs: list[str]) -> str:
+        labels = {
+            "equipment_id": "设备编号或设备名称",
+            "fault_code": "故障码",
+            "last_n": "历史记录数量",
+        }
+        readable = "、".join(labels.get(item, item) for item in missing_inputs)
+        return (
+            f"要执行 {skill.name}，还需要补充：{readable}。\n"
+            "请把缺少的信息补充到问题里，我再调用对应业务包 API 和知识资料。"
+        )
 
     def _plan_platform_tool(
         self,
@@ -2533,6 +2700,7 @@ class ChatService:
                 )
                 for skill in package.get("skills", [])
                 if isinstance(skill, dict) and str(skill.get("name", "")).strip()
+                and cls._skill_matches_intent(skill, intent)
             )
             names.extend(
                 str(dependency.get("name"))
@@ -2546,6 +2714,15 @@ class ChatService:
         if intent == "report_compose":
             names.append("report_compose")
         return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _skill_matches_intent(skill: dict[str, object], intent: str) -> bool:
+        declared = [
+            str(item).strip()
+            for item in skill.get("intents", [])
+            if str(item).strip()
+        ]
+        return not declared or intent in declared
 
     @staticmethod
     def _common_skill_available(skill: SkillDefinition, tenant: TenantProfile | None) -> bool:
@@ -2698,6 +2875,8 @@ class ChatService:
     @staticmethod
     def _compose_skill_answer(skill: SkillDefinition, result: dict[str, object]) -> tuple[str, list[SourceReference]]:
         sources = [item for item in result.get("sources", []) if isinstance(item, SourceReference)]
+        if skill.name == "work_order_history_query":
+            return ChatService._compose_work_order_history_answer(result), sources
         summary = result.get("summary")
         if isinstance(summary, str) and summary.strip():
             return summary, sources
@@ -2712,6 +2891,38 @@ class ChatService:
                 sources,
             )
         return (f"Skill {skill.name} 执行完成。", sources)
+
+    @staticmethod
+    def _compose_work_order_history_answer(result: dict[str, object]) -> str:
+        equipment_id = str(result.get("equipment_id") or "").strip()
+        workorders = result.get("workorders")
+        if not isinstance(workorders, list) or not workorders:
+            return f"未查询到设备 {equipment_id or '指定设备'} 的维修工单。"
+
+        lines = [f"已查询到设备 {equipment_id or '指定设备'} 的维修工单 {len(workorders)} 条："]
+        for index, item in enumerate(workorders[:8], start=1):
+            if not isinstance(item, dict):
+                continue
+            order_id = item.get("work_order_id") or item.get("id") or f"#{index}"
+            status = item.get("status") or "未知状态"
+            priority = item.get("priority") or "未知优先级"
+            created_at = item.get("created_at") or item.get("created_time") or ""
+            symptom = item.get("symptom") or item.get("summary") or item.get("title") or ""
+            root_cause = item.get("root_cause") or ""
+            actions = item.get("actions")
+            action_text = ""
+            if isinstance(actions, list) and actions:
+                action_text = "；处置：" + "、".join(str(action) for action in actions[:3])
+            lines.append(
+                f"{index}. {order_id}｜状态：{status}｜优先级：{priority}"
+                f"{f'｜创建：{created_at}' if created_at else ''}"
+                f"{f'｜现象：{symptom}' if symptom else ''}"
+                f"{f'｜原因：{root_cause}' if root_cause else ''}"
+                f"{action_text}"
+            )
+        if len(workorders) > 8:
+            lines.append(f"其余 {len(workorders) - 8} 条未展开。")
+        return "\n".join(lines)
 
     async def _run_knowledge_search(
         self,

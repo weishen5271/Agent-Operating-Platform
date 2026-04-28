@@ -2,6 +2,7 @@
   "name": "fault_triage",
   "description": "根据设备号与故障码，输出故障语义、安全等级、推荐处置摘要。",
   "version": "1.0.0",
+  "intents": ["fault_diagnosis"],
   "inputs": {
     "query": { "type": "string", "required": true },
     "equipment_id": { "type": "string", "required": true },

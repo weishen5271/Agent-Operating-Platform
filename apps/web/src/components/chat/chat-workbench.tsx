@@ -7,15 +7,19 @@ import type { ReactNode } from "react";
 import {
   createChatConversation,
   deleteChatConversation,
+  getCurrentUser,
   getChatConversation,
   getChatConversations,
+  getTenantPackages,
   streamChatCompletion,
+  updateTenantPackages,
 } from "@/lib/api-client";
 import type {
   ChatCompletionResponse,
   ChatStreamEvent,
   ConversationListResponse,
   ConversationResponse,
+  TenantPackagesResponse,
   TraceResponse,
 } from "@/lib/api-client/types";
 import { chatData } from "@/lib/workspace-fixtures";
@@ -82,17 +86,23 @@ function aggregateUsedRefs(steps: RenderTraceStep[], type: "skill" | "tool"): Us
   return [...map.values()];
 }
 
-function readPackageContext() {
+function readPackageContext(defaults?: TenantPackagesResponse | null) {
   // 业务包上下文通过 URL 临时切换，只影响当前请求，不修改租户后台绑定。
   if (typeof window === "undefined") return undefined;
   const params = new URLSearchParams(window.location.search);
-  const primary = params.get("primary") || undefined;
-  const commons = params.get("commons")?.split(",").filter(Boolean) ?? [];
+  const primary = params.get("primary") || defaults?.primary_package || undefined;
+  const commons = params.get("commons")?.split(",").filter(Boolean) ?? defaults?.common_packages ?? [];
   if (!primary && commons.length === 0) return undefined;
   return {
     primary_package: primary,
     common_packages: commons,
   };
+}
+
+function packageLabel(packages: TenantPackagesResponse | null, packageId: string | null | undefined): string {
+  if (!packageId) return "未选择";
+  const item = packages?.available_packages.find((candidate) => candidate.package_id === packageId);
+  return item ? `${item.name}${item.version ? ` ${item.version}` : ""}` : packageId;
 }
 
 type RetrievalMode = "auto" | "rag" | "wiki";
@@ -275,6 +285,12 @@ export function ChatWorkbench() {
   const [input, setInput] = useState("");
   const [latestResponse, setLatestResponse] = useState<ChatCompletionResponse | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("auto");
+  const [tenantId, setTenantId] = useState<string | null>(null);
+  const [tenantPackages, setTenantPackages] = useState<TenantPackagesResponse | null>(null);
+  const [selectedPrimaryPackage, setSelectedPrimaryPackage] = useState("");
+  const [selectedCommonPackages, setSelectedCommonPackages] = useState<string[]>([]);
+  const [isSavingPackageDefaults, setIsSavingPackageDefaults] = useState(false);
+  const [packageError, setPackageError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const deltaBuffersRef = useRef<Record<string, string>>({});
@@ -310,6 +326,41 @@ export function ChatWorkbench() {
     return () => {
       cancelled = true;
       Object.values(typewriterTimersRef.current).forEach((timer) => window.clearInterval(timer));
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPackageContext() {
+      try {
+        const user = await getCurrentUser();
+        if (cancelled) return;
+        setTenantId(user.tenant_id);
+        const packages = await getTenantPackages(user.tenant_id);
+        if (cancelled) return;
+        const urlContext = readPackageContext(packages);
+        const fallbackPrimary =
+          urlContext?.primary_package ||
+          packages.primary_package ||
+          packages.available_packages.find((item) => item.domain === "industry")?.package_id ||
+          "";
+        setTenantPackages(packages);
+        setSelectedPrimaryPackage(fallbackPrimary);
+        setSelectedCommonPackages(urlContext?.common_packages ?? packages.common_packages);
+        setPackageError(null);
+      } catch (err) {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : "业务包上下文加载失败。";
+          setPackageError(message);
+        }
+      }
+    }
+
+    loadPackageContext();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -414,6 +465,59 @@ export function ChatWorkbench() {
   const usedSkills = aggregateUsedRefs(traceSteps, "skill");
   const usedTools = aggregateUsedRefs(traceSteps, "tool");
   const routing = latestResponse?.routing ?? null;
+  const industryPackages = tenantPackages?.available_packages.filter((item) => item.domain === "industry") ?? [];
+  const commonPackageOptions = tenantPackages?.available_packages.filter((item) => item.domain === "common") ?? [];
+  const selectedPackageStatus = tenantPackages?.available_packages.find(
+    (item) => item.package_id === selectedPrimaryPackage,
+  )?.status;
+
+  function syncPackageQuery(nextPrimary: string, nextCommons: string[]) {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (nextPrimary) {
+      params.set("primary", nextPrimary);
+    } else {
+      params.delete("primary");
+    }
+    if (nextCommons.length > 0) {
+      params.set("commons", nextCommons.join(","));
+    } else {
+      params.delete("commons");
+    }
+    const suffix = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${suffix ? `?${suffix}` : ""}`);
+  }
+
+  function selectPrimaryPackage(packageId: string) {
+    setSelectedPrimaryPackage(packageId);
+    syncPackageQuery(packageId, selectedCommonPackages);
+  }
+
+  function toggleCommonPackage(packageId: string) {
+    const next = selectedCommonPackages.includes(packageId)
+      ? selectedCommonPackages.filter((item) => item !== packageId)
+      : [...selectedCommonPackages, packageId];
+    setSelectedCommonPackages(next);
+    syncPackageQuery(selectedPrimaryPackage, next);
+  }
+
+  async function savePackageDefaults() {
+    if (!tenantId || !selectedPrimaryPackage) return;
+    setIsSavingPackageDefaults(true);
+    setPackageError(null);
+    try {
+      const updated = await updateTenantPackages(tenantId, {
+        primary_package: selectedPrimaryPackage,
+        common_packages: selectedCommonPackages,
+      });
+      setTenantPackages(updated);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "保存业务包默认配置失败。";
+      setPackageError(message);
+    } finally {
+      setIsSavingPackageDefaults(false);
+    }
+  }
 
   async function submitMessage(message: string) {
     const trimmed = message.trim();
@@ -455,7 +559,12 @@ export function ChatWorkbench() {
           handleStreamEvent(event, assistantMessageId, trimmed);
         },
         conversationId,
-        readPackageContext(),
+        selectedPrimaryPackage
+          ? {
+              primary_package: selectedPrimaryPackage,
+              common_packages: selectedCommonPackages,
+            }
+          : undefined,
       );
     } catch (err) {
       failed = true;
@@ -728,6 +837,65 @@ export function ChatWorkbench() {
               {item}
             </button>
           ))}
+        </div>
+
+        <div className="chat-package-context">
+          <div className="chat-package-main">
+            <label htmlFor="chat-primary-package">
+              <span className="material-symbols-outlined">deployed_code</span>
+              业务包
+            </label>
+            <select
+              id="chat-primary-package"
+              value={selectedPrimaryPackage}
+              disabled={isStreaming || !tenantPackages}
+              onChange={(event) => selectPrimaryPackage(event.target.value)}
+            >
+              <option value="">未选择业务包</option>
+              {industryPackages.map((item) => (
+                <option key={item.package_id} value={item.package_id}>
+                  {item.name} {item.version ?? ""}
+                </option>
+              ))}
+            </select>
+            <span className={`status-chip plain ${selectedPrimaryPackage ? "info" : "warning"}`}>
+              {selectedPackageStatus || (selectedPrimaryPackage ? "当前请求上下文" : "未选择")}
+            </span>
+          </div>
+
+          <div className="chat-package-common">
+            {commonPackageOptions.map((item) => (
+              <button
+                key={item.package_id}
+                type="button"
+                className={`package-chip ${selectedCommonPackages.includes(item.package_id) ? "active" : ""}`}
+                disabled={isStreaming}
+                onClick={() => toggleCommonPackage(item.package_id)}
+                title={item.package_id}
+              >
+                {item.name}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="secondary-button compact"
+              disabled={!tenantId || !selectedPrimaryPackage || isSavingPackageDefaults}
+              onClick={savePackageDefaults}
+            >
+              <span className="material-symbols-outlined">save</span>
+              {isSavingPackageDefaults ? "保存中..." : "设为默认"}
+            </button>
+          </div>
+
+          <div className="chat-package-summary">
+            <span>{packageLabel(tenantPackages, selectedPrimaryPackage)}</span>
+            {selectedCommonPackages.length > 0 ? (
+              <span>+ {selectedCommonPackages.map((item) => packageLabel(tenantPackages, item)).join("、")}</span>
+            ) : (
+              <span>未叠加通用包</span>
+            )}
+          </div>
+          {packageError ? <p className="inline-error">{packageError}</p> : null}
         </div>
 
         <div className="retrieval-mode-row">

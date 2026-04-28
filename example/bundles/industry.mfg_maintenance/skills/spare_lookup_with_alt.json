@@ -2,6 +2,7 @@
   "name": "spare_lookup_with_alt",
   "description": "查询备件库存及替代件，组合供应商与库位信息形成采购草稿建议。",
   "version": "1.0.0",
+  "intents": ["procurement_draft"],
   "depends_on_capabilities": [
     "spare_parts.catalog.query",
     "spare_parts.catalog.alternatives"

@@ -293,6 +293,7 @@ class SkillDefinition:
     version: str
     source: str  # "_platform" | "_common" | "package"
     package_id: str | None = None
+    intents: list[str] = field(default_factory=list)
     depends_on_capabilities: list[str] = field(default_factory=list)
     depends_on_tools: list[str] = field(default_factory=list)
     inputs: dict[str, Any] = field(default_factory=dict)

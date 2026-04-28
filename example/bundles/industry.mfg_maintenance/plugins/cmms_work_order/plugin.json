@@ -52,8 +52,8 @@
           "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
         },
         "response_map": {
-          "workorders": "$response.body.data",
-          "total":      "$response.body.total"
+          "workorders": "$response.body.data.items",
+          "total":      "$response.body.data.total"
         },
         "error_translation": {
           "401": "CMMS_AUTH_FAILED",

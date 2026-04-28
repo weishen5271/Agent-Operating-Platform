@@ -8,9 +8,14 @@
 
   "intents": [
     {
+      "name": "work_order_query",
+      "score": 0.94,
+      "keywords": ["维修工单", "工单信息", "历史工单", "维修记录", "工单记录", "看一下工单", "查询工单", "工单"]
+    },
+    {
       "name": "knowledge_query",
-      "score": 0.9,
-      "keywords": ["设备", "故障", "维修", "SOP", "点检", "巡检", "报警", "停机", "异常", "告警代码", "处理步骤"]
+      "score": 0.65,
+      "keywords": ["SOP", "点检", "巡检", "报警说明", "停机说明", "异常说明", "告警代码", "处理步骤", "维修手册"]
     },
     {
       "name": "fault_diagnosis",
@@ -59,6 +64,7 @@
 
   "provides": {
     "skills": [
+      "skills/work_order_history_query.json",
       "skills/fault_triage.json",
       "skills/spare_lookup_with_alt.json"
     ],

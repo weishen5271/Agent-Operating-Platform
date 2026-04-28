@@ -1,0 +1,38 @@
+{
+  "name": "work_order_history_query",
+  "description": "根据设备编号查询 CMMS 维修工单历史。",
+  "version": "1.0.0",
+  "intents": ["work_order_query"],
+  "inputs": {
+    "query": { "type": "string", "required": true },
+    "equipment_id": { "type": "string", "required": true },
+    "last_n": { "type": "integer", "default": 5 }
+  },
+  "outputs": {
+    "summary": { "type": "string" },
+    "equipment_id": { "type": "string" },
+    "workorders": { "type": "array" },
+    "total": { "type": "integer" }
+  },
+  "steps": [
+    {
+      "id": "history",
+      "capability": "cmms.work_order.history",
+      "input": {
+        "equipment_id": "$inputs.equipment_id",
+        "last_n": "$inputs.last_n"
+      }
+    }
+  ],
+  "outputs_mapping": {
+    "summary": "已查询设备 $inputs.equipment_id 的维修工单。",
+    "equipment_id": "$inputs.equipment_id",
+    "workorders": "$steps.history.workorders",
+    "total": "$steps.history.total"
+  },
+  "depends_on_capabilities": [
+    "cmms.work_order.history"
+  ],
+  "depends_on_tools": [],
+  "enabled": true
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import logging
 from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException
@@ -20,6 +21,7 @@ from agent_platform.api.schemas.chat import (
 from agent_platform.bootstrap.container import chat_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger("agent_platform.api.chat")
 
 
 def _sse(event: dict[str, object]) -> str:
@@ -43,9 +45,32 @@ async def create_completion(payload: ChatCompletionRequest, auth: AuthContext) -
             common_packages=payload.common_packages,
         )
     except PermissionError as exc:
+        logger.warning(
+            "Chat completion permission denied tenant=%s user=%s message=%r: %s",
+            tenant_id,
+            user_id,
+            payload.message,
+            exc,
+        )
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
+        logger.warning(
+            "Chat completion bad request tenant=%s user=%s message=%r: %s",
+            tenant_id,
+            user_id,
+            payload.message,
+            exc,
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        logger.exception(
+            "Chat completion failed tenant=%s user=%s message=%r",
+            tenant_id,
+            user_id,
+            payload.message,
+        )
+        raise
 
 
 @router.post("/completions/stream")
@@ -66,9 +91,32 @@ async def stream_completion(payload: ChatCompletionRequest, auth: AuthContext) -
             ):
                 yield _sse(event)
         except PermissionError as exc:
+            logger.warning(
+                "Chat stream permission denied tenant=%s user=%s message=%r: %s",
+                tenant_id,
+                user_id,
+                payload.message,
+                exc,
+            )
             yield _sse({"event": "error", "message": str(exc), "status": 403})
         except ValueError as exc:
+            logger.warning(
+                "Chat stream bad request tenant=%s user=%s message=%r: %s",
+                tenant_id,
+                user_id,
+                payload.message,
+                exc,
+                exc_info=True,
+            )
             yield _sse({"event": "error", "message": str(exc), "status": 400})
+        except Exception as exc:
+            logger.exception(
+                "Chat stream failed tenant=%s user=%s message=%r",
+                tenant_id,
+                user_id,
+                payload.message,
+            )
+            yield _sse({"event": "error", "message": f"{exc.__class__.__name__}: {exc}", "status": 500})
 
     return StreamingResponse(
         events(),
