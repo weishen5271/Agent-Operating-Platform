@@ -513,7 +513,8 @@ export type UserProfile = {
 
 export type LoginRequest = {
   email: string;
-  password: string;
+  encrypted_password: string;
+  key_id: string;
 };
 
 export type RegisterRequest = {
@@ -533,6 +534,12 @@ export type AuthResponse = {
     email: string;
     tenant_name: string;
   };
+};
+
+export type PasswordKeyResponse = {
+  key_id: string;
+  algorithm: "RSA-OAEP-SHA256";
+  public_key: string;
 };
 
 export type AdminKnowledgeResponse = {

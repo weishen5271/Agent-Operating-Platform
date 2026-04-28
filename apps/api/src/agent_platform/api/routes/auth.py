@@ -12,14 +12,20 @@ from agent_platform.api.errors import (
 )
 from agent_platform.bootstrap.container import chat_service
 from agent_platform.domain.models import UserContext
-from agent_platform.infrastructure.auth import create_access_token, decode_access_token
+from agent_platform.infrastructure.auth import (
+    create_access_token,
+    decode_access_token,
+    decrypt_password,
+    get_password_public_key,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
     email: str = Field(..., description="用户邮箱")
-    password: str = Field(..., min_length=6, description="密码")
+    encrypted_password: str = Field(..., min_length=1, description="RSA-OAEP 加密后的密码")
+    key_id: str = Field(..., min_length=1, description="密码加密公钥 ID")
 
 
 class RegisterRequest(BaseModel):
@@ -35,6 +41,12 @@ class TokenResponse(BaseModel):
     user: dict
 
 
+class PasswordKeyResponse(BaseModel):
+    key_id: str
+    algorithm: str
+    public_key: str
+
+
 async def _build_auth_user_payload(user_context: UserContext) -> dict[str, str]:
     tenant = await chat_service.get_tenant(user_context.tenant_id)
     return {
@@ -46,9 +58,19 @@ async def _build_auth_user_payload(user_context: UserContext) -> dict[str, str]:
     }
 
 
+@router.get("/password-key", response_model=PasswordKeyResponse)
+async def get_login_password_key() -> dict[str, str]:
+    return get_password_public_key()
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest) -> dict[str, object]:
-    result = await chat_service.authenticate_user(email=payload.email, password=payload.password)
+    try:
+        password = decrypt_password(encrypted_password=payload.encrypted_password, key_id=payload.key_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="登录密码密文无效") from None
+
+    result = await chat_service.authenticate_user(email=payload.email, password=password)
     if result is None:
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
 

@@ -31,6 +31,7 @@ import type {
   PackageImpactResponse,
   PackageKnowledgeImportResult,
   PackageKnowledgePreviewResponse,
+  PasswordKeyResponse,
   PluginConfigSchemaResponse,
   TenantListResponse,
   TenantPackagesResponse,
@@ -54,6 +55,56 @@ type AuthUserContext = {
 const AUTH_TOKEN_KEY = "auth_token";
 const AUTH_USER_KEY = "auth_user";
 const AUTH_EXPIRED_MESSAGE = "登录状态已失效，请重新登录。";
+
+function base64ToArrayBuffer(value: string): ArrayBuffer {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+function arrayBufferToBase64(value: ArrayBuffer): string {
+  const bytes = new Uint8Array(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return window.btoa(binary);
+}
+
+async function importPasswordPublicKey(publicKeyPem: string): Promise<CryptoKey> {
+  const publicKeyBody = publicKeyPem
+    .replace("-----BEGIN PUBLIC KEY-----", "")
+    .replace("-----END PUBLIC KEY-----", "")
+    .replace(/\s/g, "");
+
+  return window.crypto.subtle.importKey(
+    "spki",
+    base64ToArrayBuffer(publicKeyBody),
+    {
+      name: "RSA-OAEP",
+      hash: "SHA-256",
+    },
+    false,
+    ["encrypt"],
+  );
+}
+
+async function encryptLoginPassword(password: string, publicKeyPem: string): Promise<string> {
+  if (typeof window === "undefined" || !window.crypto?.subtle) {
+    throw new Error("当前浏览器不支持登录密码加密。");
+  }
+
+  const key = await importPasswordPublicKey(publicKeyPem);
+  const ciphertext = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    key,
+    new TextEncoder().encode(password),
+  );
+  return arrayBufferToBase64(ciphertext);
+}
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   if (typeof window === "undefined") {
@@ -826,10 +877,24 @@ export function deleteUser(tenantId: string, userId: string): Promise<{ deleted:
 }
 
 // Auth
-export function login(payload: { email: string; password: string }): Promise<AuthResponse> {
+export async function getPasswordKey(): Promise<PasswordKeyResponse> {
+  return request<PasswordKeyResponse>("/auth/password-key");
+}
+
+export async function login(payload: { email: string; password: string }): Promise<AuthResponse> {
+  const passwordKey = await getPasswordKey();
+  if (passwordKey.algorithm !== "RSA-OAEP-SHA256") {
+    throw new Error("登录密码加密算法不受支持。");
+  }
+  const encryptedPassword = await encryptLoginPassword(payload.password, passwordKey.public_key);
+
   return request<AuthResponse>("/auth/login", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      email: payload.email,
+      encrypted_password: encryptedPassword,
+      key_id: passwordKey.key_id,
+    }),
   });
 }
 
