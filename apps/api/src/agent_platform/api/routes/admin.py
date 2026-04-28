@@ -525,13 +525,15 @@ async def delete_tenant(target_tenant_id: str, auth: AuthContext) -> dict[str, o
 
 # User CRUD
 @router.get("/tenants/{tenant_id}/users")
-async def list_tenant_users(tenant_id: str) -> dict[str, object]:
+async def list_tenant_users(tenant_id: str, auth: AuthContext) -> dict[str, object]:
+    _, _ = auth
     users = await chat_service.list_tenant_users(tenant_id)
     return {"users": [asdict(u) for u in users]}
 
 
 @router.post("/tenants/{tenant_id}/users")
-async def create_user(tenant_id: str, payload: UserCreateRequest) -> dict[str, object]:
+async def create_user(tenant_id: str, payload: UserCreateRequest, auth: AuthContext) -> dict[str, object]:
+    _, _ = auth
     try:
         user = await chat_service.create_user(
             tenant_id=tenant_id,
@@ -546,7 +548,8 @@ async def create_user(tenant_id: str, payload: UserCreateRequest) -> dict[str, o
 
 
 @router.put("/tenants/{tenant_id}/users/{user_id}")
-async def update_user(tenant_id: str, user_id: str, payload: UserUpdateRequest) -> dict[str, object]:
+async def update_user(tenant_id: str, user_id: str, payload: UserUpdateRequest, auth: AuthContext) -> dict[str, object]:
+    _, _ = auth
     try:
         user = await chat_service.update_user(
             tenant_id=tenant_id,
@@ -560,7 +563,8 @@ async def update_user(tenant_id: str, user_id: str, payload: UserUpdateRequest) 
 
 
 @router.delete("/tenants/{tenant_id}/users/{user_id}")
-async def delete_user(tenant_id: str, user_id: str) -> dict[str, object]:
+async def delete_user(tenant_id: str, user_id: str, auth: AuthContext) -> dict[str, object]:
+    _, _ = auth
     success = await chat_service.delete_user(tenant_id, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="User not found")

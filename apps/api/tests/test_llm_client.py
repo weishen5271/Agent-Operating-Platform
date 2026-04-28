@@ -1,6 +1,10 @@
 import pytest
+from fastapi import HTTPException
 
+from agent_platform.api.deps import resolve_auth_context
+from agent_platform.api.errors import ERROR_CODE_MISSING_TOKEN, http_exception_response_content
 from agent_platform.domain.models import LLMRuntimeConfig
+from agent_platform.infrastructure.auth import create_access_token
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 
 
@@ -106,3 +110,29 @@ def test_anthropic_request_uses_messages_endpoint_and_headers() -> None:
     assert spec.headers["anthropic-version"] == "2023-06-01"
     assert spec.payload["max_tokens"] == 1024
     assert spec.response_format == "anthropic"
+
+
+def test_resolve_auth_context_rejects_missing_authorization() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_auth_context(authorization=None)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == {"code": ERROR_CODE_MISSING_TOKEN, "detail": "缺少认证令牌"}
+    assert http_exception_response_content(exc_info.value) == {
+        "code": ERROR_CODE_MISSING_TOKEN,
+        "detail": "缺少认证令牌",
+    }
+
+
+def test_resolve_auth_context_rejects_blank_authorization() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_auth_context(authorization="   ")
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == {"code": ERROR_CODE_MISSING_TOKEN, "detail": "缺少认证令牌"}
+
+
+def test_resolve_auth_context_returns_token_identity() -> None:
+    token = create_access_token({"sub": "user-auth", "tenant_id": "tenant-auth"})
+
+    assert resolve_auth_context(authorization=f"Bearer {token}") == ("tenant-auth", "user-auth")

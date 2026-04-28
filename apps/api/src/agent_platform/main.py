@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from agent_platform.api.errors import http_exception_response_content
 from agent_platform.api.openapi import configure_openapi
 from agent_platform.api.routes.admin import router as admin_router
 from agent_platform.api.routes.auth import router as auth_router
@@ -49,11 +50,20 @@ app.include_router(auth_router, prefix=settings.api_prefix)
 configure_openapi(app)
 
 
+@app.exception_handler(HTTPException)
+async def handle_http_exception(_request: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=http_exception_response_content(exc),
+        headers=exc.headers,
+    )
+
+
 @app.exception_handler(ValueError)
 async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
     # 业务校验错误统一收敛为 400，接口层不再重复包装同类异常。
     logger.warning("ValueError on %s %s: %s", request.method, request.url.path, exc)
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
+    return JSONResponse(status_code=400, content={"code": "BAD_REQUEST", "detail": str(exc)})
 
 
 @app.exception_handler(Exception)
@@ -64,7 +74,7 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{exc.__class__.__name__}: {exc}"},
+        content={"code": "INTERNAL_SERVER_ERROR", "detail": f"{exc.__class__.__name__}: {exc}"},
     )
 
 

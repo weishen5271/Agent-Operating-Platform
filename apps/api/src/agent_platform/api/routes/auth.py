@@ -3,6 +3,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from agent_platform.api.errors import (
+    ERROR_CODE_AUTH_USER_NOT_FOUND,
+    ERROR_CODE_INVALID_OR_EXPIRED_TOKEN,
+    ERROR_CODE_MISSING_AUTH_CONTEXT,
+    ERROR_CODE_MISSING_TOKEN,
+    raise_http_error,
+)
 from agent_platform.bootstrap.container import chat_service
 from agent_platform.domain.models import UserContext
 from agent_platform.infrastructure.auth import create_access_token, decode_access_token
@@ -89,19 +96,19 @@ async def register(payload: RegisterRequest) -> dict[str, object]:
 @router.get("/me")
 async def get_current_user(authorization: str | None = Header(default=None)) -> dict[str, str]:
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="缺少认证令牌")
+        raise_http_error(status_code=401, code=ERROR_CODE_MISSING_TOKEN, detail="缺少认证令牌")
 
     payload = decode_access_token(authorization.removeprefix("Bearer ").strip())
     if payload is None:
-        raise HTTPException(status_code=401, detail="认证令牌无效或已过期")
+        raise_http_error(status_code=401, code=ERROR_CODE_INVALID_OR_EXPIRED_TOKEN, detail="认证令牌无效或已过期")
 
     user_id = payload.get("sub")
     tenant_id = payload.get("tenant_id")
     if not user_id or not tenant_id:
-        raise HTTPException(status_code=401, detail="认证令牌缺少用户上下文")
+        raise_http_error(status_code=401, code=ERROR_CODE_MISSING_AUTH_CONTEXT, detail="认证令牌缺少用户上下文")
 
     user_context = await chat_service.get_user(tenant_id=tenant_id, user_id=user_id)
     if user_context is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise_http_error(status_code=404, code=ERROR_CODE_AUTH_USER_NOT_FOUND, detail="用户不存在")
 
     return await _build_auth_user_payload(user_context)
