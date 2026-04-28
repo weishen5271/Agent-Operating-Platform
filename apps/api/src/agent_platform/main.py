@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from agent_platform.api.openapi import configure_openapi
 from agent_platform.api.routes.admin import router as admin_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.chat import router as chat_router
@@ -45,6 +46,7 @@ app.include_router(workspace_router, prefix=settings.api_prefix)
 app.include_router(outputs_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
+configure_openapi(app)
 
 
 @app.exception_handler(ValueError)
