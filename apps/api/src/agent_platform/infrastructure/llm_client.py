@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from urllib import error, request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -18,6 +19,10 @@ class LLMRequestSpec:
 
 
 class OpenAICompatibleLLMClient:
+    _RETRYABLE_STATUS_CODES = {429, 529}
+    _MAX_ATTEMPTS = 3
+    _RETRY_BASE_DELAY_SECONDS = 0.8
+
     def complete(
         self,
         *,
@@ -44,21 +49,7 @@ class OpenAICompatibleLLMClient:
             method="POST",
         )
 
-        try:
-            with request.urlopen(req, timeout=30) as response:
-                body = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            if exc.code == 404:
-                detail = (
-                    f"{detail}\n"
-                    "请检查 LLM Base URL 是否与当前 Provider 匹配："
-                    "OpenAI Compatible 通常填写到 /v1，Azure 需要包含 api-version，"
-                    "Anthropic 通常填写 https://api.anthropic.com。"
-                )
-            raise ValueError(f"LLM request failed: {exc.code} {detail}") from exc
-        except error.URLError as exc:
-            raise ValueError(f"LLM request failed: {exc.reason}") from exc
+        body = self._read_response_with_retry(req, timeout=30, error_prefix="LLM request failed")
 
         data = json.loads(body)
         if spec.response_format == "anthropic":
@@ -92,23 +83,17 @@ class OpenAICompatibleLLMClient:
             method="POST",
         )
 
-        try:
-            with request.urlopen(req, timeout=60) as response:
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="ignore").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line.removeprefix("data:").strip()
-                    if data == "[DONE]":
-                        break
-                    chunk = self._extract_stream_delta(json.loads(data), spec.response_format)
-                    if chunk:
-                        yield chunk
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise ValueError(f"LLM stream request failed: {exc.code} {detail}") from exc
-        except error.URLError as exc:
-            raise ValueError(f"LLM stream request failed: {exc.reason}") from exc
+        with self._open_with_retry(req, timeout=60, error_prefix="LLM stream request failed") as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if data == "[DONE]":
+                    break
+                chunk = self._extract_stream_delta(json.loads(data), spec.response_format)
+                if chunk:
+                    yield chunk
 
     def _build_request_spec(
         self,
@@ -257,6 +242,55 @@ class OpenAICompatibleLLMClient:
     @staticmethod
     def _strip_url(url: str) -> str:
         return url.strip().rstrip("/")
+
+    @classmethod
+    def _read_response_with_retry(cls, req: request.Request, *, timeout: int, error_prefix: str) -> str:
+        with cls._open_with_retry(req, timeout=timeout, error_prefix=error_prefix) as response:
+            return response.read().decode("utf-8")
+
+    @classmethod
+    def _open_with_retry(cls, req: request.Request, *, timeout: int, error_prefix: str):
+        last_exc: error.HTTPError | error.URLError | None = None
+        for attempt in range(1, cls._MAX_ATTEMPTS + 1):
+            try:
+                return request.urlopen(req, timeout=timeout)
+            except error.HTTPError as exc:
+                last_exc = exc
+                if not cls._should_retry_http_error(exc) or attempt == cls._MAX_ATTEMPTS:
+                    detail = cls._read_http_error_detail(exc)
+                    raise ValueError(f"{error_prefix}: {exc.code} {detail}") from exc
+                cls._sleep_before_retry(attempt)
+            except error.URLError as exc:
+                last_exc = exc
+                if attempt == cls._MAX_ATTEMPTS:
+                    raise ValueError(f"{error_prefix}: {exc.reason}") from exc
+                cls._sleep_before_retry(attempt)
+        if isinstance(last_exc, error.HTTPError):
+            detail = cls._read_http_error_detail(last_exc)
+            raise ValueError(f"{error_prefix}: {last_exc.code} {detail}") from last_exc
+        if isinstance(last_exc, error.URLError):
+            raise ValueError(f"{error_prefix}: {last_exc.reason}") from last_exc
+        raise ValueError(f"{error_prefix}: unknown error")
+
+    @classmethod
+    def _should_retry_http_error(cls, exc: error.HTTPError) -> bool:
+        return exc.code in cls._RETRYABLE_STATUS_CODES or 500 <= exc.code < 600
+
+    @staticmethod
+    def _read_http_error_detail(exc: error.HTTPError) -> str:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        if exc.code == 404:
+            detail = (
+                f"{detail}\n"
+                "请检查 LLM Base URL 是否与当前 Provider 匹配："
+                "OpenAI Compatible 通常填写到 /v1，Azure 需要包含 api-version，"
+                "Anthropic 通常填写 https://api.anthropic.com。"
+            )
+        return detail
+
+    @classmethod
+    def _sleep_before_retry(cls, attempt: int) -> None:
+        time.sleep(cls._RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
 
     @staticmethod
     def _build_prompt(*, user_message: str, context_blocks: list[str]) -> str:

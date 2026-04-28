@@ -1,3 +1,6 @@
+from io import BytesIO
+from urllib.error import HTTPError
+
 import pytest
 from fastapi import HTTPException
 
@@ -6,6 +9,30 @@ from agent_platform.api.errors import ERROR_CODE_MISSING_TOKEN, http_exception_r
 from agent_platform.domain.models import LLMRuntimeConfig
 from agent_platform.infrastructure.auth import create_access_token
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
+
+
+class FakeHTTPResponse:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode("utf-8")
+
+    def __enter__(self) -> "FakeHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _http_error(status_code: int, body: str) -> HTTPError:
+    return HTTPError(
+        url="https://llm.example.test/v1/chat/completions",
+        code=status_code,
+        msg="error",
+        hdrs={},
+        fp=BytesIO(body.encode("utf-8")),
+    )
 
 
 def test_chat_completions_url_appends_endpoint_to_api_root() -> None:
@@ -110,6 +137,70 @@ def test_anthropic_request_uses_messages_endpoint_and_headers() -> None:
     assert spec.headers["anthropic-version"] == "2023-06-01"
     assert spec.payload["max_tokens"] == 1024
     assert spec.response_format == "anthropic"
+
+
+def test_complete_retries_retryable_llm_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = OpenAICompatibleLLMClient()
+    calls = 0
+
+    def fake_urlopen(req, timeout):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise _http_error(529, '{"type":"error","error":{"type":"overloaded_error"}}')
+        return FakeHTTPResponse('{"choices":[{"message":{"content":"ok"}}]}')
+
+    monkeypatch.setattr("agent_platform.infrastructure.llm_client.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(OpenAICompatibleLLMClient, "_sleep_before_retry", lambda attempt: None)
+
+    result = client.complete(
+        config=LLMRuntimeConfig(
+            provider="openai-compatible",
+            base_url="https://llm.example.test/v1",
+            model="chat-model",
+            api_key_configured=True,
+            temperature=0.2,
+            system_prompt="system",
+            enabled=True,
+        ),
+        api_key="test-key",
+        user_message="hello",
+        context_blocks=[],
+    )
+
+    assert result == "ok"
+    assert calls == 3
+
+
+def test_complete_does_not_retry_non_retryable_llm_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = OpenAICompatibleLLMClient()
+    calls = 0
+
+    def fake_urlopen(req, timeout):
+        nonlocal calls
+        calls += 1
+        raise _http_error(401, '{"error":"unauthorized"}')
+
+    monkeypatch.setattr("agent_platform.infrastructure.llm_client.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(OpenAICompatibleLLMClient, "_sleep_before_retry", lambda attempt: None)
+
+    with pytest.raises(ValueError, match="LLM request failed: 401"):
+        client.complete(
+            config=LLMRuntimeConfig(
+                provider="openai-compatible",
+                base_url="https://llm.example.test/v1",
+                model="chat-model",
+                api_key_configured=True,
+                temperature=0.2,
+                system_prompt="system",
+                enabled=True,
+            ),
+            api_key="test-key",
+            user_message="hello",
+            context_blocks=[],
+        )
+
+    assert calls == 1
 
 
 def test_resolve_auth_context_rejects_missing_authorization() -> None:
