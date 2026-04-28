@@ -1,0 +1,182 @@
+{
+  "name": "mfg.maintenance_system_mcp",
+  "version": "1.0.0",
+  "description": "制造业设备运维上游系统 MCP 对接示例。通过 MCP JSON-RPC tools/call 对接工单、报警和备件工具。",
+  "executor": "mcp",
+  "config_schema": {
+    "mcp_server": {
+      "type": "string",
+      "required": true,
+      "label": "设备运维 MCP Server",
+      "description": "MCP endpoint，例如 http://127.0.0.1:18081/mcp"
+    },
+    "secrets": {
+      "type": "object",
+      "required": true,
+      "label": "设备运维 MCP 密钥配置",
+      "properties": {
+        "maintenance_token": {
+          "type": "string",
+          "required": true,
+          "label": "访问令牌",
+          "description": "Bearer Token 占位字段，真实值由租户插件配置维护"
+        }
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "default": 8000,
+      "label": "请求超时时间（毫秒）"
+    }
+  },
+  "default_config": {
+    "timeout_ms": 8000
+  },
+  "capabilities": [
+    {
+      "name": "mcp.cmms.work_order.history",
+      "description": "通过 MCP 查询某设备或故障码的历史维修工单。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "fault_code": { "type": "string" },
+          "last_n": { "type": "integer" }
+        }
+      },
+      "output_schema": {
+        "required": ["workorders"]
+      },
+      "binding": {
+        "mcp_server": "$config.mcp_server",
+        "mcp_tool": "work_order.history",
+        "argument_map": {
+          "equipment_id": "$input.equipment_id",
+          "fault_code": "$input.fault_code",
+          "limit": "$input.last_n"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "workorders": "$response.body.structuredContent.workorders",
+          "total": "$response.body.structuredContent.total"
+        }
+      }
+    },
+    {
+      "name": "mcp.cmms.work_order.draft.create",
+      "description": "通过 MCP 创建维修工单草稿。",
+      "risk_level": "medium",
+      "side_effect_level": "draft",
+      "required_scope": "cmms:write",
+      "input_schema": {
+        "required": ["equipment_id", "fault_code", "summary"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "fault_code": { "type": "string" },
+          "summary": { "type": "string" },
+          "priority": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["draft_id"]
+      },
+      "binding": {
+        "mcp_server": "$config.mcp_server",
+        "mcp_tool": "work_order.draft.create",
+        "argument_map": {
+          "equipment_id": "$input.equipment_id",
+          "fault_code": "$input.fault_code",
+          "summary": "$input.summary",
+          "priority": "$input.priority"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "draft_id": "$response.body.structuredContent.draft_id",
+          "status": "$response.body.structuredContent.status",
+          "url": "$response.body.structuredContent.url"
+        }
+      }
+    },
+    {
+      "name": "mcp.scada.alarm_query",
+      "description": "通过 MCP 查询设备报警流水。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "scada:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "severity": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["alarms"]
+      },
+      "binding": {
+        "mcp_server": "$config.mcp_server",
+        "mcp_tool": "alarm.query",
+        "argument_map": {
+          "equipment_id": "$input.equipment_id",
+          "from": "$input.from",
+          "to": "$input.to",
+          "severity": "$input.severity"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "alarms": "$response.body.structuredContent.alarms",
+          "total": "$response.body.structuredContent.total"
+        }
+      }
+    },
+    {
+      "name": "mcp.spare_parts.catalog.lookup",
+      "description": "通过 MCP 查询备件目录、库存和替代件建议。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "spare_parts:read",
+      "input_schema": {
+        "required": [],
+        "properties": {
+          "part_no": { "type": "string" },
+          "keyword": { "type": "string" },
+          "equipment_model": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["items"]
+      },
+      "binding": {
+        "mcp_server": "$config.mcp_server",
+        "mcp_tool": "spare_parts.lookup",
+        "argument_map": {
+          "part_no": "$input.part_no",
+          "keyword": "$input.keyword",
+          "equipment_model": "$input.equipment_model"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "items": "$response.body.structuredContent.items",
+          "alternatives": "$response.body.structuredContent.alternatives"
+        }
+      }
+    }
+  ]
+}

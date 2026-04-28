@@ -5,7 +5,7 @@
 **状态**: 阶段性完成（HTTP executor 已通），剩余项移交后续迭代
 **关联文档**:
 - [行业业务包-通用开发方案.md](业务包相关开发方案/行业业务包-通用开发方案.md)（v1.1 已更新）
-- [example/industry.mfg_maintenance/](../example/industry.mfg_maintenance)（参考实现）
+- [example/bundles/industry.mfg_maintenance/](../example/bundles/industry.mfg_maintenance)（参考实现）
 
 ---
 
@@ -48,7 +48,7 @@
 | [apps/api/src/agent_platform/runtime/package_installer.py](../apps/api/src/agent_platform/runtime/package_installer.py) | zip 解压沙箱（路径越界 / 扩展名 / 大小 / 文件数限制），落到 `packages/installed/<id>/`；校验 manifest + provides 引用 |
 | [apps/api/src/agent_platform/api/routes/admin.py](../apps/api/src/agent_platform/api/routes/admin.py) | `POST /admin/packages/import`（multipart）、`DELETE /admin/packages/{id}/bundle` |
 | [apps/web/src/app/(workspace)/packages/page.tsx](../apps/web/src/app/(workspace)/packages/page.tsx) | 「导入业务包」按钮 + 隐藏 `<input type=file>` + `importPackageBundle()` |
-| [example/industry.mfg_maintenance/](../example/industry.mfg_maintenance) | bundle 参考实现 |
+| [example/bundles/industry.mfg_maintenance/](../example/bundles/industry.mfg_maintenance) | bundle 参考实现 |
 
 **Bundle 目录结构**：
 
@@ -120,7 +120,7 @@ binding 字段：`method`、`path`、`query`、`headers`、`body`、`timeout_ms`
 
 错误翻译支持精确 `"401"` 与桶位 `"5xx"`，并自动映射网络错为 `UPSTREAM_TIMEOUT` / `UPSTREAM_UNREACHABLE`，缺配置为 `MISSING_CONFIG`。
 
-完整示例：[example/.../plugins/cmms_work_order/plugin.json](../example/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json)
+完整示例：[example/.../plugins/cmms_work_order/plugin.json](../example/bundles/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json)
 
 ### 2.5 调用链（一次会话）
 
@@ -220,7 +220,7 @@ POST /api/v1/chat/complete
 
 ### 3.3 【P1】完善 Skill steps 真编排器
 
-**目标**：把 [example/.../skills/fault_triage.json](../example/industry.mfg_maintenance/skills/fault_triage.json) 里的 `depends_on_capabilities` 升级为真正的 `steps[]` 数据流编排，对齐设计文档 §5.4.2 的 yaml 示例（`$inputs.x` / `$prev_step.y`）。
+**目标**：把 [example/.../skills/fault_triage.json](../example/bundles/industry.mfg_maintenance/skills/fault_triage.json) 里的 `depends_on_capabilities` 升级为真正的 `steps[]` 数据流编排，对齐设计文档 §5.4.2 的 yaml 示例（`$inputs.x` / `$prev_step.y`）。
 
 **当前状态**：
 - `SkillDefinition` 已支持 `inputs` / `outputs` / `steps` / `outputs_mapping`
@@ -231,7 +231,7 @@ POST /api/v1/chat/complete
   - 每步写入 `skill_step:<id>` TraceStep
 - [chat_service.py](../apps/api/src/agent_platform/runtime/chat_service.py) 已接入：选中 skill 且存在 `steps[]` 时走新执行器；无 `steps[]` 的旧 skill 继续保留原逻辑
 - 已补 [apps/api/tests/test_skill_executor.py](../apps/api/tests/test_skill_executor.py) 协议级单测
-- [example/industry.mfg_maintenance/skills/fault_triage.json](../example/industry.mfg_maintenance/skills/fault_triage.json) 已迁移为真实 `steps[]`
+- [example/bundles/industry.mfg_maintenance/skills/fault_triage.json](../example/bundles/industry.mfg_maintenance/skills/fault_triage.json) 已迁移为真实 `steps[]`
 - 已补 chat 主链路测试：`fault_diagnosis` 可命中 `fault_triage`，Trace 中出现 `skill_step:alarms/history/knowledge`
 
 **剩余要做**：
@@ -277,7 +277,7 @@ POST /api/v1/chat/complete
 - `binding.retry`：`{ "policy": "exponential", "max_attempts": 3, "retry_on": ["5xx", "UPSTREAM_TIMEOUT"] }`
 - `binding.idempotency_key`：渲染后写入 `Idempotency-Key` 请求头；同 key 成功响应短期复用，第二次返回 `_meta.idempotency_cache_hit=true`
 - `binding.rate_limit`：`{ "requests_per_minute": 60, "scope": "tenant" }`，支持 `tenant` / `plugin` / `capability` / 自定义 `key`；默认不启用，只有 bundle 显式声明才执行
-- `example/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json` 已为历史查询 / 草稿创建声明 retry，为草稿创建声明基于真实输入字段的幂等键
+- `example/bundles/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json` 已为历史查询 / 草稿创建声明 retry，为草稿创建声明基于真实输入字段的幂等键
 - [apps/api/tests/test_http_executor.py](../apps/api/tests/test_http_executor.py) 已覆盖 5xx 重试、timeout 重试、4xx 不重试、幂等请求头、幂等缓存命中、租户限流和租户隔离
 
 **后续替换点**：
@@ -469,7 +469,7 @@ from pathlib import Path
 
 # 打 bundle
 buf = io.BytesIO()
-src = Path('example/industry.mfg_maintenance')
+src = Path('example/bundles/industry.mfg_maintenance')
 with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
     for p in src.rglob('*'):
         if p.is_file():
@@ -513,15 +513,15 @@ print(reg.invoke('cmms.work_order.history',
   apps/api/src/agent_platform/plugins/stub.py
   apps/api/src/agent_platform/plugins/executors/__init__.py
   apps/api/src/agent_platform/plugins/executors/http.py
-  example/industry.mfg_maintenance/manifest.json
-  example/industry.mfg_maintenance/skills/fault_triage.json
-  example/industry.mfg_maintenance/skills/spare_lookup_with_alt.json
-  example/industry.mfg_maintenance/tools/dispatch_summary.json
-  example/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json
-  example/industry.mfg_maintenance/plugins/scada_alarm_query/plugin.json
-  example/industry.mfg_maintenance/plugins/spare_parts_catalog/plugin.json
-  example/industry.mfg_maintenance/prompts/system_prompt.txt
-  example/industry.mfg_maintenance/prompts/planner_prompt.txt
+  example/bundles/industry.mfg_maintenance/manifest.json
+  example/bundles/industry.mfg_maintenance/skills/fault_triage.json
+  example/bundles/industry.mfg_maintenance/skills/spare_lookup_with_alt.json
+  example/bundles/industry.mfg_maintenance/tools/dispatch_summary.json
+  example/bundles/industry.mfg_maintenance/plugins/cmms_work_order/plugin.json
+  example/bundles/industry.mfg_maintenance/plugins/scada_alarm_query/plugin.json
+  example/bundles/industry.mfg_maintenance/plugins/spare_parts_catalog/plugin.json
+  example/bundles/industry.mfg_maintenance/prompts/system_prompt.txt
+  example/bundles/industry.mfg_maintenance/prompts/planner_prompt.txt
   docs/业务包bundle化-交接文档.md (本文)
 
 修改：
@@ -535,12 +535,12 @@ print(reg.invoke('cmms.work_order.history',
   apps/web/src/app/(workspace)/packages/page.tsx
   apps/web/src/lib/api-client/index.ts
   apps/web/src/lib/api-client/types.ts
-  example/industry.mfg_maintenance/README.md
+  example/bundles/industry.mfg_maintenance/README.md
   docs/业务包相关开发方案/行业业务包-通用开发方案.md
   pyproject.toml
 
 删除：
-  example/industry.mfg_maintenance/industry.mfg_maintenance.json (改为 manifest.json + 拆分文件)
+  example/bundles/industry.mfg_maintenance/industry.mfg_maintenance.json (改为 manifest.json + 拆分文件)
 ```
 
 ---

@@ -1,0 +1,186 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Manufacturing Maintenance Upstream System Example",
+    "version": "1.0.0",
+    "description": "制造业设备运维业务包配套的上游系统接口契约示例。字段和路径均为占位/模拟契约。"
+  },
+  "servers": [
+    {
+      "url": "https://maintenance-api.example.com",
+      "description": "占位示例地址，真实环境由租户插件配置提供"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/workorders": {
+      "get": {
+        "summary": "查询历史维修工单",
+        "operationId": "queryWorkOrders",
+        "parameters": [
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "equipment_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "fault_code", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 5 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "工单列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WorkOrderListResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workorders/drafts": {
+      "post": {
+        "summary": "创建维修工单草稿",
+        "operationId": "createWorkOrderDraft",
+        "parameters": [
+          { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WorkOrderDraftRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工单草稿",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WorkOrderDraftResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alarms": {
+      "get": {
+        "summary": "查询设备报警流水",
+        "operationId": "queryAlarms",
+        "parameters": [
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "equipment_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "from", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+          { "name": "to", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+          { "name": "severity", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "报警流水",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AlarmListResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spare-parts": {
+      "get": {
+        "summary": "查询备件目录与库存",
+        "operationId": "querySpareParts",
+        "parameters": [
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "part_no", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "keyword", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "equipment_model", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "备件目录",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SparePartListResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "WorkOrderListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": { "type": "array", "items": { "type": "object" } },
+              "total": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "WorkOrderDraftRequest": {
+        "type": "object",
+        "required": ["tenant_id", "equipment_id", "fault_code", "title"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "equipment_id": { "type": "string" },
+          "fault_code": { "type": "string" },
+          "title": { "type": "string" },
+          "priority": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      },
+      "WorkOrderDraftResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "status": { "type": "string" },
+              "url": { "type": "string" }
+            }
+          }
+        }
+      },
+      "AlarmListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": { "type": "array", "items": { "type": "object" } },
+              "total": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "SparePartListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": { "type": "array", "items": { "type": "object" } },
+              "alternatives": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

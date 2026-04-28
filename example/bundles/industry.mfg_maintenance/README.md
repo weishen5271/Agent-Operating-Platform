@@ -33,17 +33,19 @@ industry.mfg_maintenance/
 - `provides.{skills,tools,plugins}` —— **本业务包私有的产物**，路径相对 bundle 根；上传时由后端解析并安装。
 - `prompts.{system,planner}` —— 指向 `prompts/` 下的纯文本提示词。
 
+制作新 bundle 时，先阅读 [Bundle 制作规则](../BUNDLE_RULES.md)，按其中的目录、manifest、能力声明、知识导入和打包规则检查。
+
 ## 一、安装方式（首选：UI 上传）
 
 1. 把整个 `industry.mfg_maintenance/` 目录打包成 zip：
 
    ```bash
    # PowerShell
-   Compress-Archive -Path example/industry.mfg_maintenance/* `
+   Compress-Archive -Path example/bundles/industry.mfg_maintenance/* `
                     -DestinationPath industry.mfg_maintenance.zip
 
    # 或 bash
-   cd example && zip -r ../industry.mfg_maintenance.zip industry.mfg_maintenance
+   cd example/bundles && zip -r industry.mfg_maintenance.zip industry.mfg_maintenance
    ```
 
 2. 进入平台 **业务包管理 → 导入业务包**，选择刚才的 zip 文件。

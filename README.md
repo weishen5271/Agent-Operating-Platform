@@ -70,7 +70,10 @@ apps/
   web/                         Next.js 控制台
 docs/                          PRD、架构设计、业务包与知识库相关方案
 example/
-  industry.mfg_maintenance/    制造业设备运维业务包示例
+  bundles/                     可上传业务包 bundle 示例
+    industry.mfg_maintenance/  制造业设备运维业务包示例
+  upstream_systems/            上游系统对接示例
+    upstream.mfg_maintenance_system/ 制造业设备运维上游系统对接示例
 migrations/                    Alembic 数据库迁移
 packages/
   catalog/                     平台内置业务包目录
@@ -223,10 +226,11 @@ npm run dev:web
 - 外部系统调用通过 `http`、`mcp` 或 `platform` executor 声明，不通过上传代码实现。
 - bundle 中的知识文件只有在用户显式触发导入时才进入知识库。
 
-参考实现：
+参考实现分为两类：
 
 ```text
-example/industry.mfg_maintenance/
+example/bundles/industry.mfg_maintenance/       # 可上传安装的业务包 bundle 示例
+example/upstream_systems/upstream.mfg_maintenance_system/ # 与 bundle 配套的上游系统接口与对接声明示例
 ```
 
 ## 常用 API
@@ -339,4 +343,6 @@ uv run pytest
 - `docs/业务包bundle化-交接文档.md`
 - `docs/业务包相关开发方案/行业业务包-通用开发方案.md`
 - `docs/LLM-Wiki独立模块化改造技术方案.md`
-- `example/industry.mfg_maintenance/README.md`
+- `example/bundles/BUNDLE_RULES.md`
+- `example/bundles/industry.mfg_maintenance/README.md`
+- `example/upstream_systems/upstream.mfg_maintenance_system/README.md`

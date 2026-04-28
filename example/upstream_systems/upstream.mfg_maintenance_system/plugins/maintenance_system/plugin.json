@@ -1,0 +1,230 @@
+{
+  "name": "mfg.maintenance_system",
+  "version": "1.0.0",
+  "description": "制造业设备运维上游系统对接示例。通过声明式 HTTP executor 对接工单、报警和备件目录接口。",
+  "executor": "http",
+  "config_schema": {
+    "endpoint": {
+      "type": "string",
+      "required": true,
+      "label": "设备运维系统 API 地址",
+      "description": "REST API 根地址，例如 https://maintenance-api.example.com"
+    },
+    "tenant_id": {
+      "type": "string",
+      "required": true,
+      "label": "上游系统租户编码"
+    },
+    "secrets": {
+      "type": "object",
+      "required": true,
+      "label": "设备运维系统密钥配置",
+      "properties": {
+        "maintenance_token": {
+          "type": "string",
+          "required": true,
+          "label": "访问令牌",
+          "description": "Bearer Token 占位字段，真实值由租户插件配置维护"
+        }
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "default": 5000,
+      "label": "请求超时时间（毫秒）"
+    }
+  },
+  "default_config": {
+    "timeout_ms": 5000
+  },
+  "capabilities": [
+    {
+      "name": "cmms.work_order.history",
+      "description": "查询某设备或故障码的历史维修工单。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "fault_code": { "type": "string" },
+          "last_n": { "type": "integer" }
+        }
+      },
+      "output_schema": {
+        "required": ["workorders"]
+      },
+      "binding": {
+        "method": "GET",
+        "path": "/api/v1/workorders",
+        "query": {
+          "tenant_id": "$config.tenant_id",
+          "equipment_id": "$input.equipment_id",
+          "fault_code": "$input.fault_code",
+          "limit": "$input.last_n"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token",
+          "Accept": "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 2,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
+        "response_map": {
+          "workorders": "$response.body.data.items",
+          "total": "$response.body.data.total"
+        },
+        "error_translation": {
+          "401": "MAINTENANCE_AUTH_FAILED",
+          "404": "MAINTENANCE_WORKORDER_NOT_FOUND",
+          "5xx": "MAINTENANCE_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
+      "name": "cmms.work_order.draft.create",
+      "description": "创建维修工单草稿，等待用户确认或上游审批后再正式派工。",
+      "risk_level": "medium",
+      "side_effect_level": "draft",
+      "required_scope": "cmms:write",
+      "input_schema": {
+        "required": ["equipment_id", "fault_code", "summary"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "fault_code": { "type": "string" },
+          "summary": { "type": "string" },
+          "priority": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["draft_id"]
+      },
+      "binding": {
+        "method": "POST",
+        "path": "/api/v1/workorders/drafts",
+        "idempotency_key": "mfg-workorder-draft:$input.equipment_id:$input.fault_code:$input.summary",
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "tenant_id": "$config.tenant_id",
+          "equipment_id": "$input.equipment_id",
+          "fault_code": "$input.fault_code",
+          "title": "$input.summary",
+          "priority": "$input.priority",
+          "source": "agent_operating_platform"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 2,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
+        "response_map": {
+          "draft_id": "$response.body.data.id",
+          "status": "$response.body.data.status",
+          "url": "$response.body.data.url"
+        },
+        "error_translation": {
+          "401": "MAINTENANCE_AUTH_FAILED",
+          "409": "MAINTENANCE_DUPLICATE_DRAFT",
+          "5xx": "MAINTENANCE_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
+      "name": "scada.alarm_query",
+      "description": "查询设备报警流水，用于故障诊断前置上下文。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "scada:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "severity": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["alarms"]
+      },
+      "binding": {
+        "method": "GET",
+        "path": "/api/v1/alarms",
+        "query": {
+          "tenant_id": "$config.tenant_id",
+          "equipment_id": "$input.equipment_id",
+          "from": "$input.from",
+          "to": "$input.to",
+          "severity": "$input.severity"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token",
+          "Accept": "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "rate_limit": {
+          "requests_per_minute": 60,
+          "scope": "tenant"
+        },
+        "response_map": {
+          "alarms": "$response.body.data.items",
+          "total": "$response.body.data.total"
+        },
+        "error_translation": {
+          "401": "MAINTENANCE_AUTH_FAILED",
+          "5xx": "MAINTENANCE_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
+      "name": "spare_parts.catalog.lookup",
+      "description": "查询备件目录、库存和替代件建议。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "spare_parts:read",
+      "input_schema": {
+        "required": [],
+        "properties": {
+          "part_no": { "type": "string" },
+          "keyword": { "type": "string" },
+          "equipment_model": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["items"]
+      },
+      "binding": {
+        "method": "GET",
+        "path": "/api/v1/spare-parts",
+        "query": {
+          "tenant_id": "$config.tenant_id",
+          "part_no": "$input.part_no",
+          "keyword": "$input.keyword",
+          "equipment_model": "$input.equipment_model"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token",
+          "Accept": "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "items": "$response.body.data.items",
+          "alternatives": "$response.body.data.alternatives"
+        },
+        "error_translation": {
+          "401": "MAINTENANCE_AUTH_FAILED",
+          "404": "MAINTENANCE_PART_NOT_FOUND",
+          "5xx": "MAINTENANCE_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    }
+  ]
+}
