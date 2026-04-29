@@ -77,6 +77,9 @@ PLATFORM_INTENTS = {
     "tool.json_path",
     "tool.http_fetch",
 }
+RAG_ANSWER_TOP_K = 3
+RAG_CONTEXT_BLOCK_CHAR_LIMIT = 1200
+RAG_CONTEXT_TOTAL_CHAR_LIMIT = 4800
 TraceStepCallback = Callable[[TraceRecord, TraceStep], Awaitable[None]]
 AnswerDeltaCallback = Callable[[str], Awaitable[None]]
 logger = logging.getLogger("agent_platform.runtime.chat_service")
@@ -561,7 +564,7 @@ class ChatService:
                         message=message,
                         sources=sources,
                         short_memory=short_memory,
-                        on_delta=None,
+                        on_delta=stream_answer if on_answer_delta is not None else None,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -600,7 +603,7 @@ class ChatService:
                         message=message,
                         sources=sources,
                         short_memory=short_memory,
-                        on_delta=None,
+                        on_delta=stream_answer if on_answer_delta is not None else None,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -3135,7 +3138,7 @@ class ChatService:
         ordered_ids = sorted(rrf_scores, key=lambda cid: rrf_scores[cid], reverse=True)
         merged: list[SourceReference] = [chunk_map[cid] for cid in ordered_ids]
 
-        final_top_k = 8
+        final_top_k = RAG_ANSWER_TOP_K
         rerank_applied = False
         if use_llm and len(merged) > final_top_k:
             try:
@@ -4016,7 +4019,8 @@ class ChatService:
                 )
             except Exception:
                 return None
-        for index, item in enumerate(sources, start=1):
+        context_char_count = 0
+        for index, item in enumerate(sources[:RAG_ANSWER_TOP_K], start=1):
             parts = [
                 f"[{index}] 文档《{item.title}》",
                 f"来源ID: {item.source_id or item.id}",
@@ -4024,9 +4028,16 @@ class ChatService:
             if item.locator:
                 parts.append(f"章节: {item.locator}")
             # 优先使用完整 chunk 正文；snippet 仅做兜底（旧数据 / Wiki 路径）。
-            body = (item.content or item.snippet or "").strip()
+            body = self._truncate_rag_context_block(item.content or item.snippet or "")
+            remaining = RAG_CONTEXT_TOTAL_CHAR_LIMIT - context_char_count
+            if remaining <= 0:
+                break
+            if len(body) > remaining:
+                body = body[:remaining].rstrip() + "\n[内容已截断]"
             parts.append("正文:\n" + body)
-            context_blocks.append("\n".join(parts))
+            block = "\n".join(parts)
+            context_blocks.append(block)
+            context_char_count += len(body)
         if on_delta is not None:
             try:
                 return await self._stream_llm_answer(
@@ -4058,19 +4069,27 @@ class ChatService:
         if not config.enabled or not sources:
             return None
         context_blocks = self._conversation_context_blocks(short_memory)
-        context_blocks.extend([
-            "\n".join(
-                part
-                for part in (
-                    f"Wiki页面: {item.title}",
-                    f"定位: {item.locator}" if item.locator else "",
-                    f"主张: {item.claim_text}" if item.claim_text else "",
-                    f"证据: {item.snippet}",
+        context_char_count = 0
+        for item in sources[:RAG_ANSWER_TOP_K]:
+            evidence = self._truncate_rag_context_block(item.snippet)
+            remaining = RAG_CONTEXT_TOTAL_CHAR_LIMIT - context_char_count
+            if remaining <= 0:
+                break
+            if len(evidence) > remaining:
+                evidence = evidence[:remaining].rstrip() + "\n[内容已截断]"
+            context_blocks.append(
+                "\n".join(
+                    part
+                    for part in (
+                        f"Wiki页面: {item.title}",
+                        f"定位: {item.locator}" if item.locator else "",
+                        f"主张: {item.claim_text}" if item.claim_text else "",
+                        f"证据: {evidence}",
+                    )
+                    if part
                 )
-                if part
             )
-            for item in sources
-        ])
+            context_char_count += len(evidence)
         if on_delta is not None:
             try:
                 return await self._stream_llm_answer(
@@ -4115,6 +4134,13 @@ class ChatService:
         if not answer:
             raise ValueError("LLM response content is empty")
         return answer
+
+    @staticmethod
+    def _truncate_rag_context_block(value: str) -> str:
+        text = re.sub(r"\s+", " ", value).strip()
+        if len(text) <= RAG_CONTEXT_BLOCK_CHAR_LIMIT:
+            return text
+        return text[:RAG_CONTEXT_BLOCK_CHAR_LIMIT].rstrip() + "\n[内容已截断]"
 
     @staticmethod
     def _next_chunk(stream) -> str | None:

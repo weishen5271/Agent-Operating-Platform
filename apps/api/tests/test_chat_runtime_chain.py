@@ -240,6 +240,24 @@ class FakeLLMClient:
         return f"模型回复：{user_message}"
 
 
+class StreamingFakeLLMClient(FakeLLMClient):
+    def __init__(self, chunks: list[str]) -> None:
+        super().__init__()
+        self.chunks = chunks
+        self.stream_calls = []
+
+    def stream_complete(self, *, config, api_key: str, user_message: str, context_blocks: list[str]):
+        self.stream_calls.append(
+            {
+                "model": config.model,
+                "api_key": api_key,
+                "user_message": user_message,
+                "context_blocks": context_blocks,
+            }
+        )
+        yield from self.chunks
+
+
 class TimeoutLLMClient:
     def __init__(self) -> None:
         self.calls = []
@@ -651,6 +669,37 @@ def test_stream_completion_emits_trace_steps_before_answer_chunks() -> None:
     assert event_names[-1] == "done"
     assert "".join(str(event["content"]) for event in events if event["event"] == "message_delta")
     assert traces.saved is not None
+
+
+def test_stream_completion_streams_rag_llm_tokens_before_response_meta() -> None:
+    traces = FakeTraceRepository()
+    llm_client = StreamingFakeLLMClient(["模型", "流式", "回答"])
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    events = asyncio.run(
+        collect_events(
+            service.stream_complete(
+                message="P0a 要交付什么？",
+                tenant_id="tenant-demo",
+                user_id="user-demo",
+            )
+        )
+    )
+
+    event_names = [str(event["event"]) for event in events]
+    delta_contents = [str(event["content"]) for event in events if event["event"] == "message_delta"]
+    assert delta_contents == ["模型", "流式", "回答"]
+    assert event_names.index("message_delta") < event_names.index("response_meta")
+    assert next(event for event in events if event["event"] == "message_done")["content"] == "模型流式回答"
+    assert llm_client.stream_calls
+    assert len(llm_client.stream_calls[-1]["context_blocks"]) == 1
+    assert traces.saved is not None
+    model_step = next(step for step in traces.saved.steps if step.name == "model")
+    assert model_step.status == "completed"
 
 
 def test_dialogue_can_invoke_common_report_skill_and_json_path_tool() -> None:
