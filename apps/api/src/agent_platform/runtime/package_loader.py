@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -212,7 +214,11 @@ class PackageLoader:
                 raise ValueError(f"knowledge_imports[{index}].attributes must be an object: {manifest_path}")
 
             source_type = str(item.get("source_type") or item.get("source") or "Markdown").strip() or "Markdown"
-            knowledge_base_code = str(item.get("knowledge_base_code") or "knowledge").strip() or "knowledge"
+            default_knowledge_base_code = cls.default_bundle_knowledge_base_code(package_id)
+            knowledge_base_code = (
+                str(item.get("knowledge_base_code") or default_knowledge_base_code).strip()
+                or default_knowledge_base_code
+            )
             owner = str(item.get("owner") or f"bundle:{package_id}").strip() or f"bundle:{package_id}"
             name = str(item.get("name") or Path(rel_path).name).strip() or Path(rel_path).name
 
@@ -245,13 +251,23 @@ class PackageLoader:
                     "file": rel_path,
                     "name": path.stem,
                     "source_type": "Markdown" if path.suffix.lower() == ".md" else "Text",
-                    "knowledge_base_code": "knowledge",
+                    "knowledge_base_code": cls.default_bundle_knowledge_base_code(package_id),
                     "owner": f"bundle:{package_id}",
-                    "auto_import": False,
+                    "auto_import": True,
                     "attributes": {},
                 }
             )
         return imports
+
+    @staticmethod
+    def default_bundle_knowledge_base_code(package_id: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "-", package_id.lower()).strip("-")
+        normalized = normalized or "bundle"
+        code = f"pkg-{normalized}"
+        if len(code) <= 64:
+            return code
+        digest = hashlib.sha1(package_id.encode("utf-8")).hexdigest()[:8]
+        return f"{code[:55].rstrip('-')}-{digest}"
 
     @staticmethod
     def _safe_join(bundle_dir: Path, rel_path: str) -> Path:

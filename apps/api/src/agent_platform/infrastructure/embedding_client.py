@@ -17,11 +17,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
 from dataclasses import dataclass
 from urllib import error, request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from agent_platform.domain.models import LLMRuntimeConfig
+
+logger = logging.getLogger("agent_platform.infrastructure.embedding_client")
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +38,8 @@ class EmbeddingRequestSpec:
 
 class OpenAICompatibleEmbeddingClient:
     """同步 embedding 客户端。"""
+
+    requires_runtime_config = True
 
     def embed(
         self,
@@ -156,3 +163,74 @@ class OpenAICompatibleEmbeddingClient:
     @staticmethod
     def _strip_url(url: str) -> str:
         return url.strip().rstrip("/")
+
+
+class LocalHuggingFaceEmbeddingClient:
+    """本地 HuggingFace embedding 客户端。
+
+    模型首次使用时由 sentence-transformers 从 HuggingFace 拉取并缓存；后续复用本机缓存。
+    """
+
+    requires_runtime_config = False
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        device: str = "cpu",
+        cache_dir: str | None = None,
+        normalize_embeddings: bool = True,
+    ) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.cache_dir = cache_dir
+        self.normalize_embeddings = normalize_embeddings
+        self._model = None
+        self._lock = threading.Lock()
+
+    def embed(
+        self,
+        *,
+        texts: list[str],
+        config: LLMRuntimeConfig | None = None,
+        api_key: str = "",
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+
+        model = self._get_model()
+        vectors = model.encode(
+            texts,
+            normalize_embeddings=self.normalize_embeddings,
+            show_progress_bar=False,
+        )
+        return [[float(value) for value in vector] for vector in vectors]
+
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is not None:
+                return self._model
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "本地 HuggingFace embedding 需要安装 sentence-transformers；"
+                    "请先同步项目依赖。"
+                ) from exc
+
+            cache_dir = self.cache_dir or os.getenv("HF_HOME") or None
+            logger.info(
+                "Loading local HuggingFace embedding model model=%s device=%s cache_dir=%s",
+                self.model_name,
+                self.device,
+                cache_dir or "",
+            )
+            self._model = SentenceTransformer(
+                self.model_name,
+                device=self.device,
+                cache_folder=cache_dir,
+            )
+            logger.info("Local HuggingFace embedding model loaded model=%s", self.model_name)
+            return self._model

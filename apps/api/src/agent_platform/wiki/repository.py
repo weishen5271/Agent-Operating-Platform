@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from collections import Counter, defaultdict
+import logging
 import re
 from uuid import uuid4
 
@@ -31,6 +32,8 @@ from agent_platform.wiki.models import (
     WikiSearchHit,
     WikiSearchResult,
 )
+
+logger = logging.getLogger("agent_platform.wiki.repository")
 
 
 def _page_from_record(record: KnowledgeWikiPageRecord) -> WikiPage:
@@ -138,7 +141,21 @@ class PostgresWikiRepository:
     ) -> tuple[list[list[float]], str | None]:
         if not texts:
             return [], None
-        if self._llm_config is None or self._embedding_client is None:
+        if self._embedding_client is None:
+            return [[] for _ in texts], None
+        if not getattr(self._embedding_client, "requires_runtime_config", True):
+            try:
+                vectors = self._embedding_client.embed(texts=texts)
+            except Exception:
+                logger.exception(
+                    "Local wiki embedding request failed tenant=%s chunks=%s model=%s",
+                    tenant_id,
+                    len(texts),
+                    getattr(self._embedding_client, "model_name", ""),
+                )
+                return [[] for _ in texts], None
+            return vectors, getattr(self._embedding_client, "model_name", None)
+        if self._llm_config is None:
             return [[] for _ in texts], None
         try:
             config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)

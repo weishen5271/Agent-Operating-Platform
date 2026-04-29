@@ -1,5 +1,6 @@
 from agent_platform.infrastructure.db import db_runtime
-from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
+from agent_platform.bootstrap.settings import settings
+from agent_platform.infrastructure.embedding_client import LocalHuggingFaceEmbeddingClient
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 from agent_platform.infrastructure.repositories import (
     PostgresBusinessOutputRepository,
@@ -30,7 +31,11 @@ from agent_platform.wiki.repository import PostgresWikiRepository
 # 这些实例会在应用生命周期内复用，因此只放无请求态对象，请求上下文通过方法参数向下传递。
 llm_config_repository = PostgresLLMConfigRepository(db_runtime)
 llm_client = OpenAICompatibleLLMClient()
-embedding_client = OpenAICompatibleEmbeddingClient()
+embedding_client = LocalHuggingFaceEmbeddingClient(
+    model_name=settings.local_embedding_model,
+    device=settings.local_embedding_device,
+    cache_dir=settings.local_embedding_cache_dir,
+)
 capability_registry = CapabilityRegistry()
 skill_registry = SkillRegistry()
 tool_registry = ToolRegistry()

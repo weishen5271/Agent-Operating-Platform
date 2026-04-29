@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 
-from agent_platform.domain.models import KnowledgeSource, UserContext
+from agent_platform.domain.models import KnowledgeBase, KnowledgeSource, UserContext, utc_now
 from agent_platform.runtime.chat_service import ChatService
 from agent_platform.runtime.package_installer import PackageInstallError, PackageInstaller
 from agent_platform.runtime.package_loader import PackageLoader
@@ -120,7 +120,7 @@ class FakeUsers:
             user_id=user_id,
             tenant_id=tenant_id,
             role="platform_admin",
-            scopes=["admin:read"],
+            scopes=["admin:read", "tenant:manage"],
             email="admin@example.com",
         )
 
@@ -161,6 +161,36 @@ class RecordingKnowledgeRepository:
             chunk_count=1,
             status="运行中",
         )
+
+
+class RecordingKnowledgeBaseRepository:
+    def __init__(self, items: list[KnowledgeBase] | None = None) -> None:
+        self.items = list(items or [])
+        self.created: list[KnowledgeBase] = []
+        self.deleted: list[dict[str, str]] = []
+
+    async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]:
+        return [item for item in self.items if item.tenant_id == tenant_id]
+
+    async def create(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
+        self.items.append(knowledge_base)
+        self.created.append(knowledge_base)
+        return knowledge_base
+
+    async def delete(self, tenant_id: str, knowledge_base_code: str) -> bool:
+        self.deleted.append(
+            {
+                "tenant_id": tenant_id,
+                "knowledge_base_code": knowledge_base_code,
+            }
+        )
+        before = len(self.items)
+        self.items = [
+            item
+            for item in self.items
+            if not (item.tenant_id == tenant_id and item.knowledge_base_code == knowledge_base_code)
+        ]
+        return len(self.items) != before
 
 
 def test_bundle_install_load_and_registers_capability_and_skill(workspace_tmp: Path) -> None:
@@ -224,7 +254,7 @@ def test_bundle_loads_knowledge_imports_without_auto_ingesting(workspace_tmp: Pa
             "file": "knowledge/sop.md",
             "name": "sop.md",
             "source_type": "equipment_sop",
-            "knowledge_base_code": "knowledge",
+            "knowledge_base_code": "pkg-pkg-knowledge",
             "owner": "bundle:pkg.knowledge",
             "auto_import": False,
             "attributes": {"equipment_model": "MX-1"},
@@ -262,18 +292,18 @@ def test_bundle_discovers_knowledge_files_when_imports_not_declared(workspace_tm
             "file": "knowledge/runbook.txt",
             "name": "runbook",
             "source_type": "Text",
-            "knowledge_base_code": "knowledge",
+            "knowledge_base_code": "pkg-pkg-knowledge-discovery",
             "owner": "bundle:pkg.knowledge.discovery",
-            "auto_import": False,
+            "auto_import": True,
             "attributes": {},
         },
         {
             "file": "knowledge/sop.md",
             "name": "sop",
             "source_type": "Markdown",
-            "knowledge_base_code": "knowledge",
+            "knowledge_base_code": "pkg-pkg-knowledge-discovery",
             "owner": "bundle:pkg.knowledge.discovery",
-            "auto_import": False,
+            "auto_import": True,
             "attributes": {},
         },
     ]
@@ -309,9 +339,9 @@ def test_bundle_install_repairs_utf8_zip_names_without_utf8_flag(workspace_tmp: 
             "file": "knowledge/故障代码库-AX系列伺服.md",
             "name": "故障代码库-AX系列伺服",
             "source_type": "Markdown",
-            "knowledge_base_code": "knowledge",
+            "knowledge_base_code": "pkg-pkg-knowledge-filename",
             "owner": "bundle:pkg.knowledge.filename",
-            "auto_import": False,
+            "auto_import": True,
             "attributes": {},
         }
     ]
@@ -371,6 +401,7 @@ def test_import_package_knowledge_requires_explicit_service_call(
     loader = PackageLoader(catalog_dir=catalog_dir, installed_dir=installed_dir)
     monkeypatch.setattr(PackageLoader, "default", classmethod(lambda cls: loader))
     knowledge = RecordingKnowledgeRepository()
+    knowledge_bases = RecordingKnowledgeBaseRepository()
     service = ChatService(
         registry=object(),
         skills=object(),
@@ -386,7 +417,7 @@ def test_import_package_knowledge_requires_explicit_service_call(
         drafts=object(),
         security_events=object(),
         knowledge_sources=knowledge,
-        knowledge_bases=object(),
+        knowledge_bases=knowledge_bases,
         wiki_service=object(),
         llm_config=object(),
         llm_client=object(),
@@ -413,6 +444,90 @@ def test_import_package_knowledge_requires_explicit_service_call(
             "owner": "bundle:pkg.knowledge.import",
             "knowledge_base_code": "maintenance",
             "attributes": {"equipment_model": "MX-1"},
+        }
+    ]
+    assert [item.knowledge_base_code for item in knowledge_bases.created] == ["maintenance"]
+
+
+def test_uninstall_package_bundle_deletes_managed_knowledge_base(
+    workspace_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_dir = workspace_tmp / "installed"
+    catalog_dir = workspace_tmp / "catalog"
+    catalog_dir.mkdir()
+    installer = PackageInstaller(installed_dir, temp_dir=workspace_tmp)
+    installer.install_zip(
+        make_zip(
+            {
+                "manifest.json": {
+                    **manifest(package_id="pkg.knowledge.cleanup"),
+                },
+                "plugins/lookup.json": plugin_contract(),
+                "skills/lookup.json": skill_contract(),
+                "prompts/answer.md": "prompt",
+                "knowledge/sop.md": "# SOP\n\nUse the real bundle document.",
+            }
+        )
+    )
+    loader = PackageLoader(catalog_dir=catalog_dir, installed_dir=installed_dir)
+    monkeypatch.setattr(PackageLoader, "default", classmethod(lambda cls: loader))
+    monkeypatch.setattr(PackageInstaller, "default", classmethod(lambda cls: installer))
+    now = utc_now()
+    knowledge_bases = RecordingKnowledgeBaseRepository(
+        [
+            KnowledgeBase(
+                knowledge_base_id="kb-cleanup",
+                knowledge_base_code="pkg-pkg-knowledge-cleanup",
+                tenant_id="tenant-a",
+                name="Pipeline Test Package",
+                description="",
+                status="active",
+                created_by="admin",
+                updated_by="admin",
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+    )
+    service = ChatService(
+        registry=CapabilityRegistry(loader=loader),
+        skills=SkillRegistry(loader=loader),
+        tools=object(),
+        conversations=object(),
+        traces=object(),
+        tenants=object(),
+        tool_overrides=object(),
+        output_guard_rules=object(),
+        plugin_configs=object(),
+        releases=object(),
+        users=FakeUsers(),
+        drafts=object(),
+        security_events=object(),
+        knowledge_sources=object(),
+        knowledge_bases=knowledge_bases,
+        wiki_service=object(),
+        llm_config=object(),
+        llm_client=object(),
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        service.uninstall_package_bundle(
+            "pkg.knowledge.cleanup",
+            tenant_id="tenant-a",
+            user_id="admin",
+        )
+    )
+
+    assert result["removed"] is True
+    assert result["knowledge_base_code"] == "pkg-pkg-knowledge-cleanup"
+    assert result["knowledge_base_deleted"] is True
+    assert knowledge_bases.deleted == [
+        {
+            "tenant_id": "tenant-a",
+            "knowledge_base_code": "pkg-pkg-knowledge-cleanup",
         }
     ]
 

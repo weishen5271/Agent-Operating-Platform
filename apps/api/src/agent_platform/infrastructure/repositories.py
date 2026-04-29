@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
+import logging
 from typing import Protocol
 from uuid import uuid4
 
@@ -77,6 +78,7 @@ DEFAULT_TENANT_BUDGET = "¥ 0"
 DEFAULT_ADMIN_USER_ID = "admin"
 DEFAULT_ADMIN_EMAIL = "admin@sw.com"
 DEFAULT_ADMIN_PASSWORD = "Aa111111"
+logger = logging.getLogger("agent_platform.infrastructure.repositories")
 DEFAULT_CHUNK_ATTRIBUTES_SCHEMA = {
     "equipment_model": {"type": "string", "indexed": "hot", "filter": "in"},
     "fault_code_tags": {"type": "array<string>", "indexed": "hot", "filter": "array_contains"},
@@ -84,6 +86,14 @@ DEFAULT_CHUNK_ATTRIBUTES_SCHEMA = {
     "sop_step": {"type": "string", "indexed": "cold", "filter": ""},
     "effective_date": {"type": "date", "indexed": "hot", "filter": "lte"},
 }
+
+
+@dataclass(slots=True)
+class EmbeddingBatchResult:
+    vectors: list[list[float]]
+    model: str | None
+    status: str
+    reason: str
 
 
 class ConversationRepository(Protocol):
@@ -131,6 +141,8 @@ class KnowledgeRepository(Protocol):
         attributes: dict[str, object] | None = None,
     ) -> KnowledgeSource: ...
 
+    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult: ...
+
 
 class KnowledgeBaseRepository(Protocol):
     async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]: ...
@@ -140,8 +152,6 @@ class KnowledgeBaseRepository(Protocol):
     async def update(self, knowledge_base: KnowledgeBase) -> KnowledgeBase: ...
 
     async def delete(self, tenant_id: str, knowledge_base_code: str) -> bool: ...
-
-    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult: ...
 
 
 class TenantRepository(Protocol):
@@ -1214,28 +1224,120 @@ class PostgresKnowledgeRepository:
 
     async def _embed_texts(
         self, *, tenant_id: str | None, texts: list[str]
-    ) -> tuple[list[list[float]], str | None]:
-        """Return (vectors, model_name); empty vectors when embedding 未启用/未配置。
-
-        失败时降级为空向量，调用方应将 chunk 标记 pending 并继续走关键词路径。
-        """
+    ) -> EmbeddingBatchResult:
+        """Generate embeddings and return an explicit degradation reason when unavailable."""
         if not texts:
-            return [], None
-        if self._llm_config is None or self._embedding_client is None:
-            return [[] for _ in texts], None
+            return EmbeddingBatchResult([], None, "skipped", "empty_texts")
+        if self._embedding_client is None:
+            logger.warning(
+                "Embedding skipped tenant=%s reason=embedding_runtime_missing chunks=%s",
+                tenant_id,
+                len(texts),
+            )
+            return EmbeddingBatchResult([[] for _ in texts], None, "pending", "embedding_runtime_missing")
+        if not getattr(self._embedding_client, "requires_runtime_config", True):
+            try:
+                vectors = self._embedding_client.embed(texts=texts)
+            except Exception as exc:
+                logger.exception(
+                    "Local embedding request failed tenant=%s chunks=%s model=%s",
+                    tenant_id,
+                    len(texts),
+                    getattr(self._embedding_client, "model_name", ""),
+                )
+                return EmbeddingBatchResult([[] for _ in texts], None, "pending", f"local_embedding_failed:{exc.__class__.__name__}")
+            return EmbeddingBatchResult(vectors, getattr(self._embedding_client, "model_name", None), "ready", "")
+        if self._llm_config is None:
+            logger.warning(
+                "Embedding skipped tenant=%s reason=embedding_config_missing chunks=%s",
+                tenant_id,
+                len(texts),
+            )
+            return EmbeddingBatchResult([[] for _ in texts], None, "pending", "embedding_config_missing")
         try:
             config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
-        except Exception:
-            return [[] for _ in texts], None
+        except Exception as exc:
+            logger.exception(
+                "Embedding config load failed tenant=%s chunks=%s",
+                tenant_id,
+                len(texts),
+            )
+            return EmbeddingBatchResult([[] for _ in texts], None, "pending", f"embedding_config_error:{exc.__class__.__name__}")
         if not config.embedding_enabled or not api_key:
-            return [[] for _ in texts], None
+            reason = "embedding_disabled" if not config.embedding_enabled else "embedding_api_key_missing"
+            logger.warning(
+                "Embedding skipped tenant=%s reason=%s chunks=%s has_base_url=%s has_model=%s has_key=%s",
+                tenant_id,
+                reason,
+                len(texts),
+                bool(config.embedding_base_url),
+                bool(config.embedding_model),
+                bool(api_key),
+            )
+            return EmbeddingBatchResult([[] for _ in texts], None, "pending", reason)
         try:
             vectors = self._embedding_client.embed(
                 config=config, api_key=api_key, texts=texts
             )
+        except Exception as exc:
+            logger.exception(
+                "Embedding request failed tenant=%s chunks=%s provider=%s model=%s",
+                tenant_id,
+                len(texts),
+                config.embedding_provider,
+                config.embedding_model,
+            )
+            return EmbeddingBatchResult([[] for _ in texts], None, "pending", f"embedding_request_failed:{exc.__class__.__name__}")
+        return EmbeddingBatchResult(vectors, config.embedding_model, "ready", "")
+
+    async def _embed_query(self, *, tenant_id: str | None, query: str) -> list[float]:
+        if not query:
+            return []
+        if self._embedding_client is None:
+            logger.warning("Query embedding fallback tenant=%s reason=embedding_runtime_missing", tenant_id)
+            return embed_text(query)
+        if not getattr(self._embedding_client, "requires_runtime_config", True):
+            try:
+                vectors = self._embedding_client.embed(texts=[query])
+            except Exception:
+                logger.exception(
+                    "Local query embedding request failed tenant=%s model=%s",
+                    tenant_id,
+                    getattr(self._embedding_client, "model_name", ""),
+                )
+                return embed_text(query)
+            return vectors[0] if vectors else embed_text(query)
+        if self._llm_config is None:
+            logger.warning("Query embedding fallback tenant=%s reason=embedding_config_missing", tenant_id)
+            return embed_text(query)
+        try:
+            config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
         except Exception:
-            return [[] for _ in texts], None
-        return vectors, config.embedding_model
+            logger.exception("Query embedding config load failed tenant=%s", tenant_id)
+            return embed_text(query)
+        if not config.embedding_enabled or not api_key:
+            logger.warning(
+                "Query embedding fallback tenant=%s reason=%s has_base_url=%s has_model=%s has_key=%s",
+                tenant_id,
+                "embedding_disabled" if not config.embedding_enabled else "embedding_api_key_missing",
+                bool(config.embedding_base_url),
+                bool(config.embedding_model),
+                bool(api_key),
+            )
+            return embed_text(query)
+        try:
+            vectors = self._embedding_client.embed(
+                config=config, api_key=api_key, texts=[query]
+            )
+        except Exception:
+            logger.exception(
+                "Query embedding request failed tenant=%s provider=%s model=%s",
+                tenant_id,
+                config.embedding_provider,
+                config.embedding_model,
+            )
+            return embed_text(query)
+        return vectors[0] if vectors else embed_text(query)
 
     async def list_recent(self, tenant_id: str, knowledge_base_code: str | None = None) -> list[KnowledgeSource]:
         async with self._runtime.session() as session:
@@ -1295,8 +1397,9 @@ class PostgresKnowledgeRepository:
         ]
         contents = [item["content"] for item in normalized]
 
-        vectors, embedding_model = await self._embed_texts(tenant_id=tenant_id, texts=contents)
-        embedding_status = "ready" if any(vec for vec in vectors) else "pending"
+        embedding_result = await self._embed_texts(tenant_id=tenant_id, texts=contents)
+        vectors = embedding_result.vectors
+        embedding_model = embedding_result.model
 
         source_id = f"ks-{uuid4().hex[:12]}"
         async with self._runtime.session() as session:
@@ -1320,6 +1423,8 @@ class PostgresKnowledgeRepository:
                     "locator": item.get("locator") or f"chunk:{index + 1}",
                     "parents": item.get("parents") or [],
                 }
+                if embedding_result.reason:
+                    metadata_payload["embedding_reason"] = embedding_result.reason
                 if attributes:
                     metadata_payload["attributes"] = dict(attributes)
                 session.add(
@@ -1341,7 +1446,6 @@ class PostgresKnowledgeRepository:
                 )
             await session.commit()
             await session.refresh(document)
-            _ = embedding_status  # 保留以便日后写入 trace
             return _knowledge_from_record(document)
 
     async def reembed_pending(
@@ -1371,15 +1475,26 @@ class PostgresKnowledgeRepository:
         total = len(pending_records)
         updated = 0
         failed = 0
+        failed_reasons: dict[str, int] = {}
         if total == 0:
-            return {"total": 0, "updated": 0, "failed": 0}
+            return {"total": 0, "updated": 0, "failed": 0, "failed_reasons": {}}
 
         for start in range(0, total, batch_size):
             batch = pending_records[start : start + batch_size]
             texts = [record.content for record in batch]
-            vectors, embedding_model = await self._embed_texts(tenant_id=tenant_id, texts=texts)
+            embedding_result = await self._embed_texts(tenant_id=tenant_id, texts=texts)
+            vectors = embedding_result.vectors
+            embedding_model = embedding_result.model
             if not any(vec for vec in vectors):
+                logger.warning(
+                    "Embedding reembed batch failed tenant=%s reason=%s batch_size=%s",
+                    tenant_id,
+                    embedding_result.reason,
+                    len(batch),
+                )
                 failed += len(batch)
+                reason = embedding_result.reason or "unknown"
+                failed_reasons[reason] = failed_reasons.get(reason, 0) + len(batch)
                 continue
             chunk_ids = [record.chunk_id for record in batch]
             async with self._runtime.session() as session:
@@ -1397,11 +1512,133 @@ class PostgresKnowledgeRepository:
                         live.embedding = vec
                         live.embedding_status = "ready"
                         live.embedding_model = embedding_model or live.embedding_model
+                        metadata = dict(live.metadata_json or {})
+                        metadata.pop("embedding_reason", None)
+                        live.metadata_json = metadata
                         updated += 1
                     else:
+                        metadata = dict(live.metadata_json or {})
+                        if embedding_result.reason:
+                            metadata["embedding_reason"] = embedding_result.reason
+                            live.metadata_json = metadata
+                        reason = embedding_result.reason or "unknown"
+                        failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
                         failed += 1
                 await session.commit()
-        return {"total": total, "updated": updated, "failed": failed}
+        return {"total": total, "updated": updated, "failed": failed, "failed_reasons": failed_reasons}
+
+    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
+        terms = tokenize(query)
+        query_vector = await self._embed_query(tenant_id=tenant_id, query=query)
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(KnowledgeChunkRecord, KnowledgeDocumentRecord)
+                .join(KnowledgeDocumentRecord, KnowledgeDocumentRecord.source_id == KnowledgeChunkRecord.source_id)
+                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
+                .where(KnowledgeChunkRecord.status == "published")
+                .where(KnowledgeDocumentRecord.status == "运行中")
+            )
+            rows = result.all()
+
+        keyword_ranked: list[tuple[str, float]] = []
+        vector_ranked: list[tuple[str, float]] = []
+        chunk_map: dict[str, tuple[KnowledgeChunkRecord, KnowledgeDocumentRecord]] = {}
+        for chunk, document in rows:
+            chunk_map[chunk.chunk_id] = (chunk, document)
+            keyword_score = self._keyword_score(chunk=chunk, document=document, terms=terms, query=query)
+            if keyword_score > 0:
+                keyword_ranked.append((chunk.chunk_id, keyword_score))
+            vector_score = cosine_similarity(query_vector, chunk.embedding)
+            if vector_score > 0:
+                vector_ranked.append((chunk.chunk_id, vector_score))
+
+        keyword_ranked.sort(key=lambda item: item[1], reverse=True)
+        vector_ranked.sort(key=lambda item: item[1], reverse=True)
+        fused_scores = self._rrf(keyword_ranked, vector_ranked)
+        ordered_ids = sorted(fused_scores, key=lambda chunk_id: fused_scores[chunk_id], reverse=True)[:top_k]
+        matches = [
+            self._source_reference(chunk_map[chunk_id][0], chunk_map[chunk_id][1], query=query, terms=terms)
+            for chunk_id in ordered_ids
+        ]
+        return KnowledgeSearchResult(
+            matches=matches,
+            backend="postgres_json_hybrid",
+            query=query,
+            candidate_count=len(rows),
+            match_count=len(matches),
+            keyword_match_count=len(keyword_ranked),
+            vector_match_count=len(vector_ranked),
+        )
+
+    @staticmethod
+    def _keyword_score(
+        *,
+        chunk: KnowledgeChunkRecord,
+        document: KnowledgeDocumentRecord,
+        terms: list[str],
+        query: str,
+    ) -> float:
+        title = document.name.lower()
+        content = chunk.content.lower()
+        normalized_query = query.lower()
+        score = 0.0
+        if normalized_query and normalized_query in title:
+            score += 12.0
+        if normalized_query and normalized_query in content:
+            score += 8.0
+        for term in terms:
+            if term in title:
+                score += 4.0
+            if term in content:
+                score += min(content.count(term), 5)
+        return score
+
+    @staticmethod
+    def _rrf(*ranked_lists: list[tuple[str, float]], k: int = 60) -> dict[str, float]:
+        scores: dict[str, float] = {}
+        for ranked in ranked_lists:
+            for rank, (chunk_id, _score) in enumerate(ranked, start=1):
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1 / (k + rank)
+        return scores
+
+    @staticmethod
+    def _source_reference(
+        chunk: KnowledgeChunkRecord,
+        document: KnowledgeDocumentRecord,
+        *,
+        query: str,
+        terms: list[str],
+    ) -> SourceReference:
+        snippet = PostgresKnowledgeRepository._build_snippet(chunk.content, query=query, terms=terms)
+        metadata = chunk.metadata_json or {}
+        parents = metadata.get("parents") or []
+        if parents:
+            locator = " / ".join([document.name, *parents])
+        else:
+            locator = metadata.get("locator") or f"chunk:{chunk.chunk_index + 1}"
+        return SourceReference(
+            id=chunk.chunk_id,
+            title=document.name,
+            snippet=snippet,
+            source_type="knowledge",
+            source_id=chunk.source_id,
+            chunk_id=chunk.chunk_id,
+            locator=locator,
+            content=chunk.content,
+        )
+
+    @staticmethod
+    def _build_snippet(content: str, *, query: str, terms: list[str]) -> str:
+        normalized = content.lower()
+        query_index = normalized.find(query.lower()) if query else -1
+        indices = [query_index] if query_index >= 0 else []
+        indices.extend(normalized.find(term) for term in terms if normalized.find(term) >= 0)
+        if not indices:
+            return content[:180]
+        index = min(indices)
+        start = max(0, index - 60)
+        end = min(len(content), index + 160)
+        return content[start:end].replace("\n", " ")
 
 
 class PostgresKnowledgeBaseRepository:
@@ -1415,26 +1652,6 @@ class PostgresKnowledgeBaseRepository:
         self._runtime = runtime
         self._llm_config = llm_config
         self._embedding_client = embedding_client
-
-    async def _embed_query(self, *, tenant_id: str | None, query: str) -> list[float]:
-        """Embed query via real provider when 启用; 否则回退 hash embedding。"""
-        if not query:
-            return []
-        if self._llm_config is None or self._embedding_client is None:
-            return embed_text(query)
-        try:
-            config, api_key = await self._llm_config.get_embedding_credentials(tenant_id=tenant_id)
-        except Exception:
-            return embed_text(query)
-        if not config.embedding_enabled or not api_key:
-            return embed_text(query)
-        try:
-            vectors = self._embedding_client.embed(
-                config=config, api_key=api_key, texts=[query]
-            )
-        except Exception:
-            return embed_text(query)
-        return vectors[0] if vectors else embed_text(query)
 
     async def list_by_tenant(self, tenant_id: str) -> list[KnowledgeBase]:
         async with self._runtime.session() as session:
@@ -1597,119 +1814,6 @@ class PostgresKnowledgeBaseRepository:
             await session.delete(record)
             await session.commit()
             return True
-
-    async def search(self, *, tenant_id: str, query: str, top_k: int = 3) -> KnowledgeSearchResult:
-        terms = tokenize(query)
-        query_vector = await self._embed_query(tenant_id=tenant_id, query=query)
-        async with self._runtime.session() as session:
-            result = await session.execute(
-                select(KnowledgeChunkRecord, KnowledgeDocumentRecord)
-                .join(KnowledgeDocumentRecord, KnowledgeDocumentRecord.source_id == KnowledgeChunkRecord.source_id)
-                .where(KnowledgeChunkRecord.tenant_id == tenant_id)
-                .where(KnowledgeChunkRecord.status == "published")
-                .where(KnowledgeDocumentRecord.status == "运行中")
-            )
-            rows = result.all()
-
-        keyword_ranked: list[tuple[str, float]] = []
-        vector_ranked: list[tuple[str, float]] = []
-        chunk_map: dict[str, tuple[KnowledgeChunkRecord, KnowledgeDocumentRecord]] = {}
-        for chunk, document in rows:
-            chunk_map[chunk.chunk_id] = (chunk, document)
-            keyword_score = self._keyword_score(chunk=chunk, document=document, terms=terms, query=query)
-            if keyword_score > 0:
-                keyword_ranked.append((chunk.chunk_id, keyword_score))
-            vector_score = cosine_similarity(query_vector, chunk.embedding)
-            if vector_score > 0:
-                vector_ranked.append((chunk.chunk_id, vector_score))
-
-        keyword_ranked.sort(key=lambda item: item[1], reverse=True)
-        vector_ranked.sort(key=lambda item: item[1], reverse=True)
-        fused_scores = self._rrf(keyword_ranked, vector_ranked)
-        ordered_ids = sorted(fused_scores, key=lambda chunk_id: fused_scores[chunk_id], reverse=True)[:top_k]
-        matches = [
-            self._source_reference(chunk_map[chunk_id][0], chunk_map[chunk_id][1], query=query, terms=terms)
-            for chunk_id in ordered_ids
-        ]
-        return KnowledgeSearchResult(
-            matches=matches,
-            backend="postgres_json_hybrid",
-            query=query,
-            candidate_count=len(rows),
-            match_count=len(matches),
-            keyword_match_count=len(keyword_ranked),
-            vector_match_count=len(vector_ranked),
-        )
-
-    @staticmethod
-    def _keyword_score(
-        *,
-        chunk: KnowledgeChunkRecord,
-        document: KnowledgeDocumentRecord,
-        terms: list[str],
-        query: str,
-    ) -> float:
-        title = document.name.lower()
-        content = chunk.content.lower()
-        normalized_query = query.lower()
-        score = 0.0
-        if normalized_query and normalized_query in title:
-            score += 12.0
-        if normalized_query and normalized_query in content:
-            score += 8.0
-        for term in terms:
-            if term in title:
-                score += 4.0
-            if term in content:
-                score += min(content.count(term), 5)
-        return score
-
-    @staticmethod
-    def _rrf(*ranked_lists: list[tuple[str, float]], k: int = 60) -> dict[str, float]:
-        scores: dict[str, float] = {}
-        for ranked in ranked_lists:
-            for rank, (chunk_id, _score) in enumerate(ranked, start=1):
-                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1 / (k + rank)
-        return scores
-
-    @staticmethod
-    def _source_reference(
-        chunk: KnowledgeChunkRecord,
-        document: KnowledgeDocumentRecord,
-        *,
-        query: str,
-        terms: list[str],
-    ) -> SourceReference:
-        snippet = PostgresKnowledgeRepository._build_snippet(chunk.content, query=query, terms=terms)
-        metadata = chunk.metadata_json or {}
-        parents = metadata.get("parents") or []
-        if parents:
-            locator = " / ".join([document.name, *parents])
-        else:
-            locator = metadata.get("locator") or f"chunk:{chunk.chunk_index + 1}"
-        return SourceReference(
-            id=chunk.chunk_id,
-            title=document.name,
-            snippet=snippet,
-            source_type="knowledge",
-            source_id=chunk.source_id,
-            chunk_id=chunk.chunk_id,
-            locator=locator,
-            content=chunk.content,
-        )
-
-    @staticmethod
-    def _build_snippet(content: str, *, query: str, terms: list[str]) -> str:
-        lowered = content.lower()
-        index = lowered.find(query.lower()) if query else -1
-        if index == -1:
-            index = next((lowered.find(term) for term in terms if lowered.find(term) != -1), -1)
-        if index == -1:
-            return content[:180].replace("\n", " ")
-        start = max(index - 60, 0)
-        end = min(index + 160, len(content))
-        return content[start:end].replace("\n", " ")
-
 
 class PostgresLLMConfigRepository:
     def __init__(self, runtime: DatabaseRuntime) -> None:

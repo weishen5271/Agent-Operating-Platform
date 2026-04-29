@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, replace
 import json
+import logging
 from pathlib import Path
 import re
 from typing import AsyncIterator, Awaitable, Callable, Literal
@@ -78,6 +79,7 @@ PLATFORM_INTENTS = {
 }
 TraceStepCallback = Callable[[TraceRecord, TraceStep], Awaitable[None]]
 AnswerDeltaCallback = Callable[[str], Awaitable[None]]
+logger = logging.getLogger("agent_platform.runtime.chat_service")
 
 
 class ChatService:
@@ -553,37 +555,81 @@ class ChatService:
 
                     answer, sources = self._compose_answer(intent, result)
             if intent == "knowledge_query":
-                llm_answer = await self._generate_rag_llm_answer(
-                    tenant_id=context.tenant_id,
-                    message=message,
-                    sources=sources,
-                    short_memory=short_memory,
-                    on_delta=None,
-                )
+                try:
+                    llm_answer = await self._generate_rag_llm_answer(
+                        tenant_id=context.tenant_id,
+                        message=message,
+                        sources=sources,
+                        short_memory=short_memory,
+                        on_delta=None,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "RAG LLM answer generation failed trace_id=%s tenant=%s user=%s query=%r sources=%s",
+                        trace.trace_id,
+                        context.tenant_id,
+                        context.user_id,
+                        message,
+                        len(sources),
+                    )
+                    llm_answer = None
+                    await add_step(
+                        TraceStep(
+                            name="model",
+                            status="failed",
+                            summary=f"LLM 生成最终知识库回答失败，已保留检索拼装回答：{exc.__class__.__name__}: {exc}",
+                            node_type="skill",
+                            ref="kb_grounded_qa",
+                            ref_source="_platform",
+                        )
+                    )
+                    warnings.append("LLM 生成知识库回答超时或失败，当前返回检索片段拼装结果。")
                 if llm_answer:
                     answer = llm_answer
                     await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型生成最终回答。", node_type="skill", ref="kb_grounded_qa", ref_source="_platform"))
                 elif not sources:
                     await add_step(TraceStep(name="model", status="completed", summary="未命中检索来源，跳过模型生成。", node_type="runtime"))
                     warnings.append("未在已发布知识库中检索到相关内容，请尝试更换关键词或上传相关文档。")
-                else:
+                elif not any(step.name == "model" and step.status == "failed" for step in trace.steps):
                     await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留检索拼装回答。", node_type="skill", ref="kb_grounded_qa", ref_source="_platform"))
                     warnings.append("LLM 运行时未启用，当前回答为检索片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
             elif intent == "wiki_query":
-                llm_answer = await self._generate_wiki_llm_answer(
-                    tenant_id=context.tenant_id,
-                    message=message,
-                    sources=sources,
-                    short_memory=short_memory,
-                    on_delta=None,
-                )
+                try:
+                    llm_answer = await self._generate_wiki_llm_answer(
+                        tenant_id=context.tenant_id,
+                        message=message,
+                        sources=sources,
+                        short_memory=short_memory,
+                        on_delta=None,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Wiki LLM answer generation failed trace_id=%s tenant=%s user=%s query=%r sources=%s",
+                        trace.trace_id,
+                        context.tenant_id,
+                        context.user_id,
+                        message,
+                        len(sources),
+                    )
+                    llm_answer = None
+                    await add_step(
+                        TraceStep(
+                            name="model",
+                            status="failed",
+                            summary=f"LLM 生成 Wiki 回答失败，已保留检索拼装回答：{exc.__class__.__name__}: {exc}",
+                            node_type="skill",
+                            ref="wiki_grounded_qa",
+                            ref_source="_platform",
+                        )
+                    )
+                    warnings.append("LLM 生成 Wiki 回答超时或失败，当前返回检索片段拼装结果。")
                 if llm_answer:
                     answer = llm_answer
                     await add_step(TraceStep(name="model", status="completed", summary="已通过 OpenAI-compatible 模型基于 Wiki 页面与引用生成最终回答。", node_type="skill", ref="wiki_grounded_qa", ref_source="_platform"))
                 elif not sources:
                     await add_step(TraceStep(name="model", status="completed", summary="未命中 Wiki 来源，跳过模型生成。", node_type="runtime"))
                     warnings.append("未在 Wiki 中检索到相关页面，请尝试更换关键词或检查权限范围。")
-                else:
+                elif not any(step.name == "model" and step.status == "failed" for step in trace.steps):
                     await add_step(TraceStep(name="model", status="failed", summary="LLM Runtime 未启用，保留 Wiki 检索拼装回答。", node_type="skill", ref="wiki_grounded_qa", ref_source="_platform"))
                     warnings.append("LLM 运行时未启用，当前回答为 Wiki 片段拼接。请在「设置 → LLM 配置」中启用模型以获得分析型答案。")
         if intent not in {"knowledge_query", "wiki_query", "general_chat"}:
@@ -597,15 +643,23 @@ class ChatService:
         )
         answer = guard_result["answer"]
         warnings.extend(guard_result["warnings"])
-        conversation_title = (
-            await self._generate_conversation_title(
-                tenant_id=context.tenant_id,
-                user_message=message,
-                assistant_message=answer,
-            )
-            if not short_memory.messages
-            else None
-        )
+        conversation_title = None
+        if not short_memory.messages:
+            try:
+                conversation_title = await self._generate_conversation_title(
+                    tenant_id=context.tenant_id,
+                    user_message=message,
+                    assistant_message=answer,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Conversation title generation failed trace_id=%s tenant=%s user=%s query=%r",
+                    trace.trace_id,
+                    context.tenant_id,
+                    context.user_id,
+                    message,
+                )
+                warnings.append(f"会话标题生成失败，已保留默认标题：{exc.__class__.__name__}: {exc}")
         if on_answer_delta is not None and not answer_streamed:
             await self._emit_text_deltas(answer, stream_answer)
         await add_step(
@@ -1059,12 +1113,29 @@ class ChatService:
 
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_tenant_management_scope(context)
+        package = self._find_package(package_id)
+        managed_knowledge_base_code = (
+            PackageLoader.default_bundle_knowledge_base_code(package_id)
+            if package is not None
+            else None
+        )
         removed = PackageInstaller.default().uninstall(package_id)
         if not removed:
             raise ValueError("Package bundle not found")
+        knowledge_base_deleted = False
+        if managed_knowledge_base_code:
+            knowledge_base_deleted = await self._knowledge_bases.delete(
+                context.tenant_id,
+                managed_knowledge_base_code,
+            )
         self._skills.refresh()
         self._registry.refresh_package_capabilities()
-        return {"package_id": package_id, "removed": True}
+        return {
+            "package_id": package_id,
+            "removed": True,
+            "knowledge_base_code": managed_knowledge_base_code,
+            "knowledge_base_deleted": knowledge_base_deleted,
+        }
 
     async def get_package_detail(self, package_id: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -1634,13 +1705,23 @@ class ChatService:
             attributes = item.get("attributes", {})
             if attributes is not None and not isinstance(attributes, dict):
                 raise ValueError(f"Knowledge attributes must be an object: {rel_path}")
+            knowledge_base_code = str(
+                item.get("knowledge_base_code")
+                or PackageLoader.default_bundle_knowledge_base_code(package_id)
+            )
+            await self._ensure_package_knowledge_base(
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                package=package,
+                knowledge_base_code=knowledge_base_code,
+            )
             source = await self._knowledge_sources.ingest_text(
                 tenant_id=context.tenant_id,
                 name=str(item.get("name") or knowledge_path.name),
                 content=content,
                 source_type=str(item.get("source_type") or "Markdown"),
                 owner=str(item.get("owner") or f"bundle:{package_id}"),
-                knowledge_base_code=str(item.get("knowledge_base_code") or "knowledge"),
+                knowledge_base_code=knowledge_base_code,
                 attributes=dict(attributes or {}),
             )
             imported.append(
@@ -1657,6 +1738,33 @@ class ChatService:
             "imported": imported,
             "skipped": skipped,
         }
+
+    async def _ensure_package_knowledge_base(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        package: dict[str, object],
+        knowledge_base_code: str,
+    ) -> None:
+        existing_items = await self._knowledge_bases.list_by_tenant(tenant_id)
+        if any(item.knowledge_base_code == knowledge_base_code for item in existing_items):
+            return
+        package_name = str(package.get("name") or package.get("package_id") or knowledge_base_code)
+        description = str(package.get("description") or f"{package_name} Bundle 自动导入知识库")
+        entity = KnowledgeBase(
+            knowledge_base_id=f"kb-{uuid4().hex[:12]}",
+            knowledge_base_code=knowledge_base_code,
+            tenant_id=tenant_id,
+            name=package_name,
+            description=description,
+            status="active",
+            created_by=user_id,
+            updated_by=user_id,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        await self._knowledge_bases.create(entity)
 
     async def preview_package_knowledge(
         self,
@@ -1704,7 +1812,10 @@ class ChatService:
             "file": normalized_file,
             "name": str(declaration.get("name") or knowledge_path.name),
             "source_type": str(declaration.get("source_type") or "Markdown"),
-            "knowledge_base_code": str(declaration.get("knowledge_base_code") or "knowledge"),
+            "knowledge_base_code": str(
+                declaration.get("knowledge_base_code")
+                or PackageLoader.default_bundle_knowledge_base_code(package_id)
+            ),
             "owner": str(declaration.get("owner") or f"bundle:{package_id}"),
             "auto_import": bool(declaration.get("auto_import", False)),
             "attributes": dict(attributes or {}),
@@ -1828,6 +1939,36 @@ class ChatService:
         embedding_dimensions: int | None = None,
         embedding_enabled: bool | None = None,
     ) -> dict[str, object]:
+        if embedding_enabled:
+            try:
+                current_config, _current_api_key = await self._llm_config.get(tenant_id=tenant_id)
+            except Exception:
+                current_config = None
+            missing_embedding_fields = []
+            effective_embedding_base_url = (
+                embedding_base_url
+                if embedding_base_url is not None
+                else (current_config.embedding_base_url if current_config is not None else "")
+            )
+            effective_embedding_model = (
+                embedding_model
+                if embedding_model is not None
+                else (current_config.embedding_model if current_config is not None else "")
+            )
+            effective_embedding_key_configured = bool(
+                (embedding_api_key or "").strip()
+                or (current_config.embedding_api_key_configured if current_config is not None else False)
+            )
+            if not (effective_embedding_base_url or "").strip():
+                missing_embedding_fields.append("embedding_base_url")
+            if not (effective_embedding_model or "").strip():
+                missing_embedding_fields.append("embedding_model")
+            if not effective_embedding_key_configured:
+                missing_embedding_fields.append("embedding_api_key")
+            if missing_embedding_fields:
+                raise ValueError(
+                    "启用 Embedding 需要同时配置: " + ", ".join(missing_embedding_fields)
+                )
         config, _ = await self._llm_config.create_or_update_for_tenant(
             tenant_id=tenant_id,
             provider=provider,

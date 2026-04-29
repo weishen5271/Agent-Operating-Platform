@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
@@ -10,6 +11,7 @@ from agent_platform.api.deps import AuthContext
 from agent_platform.bootstrap.container import chat_service, wiki_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+logger = logging.getLogger("agent_platform.api.admin")
 
 
 class LLMRuntimeUpdateRequest(BaseModel):
@@ -785,6 +787,16 @@ async def search_wiki(
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception(
+            "Admin wiki search failed tenant=%s user=%s query=%r top_k=%s space_code=%s",
+            tenant_id,
+            user_id,
+            query,
+            top_k,
+            space_code,
+        )
+        raise HTTPException(status_code=500, detail=f"Wiki 检索失败：{exc.__class__.__name__}: {exc}") from exc
 
 
 @router.post("/wiki/compile")

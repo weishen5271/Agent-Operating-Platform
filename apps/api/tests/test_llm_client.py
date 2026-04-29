@@ -25,6 +25,22 @@ class FakeHTTPResponse:
         return self._body
 
 
+class TimeoutOnceHTTPResponse:
+    calls = 0
+
+    def __enter__(self) -> "TimeoutOnceHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        type(self).calls += 1
+        if type(self).calls == 1:
+            raise TimeoutError("The read operation timed out")
+        return b'{"choices":[{"message":{"content":"ok after retry"}}]}'
+
+
 def _http_error(status_code: int, body: str) -> HTTPError:
     return HTTPError(
         url="https://llm.example.test/v1/chat/completions",
@@ -139,6 +155,85 @@ def test_anthropic_request_uses_messages_endpoint_and_headers() -> None:
     assert spec.response_format == "anthropic"
 
 
+def test_minimax_anthropic_request_uses_configured_base_url_and_bearer_header() -> None:
+    client = OpenAICompatibleLLMClient()
+
+    spec = client._build_request_spec(
+        config=LLMRuntimeConfig(
+            provider="anthropic",
+            base_url="https://api.minimaxi.com/anthropic",
+            model="MiniMax-M1",
+            api_key_configured=True,
+            temperature=0.2,
+            system_prompt="system",
+            enabled=True,
+        ),
+        api_key="minimax-key",
+        user_message="hello",
+        context_blocks=[],
+    )
+
+    assert spec.url == "https://api.minimaxi.com/anthropic/v1/messages"
+    assert spec.headers["Authorization"] == "Bearer minimax-key"
+    assert "x-api-key" not in spec.headers
+    assert spec.headers["anthropic-version"] == "2023-06-01"
+    assert spec.response_format == "anthropic"
+
+
+def test_anthropic_rag_request_uses_larger_output_budget() -> None:
+    client = OpenAICompatibleLLMClient()
+
+    spec = client._build_request_spec(
+        config=LLMRuntimeConfig(
+            provider="anthropic",
+            base_url="https://api.minimaxi.com/anthropic",
+            model="MiniMax-M1",
+            api_key_configured=True,
+            temperature=0.2,
+            system_prompt="system",
+            enabled=True,
+        ),
+        api_key="minimax-key",
+        user_message="hello",
+        context_blocks=["[1] 文档《测试》\n正文:\nRAG context"],
+    )
+
+    assert spec.payload["max_tokens"] == 4096
+    assert spec.timeout_seconds == 180
+
+
+def test_openai_rag_request_uses_larger_timeout() -> None:
+    client = OpenAICompatibleLLMClient()
+
+    spec = client._build_request_spec(
+        config=LLMRuntimeConfig(
+            provider="openai-compatible",
+            base_url="https://llm.example.test/v1",
+            model="chat-model",
+            api_key_configured=True,
+            temperature=0.2,
+            system_prompt="system",
+            enabled=True,
+        ),
+        api_key="test-key",
+        user_message="hello",
+        context_blocks=["[1] 文档《测试》\n正文:\nRAG context"],
+    )
+
+    assert spec.timeout_seconds == 120
+
+
+def test_anthropic_extract_empty_content_reports_response_shape() -> None:
+    with pytest.raises(ValueError, match="content_types=\\['thinking'\\]"):
+        OpenAICompatibleLLMClient._extract_anthropic_content(
+            {
+                "content": [{"type": "thinking", "thinking": "internal"}],
+                "stop_reason": "end_turn",
+                "base_resp": {"status_code": 0, "status_msg": ""},
+            }
+        )
+
+
 def test_complete_retries_retryable_llm_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     client = OpenAICompatibleLLMClient()
     calls = 0
@@ -170,6 +265,35 @@ def test_complete_retries_retryable_llm_errors(monkeypatch: pytest.MonkeyPatch) 
 
     assert result == "ok"
     assert calls == 3
+
+
+def test_complete_retries_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = OpenAICompatibleLLMClient()
+    TimeoutOnceHTTPResponse.calls = 0
+
+    monkeypatch.setattr(
+        "agent_platform.infrastructure.llm_client.request.urlopen",
+        lambda req, timeout: TimeoutOnceHTTPResponse(),
+    )
+    monkeypatch.setattr(OpenAICompatibleLLMClient, "_sleep_before_retry", lambda attempt: None)
+
+    result = client.complete(
+        config=LLMRuntimeConfig(
+            provider="openai-compatible",
+            base_url="https://llm.example.test/v1",
+            model="chat-model",
+            api_key_configured=True,
+            temperature=0.2,
+            system_prompt="system",
+            enabled=True,
+        ),
+        api_key="test-key",
+        user_message="hello",
+        context_blocks=[],
+    )
+
+    assert result == "ok after retry"
+    assert TimeoutOnceHTTPResponse.calls == 2
 
 
 def test_complete_does_not_retry_non_retryable_llm_errors(monkeypatch: pytest.MonkeyPatch) -> None:

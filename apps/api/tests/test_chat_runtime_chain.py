@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from agent_platform.domain.models import (
     Conversation,
     ConversationMessage,
@@ -238,6 +240,22 @@ class FakeLLMClient:
         return f"模型回复：{user_message}"
 
 
+class TimeoutLLMClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def complete(self, *, config, api_key: str, user_message: str, context_blocks: list[str]) -> str:
+        self.calls.append(
+            {
+                "model": config.model,
+                "api_key": api_key,
+                "user_message": user_message,
+                "context_blocks": context_blocks,
+            }
+        )
+        raise TimeoutError("The read operation timed out")
+
+
 class MemoryPackageLoader:
     def __init__(self, packages: list[dict[str, object]]) -> None:
         self._packages = packages
@@ -451,6 +469,49 @@ def test_chat_completion_records_standard_query_chain_steps() -> None:
     skill_step = next(step for step in traces.saved.steps if step.name == "skill_selected")
     assert skill_step.ref == "kb_grounded_qa"
     assert skill_step.node_type == "skill"
+
+
+def test_update_llm_runtime_rejects_incomplete_embedding_config() -> None:
+    service = build_service(
+        traces=FakeTraceRepository(),
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=FakeLLMClient(),
+    )
+
+    with pytest.raises(ValueError, match="embedding_base_url, embedding_model, embedding_api_key"):
+        asyncio.run(
+            service.update_llm_runtime(
+                tenant_id="tenant-demo",
+                provider="openai-compatible",
+                base_url="https://llm.example.test/v1",
+                model="test-model",
+                api_key="test-key",
+                temperature=0.2,
+                system_prompt="",
+                embedding_enabled=True,
+            )
+        )
+
+
+def test_knowledge_query_returns_retrieval_answer_when_llm_times_out() -> None:
+    traces = FakeTraceRepository()
+    llm_client = TimeoutLLMClient()
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    response = asyncio.run(service.complete(message="P0a 要交付什么？", tenant_id="tenant-demo", user_id="user-demo"))
+
+    assert response["intent"] == "knowledge_query"
+    assert "P0a 阶段交付统一对话入口" in response["message"]["content"]
+    assert any("LLM 生成知识库回答超时或失败" in tip for tip in response["warnings"])
+    assert traces.saved is not None
+    model_step = next(step for step in traces.saved.steps if step.name == "model")
+    assert model_step.status == "failed"
+    assert "TimeoutError" in model_step.summary
+    assert traces.saved.answer == response["message"]["content"]
 
 
 def test_general_chat_uses_llm_direct_answer() -> None:

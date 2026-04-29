@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 from dataclasses import dataclass
 from urllib import error, request
@@ -16,6 +17,7 @@ class LLMRequestSpec:
     headers: dict[str, str]
     payload: dict[str, object]
     response_format: str
+    timeout_seconds: int
 
 
 class OpenAICompatibleLLMClient:
@@ -49,7 +51,11 @@ class OpenAICompatibleLLMClient:
             method="POST",
         )
 
-        body = self._read_response_with_retry(req, timeout=30, error_prefix="LLM request failed")
+        body = self._read_response_with_retry(
+            req,
+            timeout=spec.timeout_seconds,
+            error_prefix="LLM request failed",
+        )
 
         data = json.loads(body)
         if spec.response_format == "anthropic":
@@ -83,7 +89,7 @@ class OpenAICompatibleLLMClient:
             method="POST",
         )
 
-        with self._open_with_retry(req, timeout=60, error_prefix="LLM stream request failed") as response:
+        with self._open_with_retry(req, timeout=spec.timeout_seconds, error_prefix="LLM stream request failed") as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="ignore").strip()
                 if not line or not line.startswith("data:"):
@@ -122,24 +128,22 @@ class OpenAICompatibleLLMClient:
                     ],
                 },
                 response_format="openai",
+                timeout_seconds=self._request_timeout_seconds(provider="azure", context_blocks=context_blocks),
             )
         if provider == "anthropic":
             return LLMRequestSpec(
                 url=self._anthropic_messages_url(config.base_url),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                },
+                headers=self._anthropic_headers(config.base_url, api_key),
                 payload={
                     "model": config.model,
-                    "max_tokens": 1024,
+                    "max_tokens": self._anthropic_max_tokens(context_blocks),
                     "temperature": config.temperature,
                     "stream": stream,
                     "system": config.system_prompt,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 response_format="anthropic",
+                timeout_seconds=self._request_timeout_seconds(provider="anthropic", context_blocks=context_blocks),
             )
         if provider not in {"openai-compatible", "openai"}:
             raise ValueError(f"Unsupported LLM provider: {config.provider}")
@@ -160,6 +164,7 @@ class OpenAICompatibleLLMClient:
                 ],
             },
             response_format="openai",
+            timeout_seconds=self._request_timeout_seconds(provider=provider, context_blocks=context_blocks),
         )
 
     @staticmethod
@@ -184,7 +189,17 @@ class OpenAICompatibleLLMClient:
         ]
         content = "\n".join(block for block in text_blocks if block)
         if not content:
-            raise ValueError("Anthropic response content is empty")
+            content_types = [
+                str(item.get("type", ""))
+                for item in content_items
+                if isinstance(item, dict)
+            ]
+            stop_reason = data.get("stop_reason", "")
+            base_resp = data.get("base_resp", {})
+            raise ValueError(
+                "Anthropic response content is empty "
+                f"(content_types={content_types}, stop_reason={stop_reason}, base_resp={base_resp})"
+            )
         return content
 
     @staticmethod
@@ -220,6 +235,34 @@ class OpenAICompatibleLLMClient:
         return f"{normalized}/v1/messages"
 
     @staticmethod
+    def _anthropic_max_tokens(context_blocks: list[str]) -> int:
+        # MiniMax Anthropic-compatible reasoning models may emit thinking blocks before text.
+        # RAG prompts carry retrieved chunks and structured answer requirements, so 1024 output
+        # tokens can be consumed before a final text block appears.
+        return 4096 if context_blocks else 1024
+
+    @staticmethod
+    def _anthropic_headers(base_url: str, api_key: str) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+        host = urlsplit(base_url.strip()).netloc.lower()
+        if host in {"api.minimaxi.com", "api.minimax.io"}:
+            headers["Authorization"] = f"Bearer {api_key}"
+        else:
+            headers["x-api-key"] = api_key
+        return headers
+
+    @staticmethod
+    def _request_timeout_seconds(*, provider: str, context_blocks: list[str]) -> int:
+        if not context_blocks:
+            return 60
+        if provider == "anthropic":
+            return 180
+        return 120
+
+    @staticmethod
     def _azure_chat_completions_url(base_url: str, deployment: str) -> str:
         parsed = urlsplit(base_url.strip())
         if not parsed.scheme or not parsed.netloc:
@@ -245,8 +288,17 @@ class OpenAICompatibleLLMClient:
 
     @classmethod
     def _read_response_with_retry(cls, req: request.Request, *, timeout: int, error_prefix: str) -> str:
-        with cls._open_with_retry(req, timeout=timeout, error_prefix=error_prefix) as response:
-            return response.read().decode("utf-8")
+        last_exc: BaseException | None = None
+        for attempt in range(1, cls._MAX_ATTEMPTS + 1):
+            try:
+                with cls._open_with_retry(req, timeout=timeout, error_prefix=error_prefix) as response:
+                    return response.read().decode("utf-8")
+            except (TimeoutError, socket.timeout) as exc:
+                last_exc = exc
+                if attempt == cls._MAX_ATTEMPTS:
+                    raise ValueError(f"{error_prefix}: read timed out after {timeout}s") from exc
+                cls._sleep_before_retry(attempt)
+        raise ValueError(f"{error_prefix}: read failed: {last_exc}") from last_exc
 
     @classmethod
     def _open_with_retry(cls, req: request.Request, *, timeout: int, error_prefix: str):
