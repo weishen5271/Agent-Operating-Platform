@@ -702,6 +702,33 @@ def test_stream_completion_streams_rag_llm_tokens_before_response_meta() -> None
     assert model_step.status == "completed"
 
 
+def test_stream_completion_streams_general_chat_llm_tokens_before_response_meta() -> None:
+    traces = FakeTraceRepository()
+    llm_client = StreamingFakeLLMClient(["直接", "流式", "回答"])
+    service = build_service(
+        traces=traces,
+        llm_config=FakeLLMConfigRepository(enabled=True),
+        llm_client=llm_client,
+    )
+
+    events = asyncio.run(
+        collect_events(
+            service.stream_complete(
+                message="你好，介绍一下平台能力",
+                tenant_id="tenant-demo",
+                user_id="user-demo",
+            )
+        )
+    )
+
+    event_names = [str(event["event"]) for event in events]
+    delta_contents = [str(event["content"]) for event in events if event["event"] == "message_delta"]
+    assert delta_contents == ["直接", "流式", "回答"]
+    assert event_names.index("message_delta") < event_names.index("response_meta")
+    assert next(event for event in events if event["event"] == "message_done")["content"] == "直接流式回答"
+    assert llm_client.stream_calls
+
+
 def test_dialogue_can_invoke_common_report_skill_and_json_path_tool() -> None:
     traces = FakeTraceRepository()
     service = build_service(

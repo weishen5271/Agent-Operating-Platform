@@ -6,6 +6,8 @@ import json
 import logging
 from pathlib import Path
 import re
+from threading import Thread
+from time import perf_counter
 from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
 
@@ -281,9 +283,15 @@ class ChatService:
             intent="unknown",
             strategy="direct_answer",
         )
+        last_step_at = perf_counter()
 
         async def add_step(step: TraceStep) -> None:
+            nonlocal last_step_at
             # Trace 是审计和前端执行过程展示的共同来源，所有关键节点都通过这里追加。
+            now = perf_counter()
+            if step.duration_ms is None:
+                step.duration_ms = max(0, int((now - last_step_at) * 1000))
+            last_step_at = now
             trace.steps.append(step)
             if on_step is not None:
                 await on_step(trace, step)
@@ -389,7 +397,7 @@ class ChatService:
                 tenant_id=context.tenant_id,
                 message=message,
                 short_memory=short_memory,
-                on_delta=None,
+                on_delta=stream_answer if on_answer_delta is not None else None,
             )
             await add_step(TraceStep(name="executed", status="completed", summary="model.direct_chat 执行完成。", node_type="runtime"))
             await add_step(
@@ -527,7 +535,9 @@ class ChatService:
                         )
                     elif intent == "knowledge_query":
                         result = await self._run_knowledge_search(
-                            context.tenant_id, payload["query"], add_step=add_step
+                            context.tenant_id,
+                            payload["query"],
+                            add_step=add_step,
                         )
                     elif intent == "wiki_query":
                         result = await self._run_wiki_search(
@@ -3113,6 +3123,7 @@ class ChatService:
                             if len(variants) > 1
                             else "Query 改写未返回有效变体，沿用原始问题。"
                         ),
+                        node_type="retrieval",
                     )
                 )
 
@@ -3163,6 +3174,7 @@ class ChatService:
                         if rerank_applied
                         else f"未触发 rerank（候选 {len(merged)} ≤ {final_top_k} 或调用失败）。"
                     ),
+                    node_type="retrieval",
                 )
             )
 
@@ -4117,17 +4129,32 @@ class ChatService:
         context_blocks: list[str],
         on_delta: AnswerDeltaCallback,
     ) -> str:
+        loop = asyncio.get_running_loop()
         stream = self._llm_client.stream_complete(
             config=config,
             api_key=api_key,
             user_message=user_message,
             context_blocks=context_blocks,
         )
+        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
+
+        def produce_chunks() -> None:
+            try:
+                for chunk in stream:
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        Thread(target=produce_chunks, daemon=True).start()
         answer_parts: list[str] = []
         while True:
-            chunk = await asyncio.to_thread(self._next_chunk, stream)
+            chunk = await queue.get()
             if chunk is None:
                 break
+            if isinstance(chunk, Exception):
+                raise chunk
             answer_parts.append(chunk)
             await on_delta(chunk)
         answer = "".join(answer_parts)
@@ -4141,13 +4168,6 @@ class ChatService:
         if len(text) <= RAG_CONTEXT_BLOCK_CHAR_LIMIT:
             return text
         return text[:RAG_CONTEXT_BLOCK_CHAR_LIMIT].rstrip() + "\n[内容已截断]"
-
-    @staticmethod
-    def _next_chunk(stream) -> str | None:
-        try:
-            return next(stream)
-        except StopIteration:
-            return None
 
     @staticmethod
     def _serialize_draft(draft: DraftAction) -> dict[str, object]:

@@ -11,6 +11,7 @@ import {
   getChatConversation,
   getChatConversations,
   getTenantPackages,
+  getTrace,
   streamChatCompletion,
   updateTenantPackages,
 } from "@/lib/api-client";
@@ -40,6 +41,7 @@ type RenderTraceStep = {
   ref?: string | null;
   ref_source?: string | null;
   ref_version?: string | null;
+  duration_ms?: number | null;
 };
 
 type ConversationSummary = ConversationListResponse["items"][number];
@@ -53,9 +55,98 @@ const NODE_TYPE_META: Record<string, { icon: string; label: string }> = {
   runtime: { icon: "play_circle", label: "Runtime" },
 };
 
+const TRACE_STEP_LABELS: Record<string, string> = {
+  received: "接收请求",
+  input_guard: "输入检查",
+  memory: "读取会话记忆",
+  react_planner: "规划决策",
+  classified: "意图识别",
+  capability_candidates: "候选能力",
+  skill_selected: "选择 Skill",
+  slot_fill: "补齐槽位",
+  planned: "执行计划",
+  risk: "风险评估",
+  governance: "治理校验",
+  executed: "执行完成",
+  tool_executed: "执行 Tool",
+  model: "模型生成",
+  output_guard: "输出审查",
+  completed: "组装响应",
+};
+
 function nodeTypeMeta(type: string | null | undefined): { icon: string; label: string } {
   if (type && NODE_TYPE_META[type]) return NODE_TYPE_META[type];
   return { icon: "radio_button_checked", label: "Step" };
+}
+
+function traceStepLabel(name: string): string {
+  if (TRACE_STEP_LABELS[name]) return TRACE_STEP_LABELS[name];
+  if (name.startsWith("skill_step:")) return `Skill 步骤：${name.slice("skill_step:".length)}`;
+  return name;
+}
+
+function traceStatusClass(status: string): string {
+  if (status === "completed") return "success";
+  if (status === "failed") return "danger";
+  if (status === "skipped") return "plain";
+  if (status === "running") return "warning pulse";
+  return "warning";
+}
+
+function formatDuration(value: number | null | undefined): string {
+  if (typeof value !== "number") return "-";
+  if (value < 1000) return `${value} ms`;
+  return `${(value / 1000).toFixed(1)} s`;
+}
+
+function traceStepDomId(index: number): string {
+  return `trace-step-${index}`;
+}
+
+function nextTypewriterChunkSize(bufferLength: number): number {
+  if (bufferLength > 240) return 36;
+  if (bufferLength > 120) return 24;
+  if (bufferLength > 48) return 14;
+  return 8;
+}
+
+function pendingTraceStep(steps: RenderTraceStep[], intent: string | null | undefined): RenderTraceStep | null {
+  const last = steps[steps.length - 1];
+  if (!last || last.name === "completed" || last.status === "failed" || last.status === "skipped") return null;
+  const nextByName: Record<string, Pick<RenderTraceStep, "name" | "summary" | "node_type">> = {
+    received: { name: "input_guard", summary: "正在执行输入安全检查。", node_type: "guard" },
+    input_guard: { name: "memory", summary: "正在读取会话记忆与长期知识摘要。", node_type: "runtime" },
+    memory: { name: "react_planner", summary: "正在进行 LLM Planner 或规则规划。", node_type: "runtime" },
+    react_planner: { name: "classified", summary: "正在确认意图与执行策略。", node_type: "runtime" },
+    classified: { name: "capability_candidates", summary: "正在筛选当前用户可用能力。", node_type: "runtime" },
+    capability_candidates: { name: "planned", summary: "正在选择 Skill、Tool 或 capability 执行路径。", node_type: "runtime" },
+    skill_selected: { name: "slot_fill", summary: "正在补齐 Skill 必需入参。", node_type: "skill" },
+    slot_fill: { name: "planned", summary: "正在生成执行计划。", node_type: "runtime" },
+    planned: { name: "risk", summary: "正在评估风险等级与自主度。", node_type: "guard" },
+    risk: { name: "governance", summary: "正在校验权限、配额与治理规则。", node_type: "guard" },
+    governance: { name: "executed", summary: "正在调用已选能力。", node_type: "capability" },
+    executed: intent === "knowledge_query" || intent === "wiki_query" || intent === "general_chat"
+      ? { name: "model", summary: "正在生成模型回答。", node_type: "skill" }
+      : { name: "output_guard", summary: "正在进行输出审查。", node_type: "guard" },
+    model: { name: "output_guard", summary: "正在进行输出审查。", node_type: "guard" },
+    output_guard: { name: "completed", summary: "正在组装最终响应。", node_type: "runtime" },
+  };
+  if (last.name.startsWith("skill_step:")) {
+    return {
+      name: "executed",
+      summary: "正在继续执行 Skill 编排或汇总步骤结果。",
+      status: "running",
+      timestamp: "running",
+      node_type: "skill",
+    };
+  }
+  const next = nextByName[last.name];
+  if (!next) return null;
+  return {
+    ...next,
+    status: "running",
+    timestamp: "running",
+  };
 }
 
 type UsedRef = {
@@ -293,6 +384,10 @@ export function ChatWorkbench() {
   const [packageError, setPackageError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedTraceStep, setExpandedTraceStep] = useState<number | null>(null);
+  const [highlightedTraceStep, setHighlightedTraceStep] = useState<number | null>(null);
+  const [isRefreshingTrace, setIsRefreshingTrace] = useState(false);
+  const [streamingAssistantMessageId, setStreamingAssistantMessageId] = useState<string | null>(null);
   const deltaBuffersRef = useRef<Record<string, string>>({});
   const finalContentRef = useRef<Record<string, string>>({});
   const typewriterTimersRef = useRef<Record<string, number>>({});
@@ -376,6 +471,9 @@ export function ChatWorkbench() {
     setTrace(null);
     setLatestResponse(null);
     setError(null);
+    setExpandedTraceStep(null);
+    setHighlightedTraceStep(null);
+    setStreamingAssistantMessageId(null);
     deltaBuffersRef.current = {};
     finalContentRef.current = {};
     Object.values(typewriterTimersRef.current).forEach((timer) => window.clearInterval(timer));
@@ -412,6 +510,9 @@ export function ChatWorkbench() {
       setTrace(null);
       setLatestResponse(null);
       setError(null);
+      setExpandedTraceStep(null);
+      setHighlightedTraceStep(null);
+      setStreamingAssistantMessageId(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "会话加载失败。";
       setError(`会话加载失败：${message}`);
@@ -460,7 +561,24 @@ export function ChatWorkbench() {
       ref: item.ref ?? null,
       ref_source: item.ref_source ?? null,
       ref_version: item.ref_version ?? null,
+      duration_ms: item.duration_ms ?? null,
     })) ?? [];
+
+  const runningTraceStep = isStreaming ? pendingTraceStep(traceSteps, trace?.intent) : null;
+  const visibleTraceSteps: RenderTraceStep[] = runningTraceStep ? [...traceSteps, runningTraceStep] : traceSteps;
+  const knownDurationSteps = traceSteps.filter((item) => typeof item.duration_ms === "number");
+  const totalDurationMs = knownDurationSteps.reduce((sum, item) => sum + (item.duration_ms ?? 0), 0);
+  const modelDurationMs = traceSteps
+    .filter((item) => item.name === "model")
+    .reduce((sum, item) => sum + (item.duration_ms ?? 0), 0);
+  const retrievalDurationMs = traceSteps
+    .filter((item) => item.node_type === "retrieval")
+    .reduce((sum, item) => sum + (item.duration_ms ?? 0), 0);
+  const toolDurationMs = traceSteps
+    .filter((item) => item.node_type === "tool")
+    .reduce((sum, item) => sum + (item.duration_ms ?? 0), 0);
+  const failedStepCount = traceSteps.filter((item) => item.status === "failed").length;
+  const skippedStepCount = traceSteps.filter((item) => item.status === "skipped").length;
 
   const usedSkills = aggregateUsedRefs(traceSteps, "skill");
   const usedTools = aggregateUsedRefs(traceSteps, "tool");
@@ -529,6 +647,9 @@ export function ChatWorkbench() {
     // 先乐观插入用户消息和空助手消息，后续 SSE 增量会持续填充助手气泡。
     setError(null);
     setLatestResponse(null);
+    setExpandedTraceStep(null);
+    setHighlightedTraceStep(null);
+    setStreamingAssistantMessageId(assistantMessageId);
     setTrace({
       trace_id: "",
       tenant_id: "",
@@ -594,6 +715,54 @@ export function ChatWorkbench() {
     void submitMessage(trace?.message || input);
   }
 
+  async function refreshTrace() {
+    if (!trace?.trace_id || isStreaming || isRefreshingTrace) return;
+    setIsRefreshingTrace(true);
+    setError(null);
+    try {
+      const nextTrace = await getTrace(trace.trace_id);
+      setTrace(nextTrace);
+      setHighlightedTraceStep(null);
+      if (expandedTraceStep !== null && expandedTraceStep >= nextTrace.steps.length) {
+        setExpandedTraceStep(null);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Trace 刷新失败。";
+      setError(`Trace 刷新失败：${message}`);
+    } finally {
+      setIsRefreshingTrace(false);
+    }
+  }
+
+  function warningTargetIndex(tip: string): number | null {
+    const normalized = tip.toLowerCase();
+    if (normalized.includes("llm") || normalized.includes("模型")) {
+      const modelIndex = traceSteps.findIndex((step) => step.name === "model" && step.status !== "completed");
+      if (modelIndex >= 0) return modelIndex;
+    }
+    if (tip.includes("OutputGuard") || tip.includes("拦截")) {
+      const guardIndex = traceSteps.findIndex((step) => step.name === "output_guard");
+      if (guardIndex >= 0) return guardIndex;
+    }
+    const failedIndex = traceSteps.findIndex((step) => step.status === "failed" || step.status === "skipped");
+    return failedIndex >= 0 ? failedIndex : null;
+  }
+
+  function focusTraceStep(index: number | null) {
+    if (index === null) return;
+    setExpandedTraceStep(index);
+    setHighlightedTraceStep(index);
+    window.setTimeout(() => {
+      document.getElementById(traceStepDomId(index))?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }, 0);
+    window.setTimeout(() => {
+      setHighlightedTraceStep((current) => (current === index ? null : current));
+    }, 1800);
+  }
+
   function clearTypewriterState(messageId: string) {
     const timer = typewriterTimersRef.current[messageId];
     if (timer) {
@@ -630,15 +799,16 @@ export function ChatWorkbench() {
             ),
           );
           setIsStreaming(false);
+          setStreamingAssistantMessageId(null);
         }
         return;
       }
 
-      const takeSize = buffer.length > 32 ? 4 : 2;
+      const takeSize = nextTypewriterChunkSize(buffer.length);
       const nextChunk = buffer.slice(0, takeSize);
       deltaBuffersRef.current[messageId] = buffer.slice(takeSize);
       appendAssistantContent(messageId, nextChunk);
-    }, 16);
+    }, 32);
   }
 
   function enqueueAssistantDelta(messageId: string, content: string) {
@@ -656,6 +826,7 @@ export function ChatWorkbench() {
         ),
       );
       setIsStreaming(false);
+      setStreamingAssistantMessageId(null);
       return;
     }
     startTypewriter(messageId);
@@ -937,7 +1108,9 @@ export function ChatWorkbench() {
                   <div className={`chat-bubble ${message.role}`}>
                     {message.content
                       ? message.role === "assistant"
-                        ? renderMarkdown(message.content)
+                        ? message.id === streamingAssistantMessageId
+                          ? <span className="streaming-plain-text">{message.content}</span>
+                          : renderMarkdown(message.content)
                         : message.content
                       : <span className="streaming-caret">正在响应</span>}
                   </div>
@@ -956,10 +1129,16 @@ export function ChatWorkbench() {
         {latestResponse?.warnings && latestResponse.warnings.length > 0 ? (
           <div className="chat-warnings">
             {latestResponse.warnings.map((tip) => (
-              <p key={tip} className="chat-warning-item">
+              <button
+                key={tip}
+                type="button"
+                className="chat-warning-item"
+                onClick={() => focusTraceStep(warningTargetIndex(tip))}
+              >
                 <span className="material-symbols-outlined">warning</span>
-                {tip}
-              </p>
+                <span>{tip}</span>
+                <span className="material-symbols-outlined warning-jump">travel_explore</span>
+              </button>
             ))}
           </div>
         ) : null}
@@ -1021,11 +1200,41 @@ export function ChatWorkbench() {
             <h3>Trace 执行链路</h3>
             <p>逐步查看意图识别、规划、插件执行与响应组装。</p>
           </div>
-          <button type="button" className="ghost-button">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={!trace?.trace_id || isStreaming || isRefreshingTrace}
+            onClick={refreshTrace}
+          >
             <span className="material-symbols-outlined">refresh</span>
-            刷新
+            {isRefreshingTrace ? "刷新中..." : "刷新"}
           </button>
         </div>
+
+        {traceSteps.length > 0 ? (
+          <div className="trace-summary-grid">
+            <div>
+              <span>总耗时</span>
+              <strong>{knownDurationSteps.length ? formatDuration(totalDurationMs) : "-"}</strong>
+            </div>
+            <div>
+              <span>模型</span>
+              <strong>{modelDurationMs ? formatDuration(modelDurationMs) : "-"}</strong>
+            </div>
+            <div>
+              <span>检索</span>
+              <strong>{retrievalDurationMs ? formatDuration(retrievalDurationMs) : "-"}</strong>
+            </div>
+            <div>
+              <span>工具</span>
+              <strong>{toolDurationMs ? formatDuration(toolDurationMs) : "-"}</strong>
+            </div>
+            <div>
+              <span>异常</span>
+              <strong>{failedStepCount + skippedStepCount}</strong>
+            </div>
+          </div>
+        ) : null}
 
         {routing ? (
           <div className="panel-subsection">
@@ -1067,30 +1276,81 @@ export function ChatWorkbench() {
         ) : null}
 
         <div className="trace-list">
-          {traceSteps.length > 0 ? (
-            traceSteps.map((item, index) => {
+          {visibleTraceSteps.length > 0 ? (
+            visibleTraceSteps.map((item, index) => {
               const meta = nodeTypeMeta(item.node_type);
+              const isExpanded = expandedTraceStep === index;
+              const statusClass = traceStatusClass(item.status);
               return (
                 <article
                   key={`${item.name}-${item.timestamp}-${index}`}
-                  className={`trace-item ${item.status === "completed" ? "completed" : ""}`}
+                  id={traceStepDomId(index)}
+                  className={[
+                    "trace-item",
+                    item.status,
+                    isExpanded ? "expanded" : "",
+                    highlightedTraceStep === index ? "highlighted" : "",
+                  ].filter(Boolean).join(" ")}
                 >
                   <div className="trace-dot" title={meta.label}>
                     <span className="material-symbols-outlined">{meta.icon}</span>
                   </div>
-                  <div>
-                    <strong>
-                      {item.name}
-                      {item.ref ? (
-                        <span className="mono" style={{ marginLeft: 8, opacity: 0.7 }}>
-                          {item.ref}
-                          {item.ref_source ? ` @${item.ref_source}` : ""}
-                        </span>
-                      ) : null}
-                    </strong>
+                  <div className="trace-main">
+                    <button
+                      type="button"
+                      className="trace-step-toggle"
+                      onClick={() => setExpandedTraceStep(isExpanded ? null : index)}
+                    >
+                      <span>
+                        <strong>{traceStepLabel(item.name)}</strong>
+                        <span className="trace-step-raw">{item.name}</span>
+                      </span>
+                      <span className="material-symbols-outlined">
+                        {isExpanded ? "expand_less" : "expand_more"}
+                      </span>
+                    </button>
                     <p>{item.summary}</p>
+                    {item.ref ? (
+                      <div className="trace-ref-line">
+                        <span className="mono">{item.ref}</span>
+                        {item.ref_source ? <span>{item.ref_source}</span> : null}
+                        {item.ref_version ? <span>{item.ref_version}</span> : null}
+                      </div>
+                    ) : null}
+                    {isExpanded ? (
+                      <dl className="trace-detail-grid">
+                        <div>
+                          <dt>原始节点</dt>
+                          <dd>{item.name}</dd>
+                        </div>
+                        <div>
+                          <dt>类型</dt>
+                          <dd>{meta.label}</dd>
+                        </div>
+                        <div>
+                          <dt>状态</dt>
+                          <dd>{item.status}</dd>
+                        </div>
+                        <div>
+                          <dt>耗时</dt>
+                          <dd>{formatDuration(item.duration_ms)}</dd>
+                        </div>
+                        <div>
+                          <dt>引用</dt>
+                          <dd>{item.ref ?? "-"}</dd>
+                        </div>
+                        <div>
+                          <dt>来源</dt>
+                          <dd>{item.ref_source ?? "-"}</dd>
+                        </div>
+                        <div>
+                          <dt>版本</dt>
+                          <dd>{item.ref_version ?? "-"}</dd>
+                        </div>
+                      </dl>
+                    ) : null}
                   </div>
-                  <span className={`status-chip ${item.status === "completed" ? "success" : "warning"}`}>
+                  <span className={`status-chip ${statusClass}`}>
                     {item.status}
                   </span>
                 </article>
