@@ -1,829 +1,597 @@
-# 多入口 AI 业务操作平台与外部数据分析方案
+# 外挂式 Agent 业务对象闭环方案
 
-> 本文用于梳理平台从“对话驱动的业务包执行平台”升级为“多入口 AI 业务操作平台”的前后端改造方案。重点覆盖外部系统通过 HTTP / MQTT 接入数据、落入 ClickHouse 存储，再基于已存储数据进行 AI 智能分析的完整链路。
-
----
-
-## 1. 背景与目标
-
-当前平台已经具备对话入口、业务包、Skill / Capability / Tool、RAG / Wiki、Trace、BusinessOutput、DraftAction 等基础能力。
-
-当前主要链路是：
-
-```text
-用户对话
-  ↓
-ChatService
-  ↓
-业务包路由 / 意图识别
-  ↓
-Skill / Capability / Tool / RAG / Wiki
-  ↓
-对话回答 / Trace / 草稿 / 业务成果
-```
-
-这条链路本质上是 Chat-first，即以自然语言对话作为统一入口。
-
-后续目标是扩展为多入口 AI 业务操作平台：
-
-- 保留对话入口。
-- 增加 AI 工作台入口，支持结构化参数触发 AI 任务。
-- 增加数据资产入口，支持外部数据先入库，再基于平台存储数据进行 AI 分析。
-- 支持 HTTP / MQTT 接收外部系统数据。
-- 使用 ClickHouse 存储外部业务明细和分析数据。
-- 使用 PostgreSQL 继续承载平台事务主库。
-- AI 分析基于 ClickHouse 聚合结果，而不是直接分析单条接入消息或全量明细。
+> 本文依据《Agent 平台总体战略规划》整理，用于指导当前阶段和后续阶段的产品、架构、前后端开发。平台主线不是自建数据接入、MQTT 采集或 ClickHouse 数据分析平台，而是作为外挂式 Agent 运行与治理层，围绕外部业务系统中的业务对象执行受控 AI 动作，并沉淀业务成果、草稿和审计链路。
 
 ---
 
-## 2. 总体架构
+## 1. 战略定位
 
-### 2.1 外部数据分析链路
+平台定位：
 
-```text
-外部系统
-  ├─ HTTP 推送
-  └─ MQTT 推送
-        ↓
-数据接入层 Ingestion Service
-        ↓
-数据标准化 / 校验 / 租户隔离 / 幂等处理
-        ↓
-ClickHouse 外部数据分析库
-        ↓
-Data Analysis Service 查询 / 聚合
-        ↓
-AI Task Runtime
-        ↓
-LLM 基于聚合结果生成分析
-        ↓
-PostgreSQL 保存任务、Trace、BusinessOutput、审批草稿
-```
+> 外挂式 Agent 业务操作平台：连接企业已有业务系统、知识库和工具能力，在权限、租户、风险和审计约束下，围绕业务对象执行 AI 分析、建议生成、草稿创建和成果沉淀。
 
-### 2.2 用户触发链路
+平台的核心价值不是“存业务数据”，而是“让已有业务系统获得可治理的 AI 能力”。
 
-```text
-用户对话 / AI 工作台 / 数据资产页
-        ↓
-AI Task Runtime
-        ↓
-业务包 Skill / Capability / Tool / RAG / Wiki / Data Analysis
-        ↓
-PostgreSQL 保存 Trace / Output / Draft / Task
-```
+平台主责：
+
+- 读取业务包声明的业务对象、AI 动作、Skill、Capability、Tool。
+- 通过 HTTP / MCP / Platform executor 按需调用外部系统。
+- 在一次 AI 动作中组合外部系统事实、知识库引用和模型分析。
+- 保存 AI Run、Trace、BusinessOutput、DraftAction。
+- 提供租户、权限、插件配置、LLM Runtime、OutputGuard 和审计治理。
+- 支持独立工作台和嵌入式模块两种交付形态。
+
+平台不主责：
+
+- 接管外部系统主数据。
+- 自建 MQTT / IoT 数据采集链路。
+- 长期保存 SCADA、ERP、MES、CRM、CMMS 的完整业务明细。
+- 替代数据中台、BI、流程编排平台或行业垂直 SaaS。
 
 ---
 
-## 3. 数据库分工
+## 2. 产品闭环
 
-### 3.1 PostgreSQL
+当前 Chat-first 的能力需要升级为“业务对象 + AI 动作”闭环。
 
-PostgreSQL 继续作为平台事务主库，保存强一致、强权限、强状态流转的数据：
+标准闭环：
 
-- 租户、用户、角色、权限。
-- 业务包、插件配置、密钥配置。
-- 对话、Trace、AI Task。
-- BusinessOutput。
-- 审批草稿 DraftAction。
-- 知识库、Wiki、pgvector。
-- 系统配置、审计、安全事件。
+```text
+选择业务包
+  ↓
+选择业务对象类型
+  ↓
+输入或检索业务对象 ID
+  ↓
+选择 AI 动作
+  ↓
+平台按需调用外部系统和知识库
+  ↓
+区分事实、引用、推断、建议、草稿
+  ↓
+保存为 BusinessOutput / DraftAction
+  ↓
+Trace 审计全过程
+```
 
-不建议把这些平台状态迁入 ClickHouse。
+关键原则：
 
-### 3.2 ClickHouse
-
-ClickHouse 作为外部数据分析库，保存外部系统推送的明细数据和分析宽表：
-
-- 设备报警。
-- 传感器指标。
-- 工单流水。
-- 业务事件。
-- 日志型数据。
-- 指标快照。
-- 标准化后的分析宽表。
-
-ClickHouse 适合大批量写入、按时间范围查询、多维聚合、TopN、趋势统计和高压缩存储；不适合替代 PostgreSQL 承载用户权限、审批流、配置和频繁更新的事务状态。
+- 用户不必先聊天，Chat 只是入口之一。
+- 平台不需要先同步外部数据。
+- 外部业务数据仍由原系统管理。
+- 平台保存 AI 过程和结果，不保存外部业务主数据。
+- 第一阶段至少接通一个真实外部只读能力，不能只停留在全 stub 演示。
 
 ---
 
-## 4. 后端改造方案
+## 3. 交付形态
 
-### 4.1 新增 AI Task Runtime
+平台支持两种交付形态，共享同一个 AI 执行引擎。
 
-新增通用 AI 任务层，让 Chat 不再是唯一入口。
+### 3.1 独立工作台
 
-建议新增模块：
+独立工作台是当前阶段主交付形态，适合演示、早期验证、轻量使用和平台运营。
 
-```text
-apps/api/src/agent_platform/runtime/ai_task_service.py
-apps/api/src/agent_platform/runtime/data_analysis_service.py
-apps/api/src/agent_platform/runtime/analysis_planner.py
-```
+主要页面：
 
-建议新增接口：
+- AI 工作台：选择业务包、对象、动作，执行并查看结果。
+- 业务包详情：展示业务对象、AI 动作、依赖能力状态、配置完整性。
+- 业务成果：展示 AI 生成的报告、建议、行动计划和草稿来源。
+- Chat：自然语言探索入口，可触发结构化 AI Action。
+- 审批中心：处理 DraftAction。
 
-```text
-POST /api/v1/ai/tasks
-GET  /api/v1/ai/tasks
-GET  /api/v1/ai/tasks/{task_id}
-GET  /api/v1/ai/tasks/{task_id}/trace
-POST /api/v1/ai/data-analysis
-```
+### 3.2 嵌入式模块
 
-AI Task 支持来源：
+嵌入式模块是后续深度客户/OEM/白标交付形态。平台能力嵌入客户已有系统中，用户不需要切换工作环境。
+
+集成模式分阶段支持：
 
 ```text
-chat           对话触发
-workspace      AI 工作台触发
-data_analysis  基于已入库外部数据触发
+Phase 2: iframe 嵌入预留，提供 /embed/workbench
+Phase 3: iframe 正式可用，支持 postMessage 上下文传递
+Phase 3+: 后端 SDK / API 直接调用
+Phase 4: Web Component / 白标 / OEM
 ```
 
-PostgreSQL 新增 `ai_task` 表：
+嵌入模式下允许宿主系统在一次 AI Action 调用中传入业务上下文或对象快照，但这些数据只作为本次执行上下文和必要审计材料，不作为平台长期业务主数据保存。
+
+---
+
+## 4. 总体架构
 
 ```text
-ai_task
-- task_id
-- tenant_id
-- user_id
-- package_id
-- source
-- scenario
-- input
-- status
-- trace_id
-- output_ids
-- created_at
-- updated_at
-```
+交付层
+  ├─ AI 工作台
+  ├─ Chat
+  ├─ /embed/workbench
+  ├─ SDK / API
+  └─ 业务成果 / 审批 / 审计页面
+        ↓
+AI Execution Engine
+  ├─ AIRunService
+  ├─ AIActionRegistry
+  ├─ SkillExecutor
+  ├─ CapabilityRegistry
+  ├─ ToolRegistry
+  ├─ RAG / Wiki
+  ├─ LLM Runtime
+  ├─ OutputGuard
+  └─ Trace
+        ↓
+业务包运行时
+  ├─ business_objects
+  ├─ ai_actions
+  ├─ skills
+  ├─ plugins
+  ├─ tools
+  └─ prompts / knowledge_bindings
+        ↓
+外部业务系统
+  ├─ CMMS
+  ├─ SCADA
+  ├─ ERP
+  ├─ MES
+  └─ CRM
 
-### 4.2 新增数据接入层
-
-新增 ingestion 模块：
-
-```text
-apps/api/src/agent_platform/ingestion/
-  service.py
-  http_routes.py
-  mqtt_consumer.py
-  schema_registry.py
-  clickhouse_repository.py
-```
-
-建议新增接口：
-
-```text
-POST /api/v1/data-ingest/events
-POST /api/v1/data-ingest/events/batch
-GET  /api/v1/data-assets/datasets
-GET  /api/v1/data-assets/records
-```
-
-HTTP 和 MQTT 都只负责接收、校验、标准化、入库，不直接触发 AI 分析。
-
-统一内部链路：
-
-```text
-HTTP Ingest Route ┐
-                  ├─ IngestionService → ClickHouse
-MQTT Consumer     ┘
-```
-
-### 4.3 接入数据结构
-
-HTTP 接入请求示例：
-
-```json
-{
-  "tenant_id": "sw",
-  "package_id": "industry.mfg_maintenance",
-  "dataset": "equipment_alarm",
-  "source": "scada",
-  "external_id": "alarm-001",
-  "occurred_at": "2026-04-29T10:30:00+08:00",
-  "payload": {
-    "equipment_id": "CNC-01",
-    "fault_code": "AX-203",
-    "severity": "high",
-    "alarm_time": "2026-04-29T10:30:00+08:00",
-    "message": "伺服驱动过热"
-  }
-}
-```
-
-处理要求：
-
-- `tenant_id` 必须可鉴权，不应只信任请求体。
-- `package_id` 和 `dataset` 必须在业务包声明中存在。
-- `external_id` 用于幂等。
-- `occurred_at` 必须独立字段，不只放在 payload 中。
-- 原始 payload 和标准化 payload 分开保存。
-
-### 4.4 ClickHouse 表设计
-
-保留一张原始通用表，用于所有外部接入数据留痕：
-
-```sql
-CREATE TABLE raw_external_event
-(
-    tenant_id String,
-    package_id String,
-    dataset LowCardinality(String),
-    source LowCardinality(String),
-    external_id String,
-    occurred_at DateTime64(3, 'Asia/Shanghai'),
-    ingested_at DateTime64(3, 'Asia/Shanghai') DEFAULT now64(3),
-    payload String,
-    normalized_payload String
-)
-ENGINE = ReplacingMergeTree(ingested_at)
-PARTITION BY toYYYYMM(occurred_at)
-ORDER BY (tenant_id, package_id, dataset, occurred_at, external_id);
-```
-
-对核心高频数据集建立分析宽表，例如设备报警：
-
-```sql
-CREATE TABLE equipment_alarm
-(
-    tenant_id String,
-    package_id String,
-    equipment_id String,
-    fault_code String,
-    severity LowCardinality(String),
-    message String,
-    alarm_time DateTime64(3, 'Asia/Shanghai'),
-    external_id String,
-    payload String,
-    ingested_at DateTime64(3, 'Asia/Shanghai') DEFAULT now64(3)
-)
-ENGINE = ReplacingMergeTree(ingested_at)
-PARTITION BY toYYYYMM(alarm_time)
-ORDER BY (tenant_id, equipment_id, alarm_time, external_id);
+PostgreSQL 保存平台治理数据：
+  ai_run / trace / business_outputs / draft_actions /
+  conversations / plugin_config / tenant / user / permission / knowledge
 ```
 
 设计原则：
 
-- 通用表用于原始数据留痕和低频数据集。
-- 宽表用于高频查询和核心分析场景。
-- 分区字段优先使用业务发生时间。
-- 排序键优先包含租户、核心过滤字段、时间字段、外部唯一标识。
+- 引擎层是核心资产，交付层只做薄封装。
+- ChatService 应逐步复用 AI Execution Engine，而不是形成第二套执行逻辑。
+- 业务包 manifest 是能力契约，前后端都围绕 manifest 动态工作。
 
-### 4.5 基于存储数据的 AI 分析
+---
 
-AI 分析必须从 ClickHouse 中查询已存储数据，不直接基于刚收到的单条消息做分析。
+## 5. 核心抽象
 
-请求示例：
+### 5.1 BusinessObject
+
+业务对象是外部系统里的业务实体。平台只保存对象引用和执行上下文。
+
+```json
+{
+  "object_type": "equipment",
+  "object_id": "CNC-01",
+  "display_name": "CNC-01 数控机床",
+  "package_id": "industry.mfg_maintenance",
+  "source_system": "cmms"
+}
+```
+
+第一阶段支持手动输入对象 ID。后续如果业务包声明 `lookup_capability`，则支持从外部系统检索对象候选。
+
+### 5.2 AIAction
+
+AI 动作描述平台可以围绕某类业务对象执行什么操作。
+
+```json
+{
+  "id": "equipment_fault_analysis",
+  "label": "故障分析",
+  "object_types": ["equipment"],
+  "description": "查询报警、历史工单和知识库，生成故障原因分析与处置建议。",
+  "skill": "fault_triage",
+  "required_inputs": ["equipment_id"],
+  "optional_inputs": ["fault_code", "time_range"],
+  "outputs": ["recommendation", "action_plan"],
+  "risk_level": "low",
+  "requires_confirmation": false
+}
+```
+
+AIAction 可以绑定：
+
+- 一个 Skill。
+- 一个 Capability。
+- 多个 Capability / Tool 编排。
+- 知识库/RAG/Wiki 检索。
+- 需要确认的 DraftAction。
+
+### 5.3 DataInput
+
+为支持独立工作台和嵌入式模块，执行引擎需要抽象数据输入来源。
+
+```text
+platform_pull   平台通过 HTTP/MCP executor 主动查询外部系统
+host_context    宿主系统在调用 AI Action 时传入本次上下文或快照
+mixed           部分由宿主传入，部分由平台按需查询
+```
+
+约束：
+
+- `host_context` 不是长期数据接入。
+- 宿主传入的数据只用于本次 AI Run 和必要审计。
+- 如需保存快照，只保存摘要、脱敏样本和外部引用 ID。
+
+### 5.4 AIRun
+
+AI Run 是一次非 Chat 或结构化 Chat 动作执行记录。
+
+```text
+ai_run
+- run_id
+- tenant_id
+- user_id
+- package_id
+- action_id
+- source: workspace | chat | embed | api
+- object_type
+- object_id
+- inputs
+- data_input_mode
+- status
+- trace_id
+- output_ids
+- draft_id
+- error_message
+- created_at
+- updated_at
+```
+
+---
+
+## 6. 后端设计
+
+### 6.1 新增模块
+
+```text
+apps/api/src/agent_platform/runtime/ai_run_service.py
+apps/api/src/agent_platform/runtime/ai_action_registry.py
+apps/api/src/agent_platform/runtime/data_input.py
+```
+
+`AIRunService` 复用：
+
+- `PackageLoader`
+- `SkillRegistry`
+- `CapabilityRegistry`
+- `SkillExecutor`
+- `TraceRepository`
+- `BusinessOutputRepository`
+- `DraftRepository`
+- `OutputGuardRuleRepository`
+- `PluginConfigRepository`
+- `LLMConfigRepository`
+- `OpenAICompatibleLLMClient`
+
+### 6.2 API
+
+```text
+GET  /api/v1/ai/actions
+POST /api/v1/ai/actions/{action_id}/run
+GET  /api/v1/ai/runs
+GET  /api/v1/ai/runs/{run_id}
+GET  /api/v1/ai/runs/{run_id}/trace
+GET  /api/v1/ai/object-lookup
+```
+
+执行请求：
 
 ```json
 {
   "package_id": "industry.mfg_maintenance",
-  "dataset": "equipment_alarm",
-  "analysis_type": "trend_summary",
-  "filters": {
-    "equipment_id": "CNC-01",
-    "start_time": "2026-04-01T00:00:00+08:00",
-    "end_time": "2026-04-29T23:59:59+08:00"
+  "source": "workspace",
+  "object": {
+    "object_type": "equipment",
+    "object_id": "CNC-01"
   },
-  "question": "分析这台设备本月报警趋势和主要风险"
+  "inputs": {
+    "fault_code": "AX-203",
+    "time_range": "last_7_days"
+  },
+  "data_input": {
+    "mode": "platform_pull",
+    "context": {}
+  },
+  "output_types": ["recommendation", "action_plan"]
 }
 ```
 
-后端执行流程：
+### 6.3 输出结构
 
-```text
-校验租户、权限、业务包、数据集
-  ↓
-读取业务包 dataset 声明
-  ↓
-根据 dataset、analysis_type、filters 选择查询模板
-  ↓
-ClickHouse 返回聚合数据和关键样本
-  ↓
-LLM 基于聚合结果生成分析结论
-  ↓
-保存 BusinessOutput
-  ↓
-记录 Trace
-```
-
-LLM 不直接访问 ClickHouse，也不接收全量明细。
-
-程序侧应先完成确定性聚合：
-
-- 总记录数。
-- 时间趋势。
-- TopN 设备、故障码、事件类型。
-- 严重等级分布。
-- 最近关键样本。
-- 环比变化。
-- 异常集中时段。
-
-LLM 只负责基于聚合结果生成：
-
-- 趋势解释。
-- 可能原因。
-- 风险判断。
-- 处置建议。
-- 报告摘要。
-- 行动计划。
-
-### 4.6 查询安全
-
-ClickHouse 查询不允许由用户自由拼 SQL。
-
-建议采用白名单查询模板：
-
-```text
-dataset + analysis_type + filters
-  ↓
-后端选择固定 SQL 模板
-  ↓
-参数化绑定 tenant_id、时间范围、设备编号等条件
-```
-
-必须保证：
-
-- 查询自动注入 `tenant_id`。
-- 用户只能查询当前租户数据。
-- dataset 必须在业务包声明中存在。
-- analysis_type 必须在业务包声明中存在。
-- 时间范围、limit、返回样本数必须有限制。
-
----
-
-## 5. 业务包改造方案
-
-业务包 `manifest.json` 增加 `datasets` 声明，用于描述外部数据集、存储位置和可用分析类型。
-
-示例：
+AI 输出必须区分事实、引用、推断、建议和草稿。
 
 ```json
 {
-  "datasets": [
+  "facts": [],
+  "citations": [],
+  "reasoning_summary": "",
+  "recommendations": [],
+  "action_plan": [],
+  "draft_action": null
+}
+```
+
+`BusinessOutput.payload` 应保留结构化字段，避免只保存一段不可治理的自然语言。
+
+### 6.4 可选分析快照
+
+为审计和复盘，可以保存轻量快照：
+
+```text
+analysis_snapshot
+- snapshot_id
+- run_id
+- tenant_id
+- package_id
+- source_system
+- query_summary
+- result_digest
+- sampled_rows
+- created_at
+```
+
+约束：
+
+- 只保存摘要和少量样本。
+- 不作为业务系统主数据。
+- 不用于替代外部系统查询。
+- 涉及敏感字段时必须脱敏或不保存。
+
+---
+
+## 7. 业务包 manifest 扩展
+
+业务包新增：
+
+```json
+{
+  "business_objects": [
     {
-      "name": "equipment_alarm",
-      "label": "设备报警数据",
-      "source": "scada",
-      "storage": "clickhouse",
-      "table": "equipment_alarm",
-      "time_field": "alarm_time",
-      "unique_keys": ["external_id"],
-      "schema": {
-        "required": ["equipment_id", "alarm_time", "severity"],
-        "properties": {
-          "equipment_id": { "type": "string", "label": "设备编号" },
-          "fault_code": { "type": "string", "label": "故障码" },
-          "severity": { "type": "string", "label": "严重等级" },
-          "alarm_time": { "type": "datetime", "label": "报警时间" },
-          "message": { "type": "string", "label": "报警描述" }
-        }
-      },
-      "analysis": [
-        {
-          "type": "trend_summary",
-          "label": "趋势分析",
-          "default_filters": ["equipment_id", "time_range"],
-          "outputs": ["report", "recommendation"]
-        },
-        {
-          "type": "risk_summary",
-          "label": "风险分析",
-          "default_filters": ["severity", "time_range"],
-          "outputs": ["recommendation", "action_plan"]
-        }
-      ]
+      "type": "equipment",
+      "label": "设备",
+      "id_field": "equipment_id",
+      "lookup_capability": "cmms.equipment.lookup"
+    }
+  ],
+  "ai_actions": [
+    {
+      "id": "equipment_fault_analysis",
+      "label": "故障分析",
+      "object_types": ["equipment"],
+      "skill": "fault_triage",
+      "required_inputs": ["equipment_id"],
+      "optional_inputs": ["fault_code", "time_range"],
+      "outputs": ["recommendation", "action_plan"],
+      "risk_level": "low",
+      "data_input_modes": ["platform_pull", "host_context", "mixed"]
     }
   ]
 }
 ```
 
-业务包仍保留现有声明：
+设计原则：
 
-- `intents`
-- `skills`
-- `tools`
-- `plugins`
-- `prompts`
-- `knowledge_bindings`
-
-扩展后，业务包可以同时声明：
-
-- 能调用哪些外部能力。
-- 能接收哪些外部数据。
-- 数据存到哪里。
-- 支持哪些 AI 分析类型。
-- 分析结果可以生成哪些业务成果。
+- Manifest 只描述业务语义，不写 UI 布局。
+- 前端根据 manifest 动态渲染对象类型、动作和输入项。
+- 后端严格校验 action 依赖的 Skill / Capability 是否存在。
+- 依赖能力状态必须返回给前端：`http`、`mcp`、`platform`、`stub`、`missing_config`。
+- 使用 stub 的结果必须显眼标注。
 
 ---
 
-## 6. 前端改造方案
+## 8. 前端设计
 
-### 6.1 数据接入页
+### 8.1 AI 工作台
 
-新增页面：
-
-```text
-/(workspace)/data-ingest
-```
-
-功能：
-
-- 查看 HTTP 接入地址。
-- 查看 MQTT Topic 配置。
-- 查看租户数据源状态。
-- 查看最近入库量。
-- 查看接收失败记录。
-- 查看字段映射和标准化状态。
-
-### 6.2 数据资产页
-
-新增页面：
+路径：
 
 ```text
-/(workspace)/data-assets
+/(workspace)/ai-workbench
 ```
 
-功能：
+布局：
+
+```text
+左侧：业务包与业务对象
+中间：对象上下文与 AI 动作
+右侧：执行结果与 Trace
+```
+
+核心能力：
 
 - 选择业务包。
-- 选择数据集。
-- 按时间、设备、等级等字段筛选。
-- 查看 ClickHouse 中已入库记录。
-- 查看原始 payload。
-- 查看标准化 payload。
-- 查看数据量趋势。
+- 选择业务对象类型。
+- 输入或检索业务对象 ID。
+- 展示可用 AI 动作。
+- 填写动作参数。
+- 执行动作。
+- 展示事实、引用、推断、建议、草稿。
+- 展示 Trace、已用 Skill / Capability / Tool。
+- 保存或查看 BusinessOutput。
 
-### 6.3 AI 数据分析页
+### 8.2 业务包详情页
 
-新增页面：
+新增展示：
+
+- 业务对象。
+- AI 动作。
+- 依赖能力状态。
+- 风险等级。
+- 输出类型。
+- 是否需要审批。
+- 支持的数据输入模式。
+- 插件配置完整性。
+
+### 8.3 业务成果页
+
+增强展示：
+
+- 来源 run。
+- 来源 action。
+- 业务对象类型和对象 ID。
+- 事实/引用/建议分层。
+- Trace 入口。
+- 关联 DraftAction。
+
+### 8.4 嵌入预留
+
+第一阶段只要求核心组件独立，不立即发布 Web Component。
+
+组件设计要求：
+
+- 对象输入、动作选择、结果展示、Trace 查看不依赖全局路由。
+- 组件通过 props 接收上下文。
+- 组件通过事件上报执行结果。
+
+后续可封装为：
+
+- `/embed/workbench`
+- iframe + postMessage
+- SDK / API
+- Web Component
+
+---
+
+## 9. 租户与数据边界
+
+租户定义：
+
+> 租户是 Agent 运行与治理边界，不是业务数据归属边界。
+
+租户隔离：
+
+- 用户、角色、权限。
+- 业务包启用范围。
+- 插件配置和 secrets。
+- LLM Runtime。
+- 知识库和 Wiki。
+- Trace、BusinessOutput、DraftAction。
+- OutputGuard 和审批策略。
+
+租户不表示：
+
+- 一套外部业务主数据仓库。
+- 一份设备/工单/订单/客户主数据副本。
+- 一套 IoT 数据流。
+
+---
+
+## 10. 安全与治理
+
+- AI Action 执行前校验租户、用户、required_scope。
+- HTTP / MCP executor 继续执行 allowlist、SSRF 防护、timeout、retry、rate limit。
+- 插件密钥继续走租户级 plugin_config。
+- 不允许业务包上传 Python 执行代码。
+- 高风险动作必须进入 DraftAction。
+- AI 输出进入 OutputGuard。
+- UI 必须区分外部系统事实、知识库引用、AI 推断、建议动作和待确认草稿。
+- 使用 stub 或 host_context 的地方必须明确标注来源。
+
+---
+
+## 11. 分阶段演进
+
+### Phase 1：独立工作台最小闭环
+
+目标：证明“业务对象 + AI 动作 + 成果沉淀”的价值。
+
+- 新增 AIRunService。
+- 新增 AI 工作台。
+- 支持设备故障分析。
+- 至少接通一个真实外部只读能力，建议优先 CMMS 工单历史查询。
+- 允许 SCADA 暂为 stub，但必须标注。
+- 保存 recommendation / action_plan。
+- Trace 可审计。
+
+### Phase 2：声明完善与审批闭环
+
+目标：业务包自描述完整，高风险动作可确认。
+
+- Manifest 增加 business_objects / ai_actions。
+- 业务包详情页展示动作和依赖状态。
+- 支持 lookup_capability。
+- DraftAction 关联 AI Run。
+- 输出事实/引用/建议分层。
+
+### Phase 3：Chat 融合与嵌入就绪
+
+目标：自然语言入口和结构化动作入口共享同一引擎，开始支持嵌入。
+
+- Chat Planner 可选择 AI Action。
+- Chat 结果关联 run / output / draft。
+- 提供 `/embed/workbench`。
+- 定义 postMessage 协议。
+- API 支持会话态和 API Key 两种认证。
+
+### Phase 4：生态与规模化
+
+目标：多行业业务包和合作伙伴扩展。
+
+- SDK / API 示例。
+- 业务包开发模板。
+- 更多行业业务包。
+- 白标/OEM。
+- Webhook 异步回调。
+- 可选 Web Component。
+
+---
+
+## 12. 最小可落地版本
+
+第一版建议聚焦：
+
+> 设备故障分析。
+
+输入：
 
 ```text
-/(workspace)/data-analysis
+业务包：industry.mfg_maintenance
+对象类型：equipment
+对象 ID：CNC-01
+故障码：AX-203
 ```
 
-功能：
-
-- 选择业务包。
-- 选择数据集。
-- 选择分析类型。
-- 设置筛选条件。
-- 预览参与分析的数据范围和统计概况。
-- 点击生成 AI 分析。
-- 展示报告、建议、行动计划。
-- 关联 Trace。
-- 保存到业务成果。
-
-### 6.4 现有页面增强
-
-对话页：
-
-- 继续作为自然语言入口。
-- 展示关联 AI Task。
-- 展示生成的 BusinessOutput。
-- 保留 Trace、路由解释、引用依据。
-
-业务成果页：
-
-- 展示 AI 数据分析生成的报告、建议、行动计划。
-- 展示来源数据集、时间范围、筛选条件。
-- 支持从成果反查 AI Task 和 Trace。
-
-审计页：
-
-- 支持按 AI Task、数据集、trace 查询。
-- 区分 Chat 入口、工作台入口、数据资产入口。
-
-业务包管理页：
-
-- 展示 datasets。
-- 展示 analysis 类型。
-- 展示存储引擎、表名、时间字段、唯一键。
-- 展示数据接入状态。
-- 标注能力是真实 HTTP / MCP 接入，还是 stub。
-
----
-
-## 7. 安全与治理要求
-
-### 7.1 接入鉴权
-
-- HTTP 数据接入必须鉴权，建议使用租户级 API Key 或请求签名。
-- MQTT topic 必须绑定租户和数据源。
-- 不能仅依赖请求体中的 `tenant_id` 判断租户。
-
-### 7.2 数据边界
-
-- 未在业务包声明的数据集默认拒绝，或进入隔离区等待管理员处理。
-- payload 大小必须限制。
-- 必须记录原始数据和标准化数据。
-- external_id 需要做幂等处理。
-- 原始数据、聚合事实、AI 推断结论必须分开存储和展示。
-
-### 7.3 AI 分析边界
-
-- AI 分析只读取当前租户数据。
-- LLM 只接收聚合结果和少量关键样本。
-- 输出进入现有 OutputGuard。
-- 高风险动作继续走 Draft / Approval。
-- 不允许模型输出直接改写原始数据。
-
-### 7.4 SQL 安全
-
-- 不允许前端传入原始 SQL。
-- 不允许 LLM 生成 SQL 后直接执行。
-- 所有查询必须走后端白名单模板。
-- 时间范围、limit、样本数量必须有上限。
-
----
-
-## 8. 实施阶段
-
-### 第一阶段：ClickHouse 接入与 HTTP 入库
-
-目标：外部数据可以进入平台存储，并能在前端查看。
-
-后端：
-
-- 增加 ClickHouse 配置和客户端。
-- 新增 `raw_external_event` 表。
-- 新增 `equipment_alarm` 宽表。
-- 新增 HTTP ingest 接口。
-- 新增数据资产查询接口。
-
-前端：
-
-- 新增数据接入页。
-- 新增数据资产页。
-- 支持查看入库记录和 payload。
-
-### 第二阶段：基于存储数据的 AI 分析
-
-目标：AI 从 ClickHouse 查询聚合结果，并生成分析成果。
-
-后端：
-
-- 新增 `DataAnalysisService`。
-- 支持设备报警趋势分析。
-- 从 ClickHouse 聚合趋势、TopN、严重等级、关键样本。
-- LLM 基于聚合结果生成报告。
-- 保存 BusinessOutput。
-- 记录 Trace。
-
-前端：
-
-- 新增 AI 数据分析页。
-- 支持选择数据集、分析类型、筛选条件。
-- 展示分析结果和 Trace。
-
-### 第三阶段：业务包数据集声明
-
-目标：业务包声明自己支持哪些外部数据和分析能力。
-
-后端：
-
-- 扩展 manifest 解析。
-- 校验 datasets。
-- 后端根据 dataset 声明选择存储表和分析模板。
-
-前端：
-
-- 业务包详情展示 datasets 和 analysis。
-- AI 数据分析页根据 manifest 动态渲染筛选项。
-
-### 第四阶段：MQTT 接入
-
-目标：MQTT 数据复用同一套入库链路。
-
-后端：
-
-- 新增 MQTT consumer。
-- 支持 topic 到 tenant / package / dataset 的映射。
-- 复用 IngestionService。
-- 增加入库失败记录和监控。
-
-前端：
-
-- 数据接入页展示 MQTT 连接状态、topic、最近消息。
-
-### 第五阶段：多入口融合
-
-目标：Chat、AI 工作台、数据资产页统一进入 AI Task Runtime。
-
-后端：
-
-- ChatService 复用 AI Task Runtime 的公共执行逻辑。
-- AI 工作台支持结构化任务。
-- 数据分析任务统一进入 AI Task 表。
-
-前端：
-
-- Chat 展示关联 AI Task 和 Output。
-- 数据资产页支持一键生成分析。
-- Outputs 汇总所有报告、建议、行动计划。
-
----
-
-## 9. 最小可落地版本
-
-建议第一版只实现一个完整闭环，避免范围过大。
-
-最小闭环：
-
-1. 业务包声明 `equipment_alarm` 数据集。
-2. HTTP 接口接收设备报警数据。
-3. 数据写入 ClickHouse 的 `raw_external_event` 和 `equipment_alarm`。
-4. 前端数据资产页能查看入库数据。
-5. AI 数据分析页选择设备编号和时间范围。
-6. 后端从 ClickHouse 聚合报警次数、故障码 TopN、严重等级分布、最近样本。
-7. LLM 基于聚合结果生成分析报告。
-8. 报告保存到 PostgreSQL 的 BusinessOutput。
-9. Trace 记录完整分析过程。
-
-该版本不需要先实现 MQTT，不需要覆盖所有数据集，也不需要做自由 SQL 分析。
-
----
-
-## 10. 核心结论
-
-本方案的关键不是“外部数据来了之后马上触发一次 AI”，而是：
-
-> 外部数据通过 HTTP / MQTT 接入平台，先沉淀为平台可治理、可查询、可聚合的数据资产；AI 分析基于 ClickHouse 中已存储的数据进行统计、归因、解释和建议生成；分析过程、结果和审批仍由 PostgreSQL 中的平台治理体系承载。
-
-最终平台形成三类 AI 入口：
+执行链路：
 
 ```text
-1. Chat 入口
-用户自然语言触发业务包能力、RAG、工具调用。
-
-2. 工作台入口
-用户选择业务包、场景、参数，直接执行 AI 任务。
-
-3. 数据资产入口
-外部数据先入 ClickHouse，用户再基于已存储数据发起 AI 分析。
+AIRunService
+  ↓
+fault_triage skill
+  ↓
+cmms.work_order.history（真实 HTTP 优先）
+  ↓
+scada.alarm_query（可暂为 stub）
+  ↓
+knowledge.search
+  ↓
+LLM 生成建议
+  ↓
+BusinessOutput: recommendation + action_plan
+  ↓
+Trace
 ```
 
-这会把平台从“对话演示 + 业务包调用”推进到“企业外部数据接入、存储、分析、治理、成果沉淀”的 AI 业务操作平台。
+验收重点：
+
+- 用户不需要聊天。
+- 至少一个外部系统真实接通。
+- stub 明确标注。
+- 平台不保存外部业务明细。
+- 输出可保存、可追踪、可审计。
 
 ---
 
-## 11. Claude 补充建议
+## 13. 核心结论
 
-> 本章节由 Claude 评审上述方案后补充，按"必须修正 / 强烈建议补充 / 锦上添花"三档列出潜在问题与改进点，建议在落地前纳入排期。
-
-### 11.1 必须修正（不解决会踩生产坑）
-
-#### 11.1.1 ClickHouse 写入模型不能直连 HTTP/MQTT
-
-方案中 `HTTP / MQTT → IngestionService → ClickHouse` 是同步写入。ClickHouse 最忌讳高频小批量写入，会导致 Part 数量爆炸、Merge 压力剧增。
-
-必须在中间加缓冲层：
-
-- 推荐 Kafka / Redis Stream / 本地 buffer + 批量刷盘。
-- 建议批量条件：≥1000 行 或 ≥1 秒触发一次 flush。
-- 死信队列、重试、入库失败回放策略要在第一阶段就具备，不能等到 MQTT 阶段再补。
-
-#### 11.1.2 ReplacingMergeTree 的"幂等"语义有歧义
-
-`ReplacingMergeTree(ingested_at)` 的语义是"保留 ingested_at 最大的那条"，属于**后写覆盖**，而非**首次写入即保留**。这与方案中"external_id 用于幂等"的直觉不一致——同一 external_id 第二次推送会覆盖第一次的标准化结果。
-
-需要明确：
-
-- 是后写覆盖（当前模型），还是首写胜出（需要不更新 ingested_at 或使用业务版本号）。
-- 查询是否需要 `FINAL` 或 `argMax`，否则在 merge 之前查询会看到重复行。
-- 文档应显式说明该语义，避免业务侧误用。
-
-#### 11.1.3 时区硬编码 `Asia/Shanghai`
-
-多租户或跨地区场景一旦上线即出问题。建议：
-
-- ClickHouse 内部统一存 UTC：`DateTime64(3, 'UTC')`。
-- 展示层按租户或用户偏好转换。
-- 接入层接收的时间字段必须显式带时区，禁止 naive datetime。
-
-#### 11.1.4 排序键中包含高基数列 `external_id`
-
-`ORDER BY (tenant_id, package_id, dataset, occurred_at, external_id)` 把 external_id 这种高基数列放在排序键末尾，会降低压缩率、增大 Part 体积。
-
-建议：
-
-- 排序键只保留低基数过滤字段和时间字段。
-- external_id 走二级跳数索引：`INDEX idx_ext external_id TYPE bloom_filter GRANULARITY 4`。
-
-#### 11.1.5 SQL 安全章节缺少强制租户隔离
-
-"白名单模板 + 参数绑定"是对的，但没说**租户隔离怎么强制**。仅靠后端拼 WHERE，漏一个分支就是越权。
-
-建议：
-
-- 使用 ClickHouse Row Policy 做硬隔离：`CREATE ROW POLICY tenant_isolation ON equipment_alarm USING tenant_id = currentUser()`。
-- 给业务用户独立的 CK 账号，账号绑定租户。
-- 后端 WHERE 拼接 + Row Policy 双层防护。
-
-### 11.2 强烈建议补充
-
-#### 11.2.1 AI 数值幻觉防护
-
-"LLM 基于聚合结果生成"是正确方向，但没说怎么防止 LLM 改数字。建议：
-
-- 聚合结果以结构化 JSON 注入 prompt，报告中所有数字必须用模板/槽位渲染，不让 LLM 自由生成数字。
-- 每个结论挂"数据来源 SQL hash + 查询参数 + 时间戳"，可反查复现。
-- BusinessOutput 中保存原始聚合数据快照，便于审计。
-
-#### 11.2.2 AI Task 状态机和生命周期
-
-`status` 字段未枚举，建议明确为：
+当前平台最有价值的方向是：
 
 ```text
-pending | queued | running | streaming | success | failed | cancelled | timeout
+业务对象
+  ↓
+AI 动作
+  ↓
+外部系统按需查询 / 宿主上下文输入
+  ↓
+知识增强分析
+  ↓
+业务成果 / 审批草稿
+  ↓
+Trace 审计
 ```
 
-并补充：
-
-- 超时取消机制：长 LLM 调用必须有 deadline。
-- 重试策略：区分确定性失败（参数错误，不重试）与临时失败（LLM 502，可重试）。
-- 取消语义：前端关闭页面是否需要终止后端 LLM 调用与 CK 查询。
-
-#### 11.2.3 AI Task Runtime 的接入次序
-
-方案把"ChatService 复用 AI Task Runtime"放到第五阶段，但第一阶段已经新建 Runtime。这意味着前四阶段会出现 ChatService 一条链、AI Task 一条链，两套并行。
-
-建议：
-
-- 第一阶段就把 Runtime 抽成接口/编排层。
-- Chat 改成 Runtime 的一种 source。
-- 否则第五阶段会出现大规模重构。
-
-#### 11.2.4 观测性完全缺失
-
-方案中未提任何指标，至少应补：
-
-- 入库侧：QPS、积压队列长度、CK 写入耗时、Part 数、入库失败率、字段校验失败率。
-- AI 侧：LLM 调用时长、token 用量、单 task 成本、模板命中率。
-- 链路侧：OpenTelemetry trace 串联，trace_id 从 HTTP/MQTT 入口贯穿到 LLM 调用。
-- 数据接入页应展示这些指标并支持告警阈值配置。
-
-#### 11.2.5 数据生命周期与合规
-
-ClickHouse 未设计 TTL 和冷热分层。建议：
-
-- 表加 TTL 策略：`TTL alarm_time + INTERVAL 90 DAY TO VOLUME 'cold'`。
-- GDPR / 等保的"被遗忘权"在 CK 上 mutation 成本高，应使用软删除 + TTL，而非 `ALTER TABLE DELETE`。
-- 跨租户聚合（平台运维）的边界要在 RBAC 中显式声明。
-
-#### 11.2.6 业务包 manifest 仍缺关键字段
-
-datasets 声明建议补充：
-
-- `schema_version`：外部系统升级字段后的兼容策略。
-- `field_mapping`：外部 payload 字段 → 宽表字段的映射规则归属。`schema_registry.py` 提了模块名但未明确职责，建议明确它负责字段映射、版本兼容、JSON Schema 校验。
-- 数据集间的关联关系：例如 alarm + workorder 联合分析需要 join key 声明。
-
-#### 11.2.7 MQTT 阶段排序过晚
-
-工业制造场景 80% 数据走 MQTT。第四阶段才上 MQTT，意味着前三阶段闭环都跑在"假装 HTTP 推过来"上，与实际客户场景脱节。
-
-建议：
-
-- 第一阶段最小闭环至少包含一个 MQTT 验证 demo（哪怕只支持单 topic），确保链路真能跑工业数据。
-- 否则容易出现"客户对接时才发现 MQTT 链路有缺陷"的返工。
-
-### 11.3 锦上添花
-
-#### 11.3.1 聚合结果缓存层
-
-同一 `(dataset, filters, analysis_type)` 短时间内重复触发，应缓存聚合结果，甚至缓存 LLM 报告，避免重复烧 token。
-
-#### 11.3.2 关键样本采样策略
-
-"最近关键样本"未限定上限。当严重报警上万条时如何选取？建议：
-
-- 分层采样：按严重度 / 时间分桶，每桶 TopK。
-- 总样本上限（如 50 条），避免 prompt 过长。
-
-#### 11.3.3 前端数据资产页性能
-
-ClickHouse 不擅长 OLTP 风格的 offset 翻页。建议：
-
-- 使用 keyset pagination：`WHERE occurred_at < :cursor ORDER BY occurred_at DESC LIMIT 50`。
-- 大表查询走预计算物化视图。
-
-#### 11.3.4 降级路径
-
-- ClickHouse 故障：ingestion 应落本地 buffer 或 Kafka，恢复后回放，而非直接 5xx。
-- LLM 故障：分析任务应保留聚合结果展示给用户，标注"AI 解读暂不可用"，而非整个任务失败。
-
-#### 11.3.5 测试与回归
-
-- Ingestion 层压测：高并发、大 payload、断线重连场景。
-- CK 查询模板覆盖测试：每个 analysis_type 至少一条样例数据 + 期望聚合结果。
-- 分析模板回归测试：相同输入数据应得到稳定的聚合数字（LLM 文本不强一致，但数字必须一致）。
-
-### 11.4 优先级建议
-
-如果资源有限只能挑三件最重要的事先做：
-
-1. **11.1.1 写入缓冲**：不做就直接卡在生产环境上线时。
-2. **11.1.5 Row Policy 强隔离**：不做就是越权风险。
-3. **11.2.3 Runtime 接口前置**：不做第五阶段就要重写。
-
-这三项不前置，后期返工成本最大。
+它不是数据中台，也不是通用 AI App 搭建器，而是面向企业已有系统的外挂式 Agent 运行与治理平台。
