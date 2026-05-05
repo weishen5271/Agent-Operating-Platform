@@ -39,6 +39,31 @@
     }
   ],
 
+  "business_objects": [
+    {
+      "type": "equipment",
+      "label": "设备",
+      "id_field": "equipment_id",
+      "lookup_capability": ""
+    }
+  ],
+
+  "ai_actions": [
+    {
+      "id": "equipment_fault_analysis",
+      "label": "故障分析",
+      "description": "查询报警、历史工单和知识库，生成故障原因分析与处置建议。",
+      "object_types": ["equipment"],
+      "skill": "fault_triage",
+      "required_inputs": ["equipment_id"],
+      "optional_inputs": ["fault_code", "last_n", "query"],
+      "outputs": ["recommendation", "action_plan"],
+      "risk_level": "low",
+      "requires_confirmation": false,
+      "data_input_modes": ["platform_pull"]
+    }
+  ],
+
   "requires": [
     {
       "kind": "common_package",

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import time
 from typing import Any, Literal
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def utc_timestamp_ms() -> int:
+    """统一返回 Unix timestamp 毫秒，供新增实体时间字段使用。"""
+
+    return int(time.time() * 1000)
 
 
 @dataclass(slots=True)
@@ -336,8 +343,68 @@ class BusinessOutput:
     citations: list[str] = field(default_factory=list)
     conversation_id: str | None = None
     trace_id: str | None = None
+    run_id: str | None = None
+    action_id: str | None = None
+    object_type: str | None = None
+    object_id: str | None = None
     linked_draft_group_id: str | None = None
     summary: str = ""
     created_by: str = ""
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+
+
+DataInputMode = Literal["platform_pull", "host_context", "mixed"]
+AIRunSource = Literal["workspace", "chat", "embed", "api"]
+AIRunStatus = Literal["pending", "running", "succeeded", "failed"]
+
+
+@dataclass(slots=True)
+class BusinessObjectRef:
+    """外部业务对象引用，只保存对象标识，不复制外部系统主数据。"""
+
+    object_type: str
+    object_id: str
+    display_name: str = ""
+    source_system: str = ""
+
+
+@dataclass(slots=True)
+class AIActionDefinition:
+    """业务包声明的结构化 AI 动作契约。"""
+
+    id: str
+    label: str
+    package_id: str
+    object_types: list[str]
+    skill: str
+    description: str = ""
+    required_inputs: list[str] = field(default_factory=list)
+    optional_inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    risk_level: str = "low"
+    requires_confirmation: bool = False
+    data_input_modes: list[str] = field(default_factory=lambda: ["platform_pull"])
+
+
+@dataclass(slots=True)
+class AIRun:
+    """一次结构化 AI Action 执行记录，时间字段统一使用 Unix timestamp 毫秒。"""
+
+    run_id: str
+    tenant_id: str
+    user_id: str
+    package_id: str
+    action_id: str
+    source: str
+    object_type: str
+    object_id: str
+    inputs: dict[str, Any]
+    data_input_mode: str
+    status: str = "pending"
+    trace_id: str | None = None
+    output_ids: list[str] = field(default_factory=list)
+    draft_id: str | None = None
+    error_message: str = ""
+    created_at: int = field(default_factory=utc_timestamp_ms)
+    updated_at: int = field(default_factory=utc_timestamp_ms)

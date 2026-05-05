@@ -3,6 +3,7 @@ from agent_platform.bootstrap.settings import settings
 from agent_platform.infrastructure.embedding_client import LocalHuggingFaceEmbeddingClient
 from agent_platform.infrastructure.llm_client import OpenAICompatibleLLMClient
 from agent_platform.infrastructure.repositories import (
+    PostgresAIRunRepository,
     PostgresBusinessOutputRepository,
     PostgresConversationRepository,
     PostgresDraftRepository,
@@ -21,6 +22,8 @@ from agent_platform.infrastructure.repositories import (
     seed_postgres_defaults,
 )
 from agent_platform.runtime.chat_service import ChatService
+from agent_platform.runtime.ai_action_registry import AIActionRegistry
+from agent_platform.runtime.ai_run_service import AIRunService
 from agent_platform.runtime.registry import CapabilityRegistry
 from agent_platform.runtime.skill_registry import SkillRegistry, ToolRegistry
 from agent_platform.wiki.service import WikiService
@@ -51,6 +54,7 @@ release_plan_repository = PostgresReleasePlanRepository(db_runtime)
 user_repository = PostgresUserRepository(db_runtime)
 draft_repository = PostgresDraftRepository(db_runtime)
 business_output_repository = PostgresBusinessOutputRepository(db_runtime)
+ai_run_repository = PostgresAIRunRepository(db_runtime)
 knowledge_repository = PostgresKnowledgeRepository(
     db_runtime,
     llm_config=llm_config_repository,
@@ -89,6 +93,20 @@ chat_service = ChatService(
     wiki_service=wiki_service,
     llm_config=llm_config_repository,
     llm_client=llm_client,
+)
+
+ai_action_registry = AIActionRegistry()
+ai_run_service = AIRunService(
+    actions=ai_action_registry,
+    runs=ai_run_repository,
+    registry=capability_registry,
+    skills=skill_registry,
+    tools=tool_registry,
+    traces=trace_repository,
+    tenants=tenant_repository,
+    users=user_repository,
+    plugin_configs=plugin_config_repository,
+    business_outputs=business_output_repository,
 )
 
 

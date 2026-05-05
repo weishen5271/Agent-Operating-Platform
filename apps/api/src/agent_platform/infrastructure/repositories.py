@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from agent_platform.bootstrap.settings import settings
 from agent_platform.domain.models import (
+    AIRun,
     BusinessOutput,
     Conversation,
     ConversationMessage,
@@ -34,12 +35,14 @@ from agent_platform.domain.models import (
     TraceStep,
     UserContext,
     utc_now,
+    utc_timestamp_ms,
 )
 from agent_platform.infrastructure.auth import get_password_hash
 from agent_platform.infrastructure.config_crypto import PluginConfigCrypto
 from agent_platform.infrastructure.db import DatabaseRuntime
 from agent_platform.infrastructure.embedding_client import OpenAICompatibleEmbeddingClient
 from agent_platform.infrastructure.db_models import (
+    AIRunRecord,
     ApprovalRequestRecord,
     BusinessOutputRecord,
     ConversationMessageRecord,
@@ -231,6 +234,16 @@ class BusinessOutputRepository(Protocol):
     async def create(self, output: BusinessOutput) -> BusinessOutput: ...
 
     async def update(self, output: BusinessOutput) -> BusinessOutput: ...
+
+
+class AIRunRepository(Protocol):
+    async def create(self, run: AIRun) -> AIRun: ...
+
+    async def update(self, run: AIRun) -> AIRun: ...
+
+    async def get(self, tenant_id: str, run_id: str) -> AIRun | None: ...
+
+    async def list_recent(self, tenant_id: str, limit: int = 20) -> list[AIRun]: ...
 
 
 class DraftRepository(Protocol):
@@ -1089,6 +1102,10 @@ class PostgresBusinessOutputRepository:
                 citations=list(output.citations),
                 conversation_id=output.conversation_id,
                 trace_id=output.trace_id,
+                run_id=output.run_id,
+                action_id=output.action_id,
+                object_type=output.object_type,
+                object_id=output.object_id,
                 linked_draft_group_id=output.linked_draft_group_id,
                 summary=output.summary,
                 created_by=output.created_by,
@@ -1108,6 +1125,10 @@ class PostgresBusinessOutputRepository:
             record.payload = output.payload
             record.citations = list(output.citations)
             record.summary = output.summary
+            record.run_id = output.run_id
+            record.action_id = output.action_id
+            record.object_type = output.object_type
+            record.object_id = output.object_id
             record.linked_draft_group_id = output.linked_draft_group_id
             await session.commit()
             await session.refresh(record)
@@ -1126,9 +1147,100 @@ class PostgresBusinessOutputRepository:
             citations=list(record.citations or []),
             conversation_id=record.conversation_id,
             trace_id=record.trace_id,
+            run_id=record.run_id,
+            action_id=record.action_id,
+            object_type=record.object_type,
+            object_id=record.object_id,
             linked_draft_group_id=record.linked_draft_group_id,
             summary=record.summary or "",
             created_by=record.created_by or "",
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+
+class PostgresAIRunRepository:
+    """AI Action 执行记录仓储，新增时间字段统一保存 Unix timestamp 毫秒。"""
+
+    def __init__(self, runtime: DatabaseRuntime) -> None:
+        self._runtime = runtime
+
+    async def create(self, run: AIRun) -> AIRun:
+        async with self._runtime.session() as session:
+            record = AIRunRecord(
+                run_id=run.run_id,
+                tenant_id=run.tenant_id,
+                user_id=run.user_id,
+                package_id=run.package_id,
+                action_id=run.action_id,
+                source=run.source,
+                object_type=run.object_type,
+                object_id=run.object_id,
+                inputs=run.inputs,
+                data_input_mode=run.data_input_mode,
+                status=run.status,
+                trace_id=run.trace_id,
+                output_ids=list(run.output_ids),
+                draft_id=run.draft_id,
+                error_message=run.error_message,
+                created_at=run.created_at,
+                updated_at=run.updated_at,
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return self._to_domain(record)
+
+    async def update(self, run: AIRun) -> AIRun:
+        async with self._runtime.session() as session:
+            record = await session.get(AIRunRecord, run.run_id)
+            if record is None or record.tenant_id != run.tenant_id:
+                raise ValueError("AI run not found")
+            record.status = run.status
+            record.trace_id = run.trace_id
+            record.output_ids = list(run.output_ids)
+            record.draft_id = run.draft_id
+            record.error_message = run.error_message
+            record.updated_at = utc_timestamp_ms()
+            await session.commit()
+            await session.refresh(record)
+            return self._to_domain(record)
+
+    async def get(self, tenant_id: str, run_id: str) -> AIRun | None:
+        async with self._runtime.session() as session:
+            record = await session.get(AIRunRecord, run_id)
+            if record is None or record.tenant_id != tenant_id:
+                return None
+            return self._to_domain(record)
+
+    async def list_recent(self, tenant_id: str, limit: int = 20) -> list[AIRun]:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(AIRunRecord)
+                .where(AIRunRecord.tenant_id == tenant_id)
+                .order_by(desc(AIRunRecord.created_at))
+                .limit(limit)
+            )
+            return [self._to_domain(item) for item in result.scalars().all()]
+
+    @staticmethod
+    def _to_domain(record: AIRunRecord) -> AIRun:
+        return AIRun(
+            run_id=record.run_id,
+            tenant_id=record.tenant_id,
+            user_id=record.user_id,
+            package_id=record.package_id,
+            action_id=record.action_id,
+            source=record.source,
+            object_type=record.object_type,
+            object_id=record.object_id,
+            inputs=dict(record.inputs or {}),
+            data_input_mode=record.data_input_mode,
+            status=record.status,
+            trace_id=record.trace_id,
+            output_ids=list(record.output_ids or []),
+            draft_id=record.draft_id,
+            error_message=record.error_message or "",
             created_at=record.created_at,
             updated_at=record.updated_at,
         )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agent_platform.infrastructure.db import Base
@@ -450,6 +450,10 @@ class BusinessOutputRecord(Base):
     citations: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    object_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    object_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     linked_draft_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_by: Mapped[str] = mapped_column(String(64), default="", nullable=False)
@@ -457,6 +461,30 @@ class BusinessOutputRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class AIRunRecord(Base):
+    __tablename__ = "ai_run"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenant.tenant_id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    package_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    action_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    object_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    data_input_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    output_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    draft_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 时间类字段统一保存 Unix timestamp 毫秒，不在实体层混用 datetime / 字符串。
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
 
 
 def import_db_models() -> None:
@@ -483,4 +511,5 @@ def import_db_models() -> None:
         LLMRuntimeConfigRecord,
         McpServerRecord,
         BusinessOutputRecord,
+        AIRunRecord,
     )

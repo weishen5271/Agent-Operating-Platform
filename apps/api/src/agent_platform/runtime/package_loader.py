@@ -147,6 +147,14 @@ class PackageLoader:
             "knowledge_bindings": [
                 dict(item) for item in raw.get("knowledge_bindings", []) if isinstance(item, dict)
             ],
+            # 业务对象和 AI Action 是结构化工作台的核心契约；这里只做归一化，
+            # 依赖校验留给运行时 registry，避免 loader 触碰数据库或租户态配置。
+            "business_objects": [
+                dict(item) for item in raw.get("business_objects", []) if isinstance(item, dict)
+            ],
+            "ai_actions": [
+                dict(item) for item in raw.get("ai_actions", []) if isinstance(item, dict)
+            ],
             "knowledge_imports": knowledge_imports,
             "default_outputs": [str(item) for item in raw.get("default_outputs", []) if str(item).strip()],
             "skills": skills,

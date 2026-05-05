@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from agent_platform.api.errors import http_exception_response_content
 from agent_platform.api.openapi import configure_openapi
 from agent_platform.api.routes.admin import router as admin_router
+from agent_platform.api.routes.ai import router as ai_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.chat import router as chat_router
 from agent_platform.api.routes.outputs import router as outputs_router
@@ -43,6 +44,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router, prefix=settings.api_prefix)
+app.include_router(ai_router, prefix=settings.api_prefix)
 app.include_router(workspace_router, prefix=settings.api_prefix)
 app.include_router(outputs_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
