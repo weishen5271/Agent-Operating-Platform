@@ -8,6 +8,7 @@ from fastapi.openapi.utils import get_openapi
 
 TAG_NAMES = {
     "chat": "对话与执行",
+    "ai": "AI 动作",
     "workspace": "工作台",
     "outputs": "业务成果",
     "admin": "管理后台",
@@ -18,6 +19,7 @@ TAG_NAMES = {
 
 TAG_METADATA = [
     {"name": "对话与执行", "description": "对话、会话、Trace 和高风险动作确认接口"},
+    {"name": "AI 动作", "description": "结构化 AI Action、AI Run 和业务对象动作执行接口"},
     {"name": "工作台", "description": "控制台首页和工作台聚合数据接口"},
     {"name": "业务成果", "description": "业务成果的创建、查询和更新接口"},
     {"name": "管理后台", "description": "业务包、系统配置、租户、知识库、安全和 Wiki 管理接口"},
@@ -36,6 +38,11 @@ OPERATION_SUMMARIES = {
     ("GET", "/api/v1/chat/traces/{trace_id}"): "查询执行 Trace 详情",
     ("POST", "/api/v1/chat/actions/draft"): "创建高风险动作草稿",
     ("POST", "/api/v1/chat/actions/{draft_id}/confirm"): "确认执行动作草稿",
+    ("GET", "/api/v1/ai/actions"): "查询 AI 动作列表",
+    ("POST", "/api/v1/ai/actions/{action_id}/run"): "执行 AI 动作",
+    ("GET", "/api/v1/ai/runs"): "查询 AI Run 列表",
+    ("GET", "/api/v1/ai/runs/{run_id}"): "查询 AI Run 详情",
+    ("GET", "/api/v1/ai/runs/{run_id}/trace"): "查询 AI Run Trace",
     ("GET", "/api/v1/workspace/home"): "查询工作台首页数据",
     ("GET", "/api/v1/outputs"): "查询业务成果列表",
     ("POST", "/api/v1/outputs"): "创建业务成果",

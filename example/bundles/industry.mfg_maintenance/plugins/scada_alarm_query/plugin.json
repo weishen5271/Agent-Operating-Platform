@@ -1,21 +1,67 @@
 {
   "name": "scada.alarm_query",
-  "version": "0.4.3",
-  "description": "SCADA 报警实时检索（只读）。",
-  "executor": "stub",
+  "version": "0.5.0",
+  "description": "SCADA 报警实时检索（只读）。executor=http，绑定声明式调用 SCADA / 报警平台 REST API；上线前需在「业务包管理 → 能力 → 插件配置」填入 endpoint + secrets。",
+  "executor": "http",
   "config_schema": {
-    "endpoint": { "type": "string", "required": true, "label": "SCADA 接口地址" },
-    "auth_ref": { "type": "string", "required": true, "format": "secret-ref", "label": "SCADA 密钥引用" }
+    "endpoint": { "type": "string", "required": true, "label": "SCADA 接口地址", "description": "SCADA REST API 根地址，例如 https://scada.acme.local" },
+    "secrets": {
+      "type": "object",
+      "required": true,
+      "label": "SCADA 密钥配置",
+      "description": "SCADA 凭据配置",
+      "properties": {
+        "scada_token": {
+          "type": "string",
+          "required": true,
+          "label": "SCADA 访问令牌",
+          "description": "SCADA Bearer Token"
+        }
+      }
+    },
+    "timeout_ms": { "type": "integer", "default": 5000, "label": "请求超时时间（毫秒）" }
+  },
+  "default_config": {
+    "timeout_ms": 5000
   },
   "capabilities": [
     {
       "name": "scada.alarm_query",
-      "description": "按设备号 / 时间窗口查询 SCADA 报警流水。",
+      "description": "按设备号 / 严重等级查询 SCADA 报警流水。",
       "risk_level": "low",
       "side_effect_level": "read",
       "required_scope": "scada:read",
       "input_schema": { "required": ["equipment_id"] },
-      "output_schema": { "required": ["alarms"] }
+      "output_schema": { "required": ["alarms"] },
+      "binding": {
+        "method": "GET",
+        "path": "/api/v1/alarms",
+        "query": {
+          "equipment_id": "$input.equipment_id",
+          "severity": "$input.severity",
+          "limit": "$input.last_n"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.scada_token",
+          "Accept": "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 3,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
+        "response_map": {
+          "alarms": "$response.body.data.items",
+          "total": "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
+        },
+        "error_translation": {
+          "401": "SCADA_AUTH_FAILED",
+          "404": "SCADA_NOT_FOUND",
+          "5xx": "SCADA_UPSTREAM_UNAVAILABLE"
+        }
+      }
     }
   ]
 }

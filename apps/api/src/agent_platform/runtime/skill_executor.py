@@ -113,16 +113,36 @@ class SkillExecutor:
     ) -> dict[str, object]:
         # capability 调用前加载租户级插件配置，HTTP/MCP 等执行器会从这里取得 endpoint/secrets。
         tenant_config = await self._load_tenant_config(capability_name)
-        result = self._registry.invoke(capability_name, payload, tenant_config=tenant_config)
+        capability = self._registry.get(capability_name)
+        try:
+            result = self._registry.invoke(capability_name, payload, tenant_config=tenant_config)
+        except Exception as exc:
+            if self._add_step is not None:
+                await self._add_step(
+                    TraceStep(
+                        name=f"skill_step:{step_id}",
+                        status="failed",
+                        summary=f"Skill step {step_id} 调用 capability {capability_name} 失败：{exc}",
+                        node_type="capability",
+                        ref=capability_name,
+                        ref_source=capability.source,
+                    )
+                )
+            raise
         if self._add_step is not None:
+            is_stub = bool(result.get("stub"))
+            meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+            executor = str(meta.get("executor") or ("stub" if is_stub else "")).strip()
+            executor_hint = f"（executor={executor}）" if executor else ""
+            stub_hint = "当前为 stub 占位结果，不能视为真实外部系统返回。" if is_stub else "调用完成。"
             await self._add_step(
                 TraceStep(
                     name=f"skill_step:{step_id}",
-                    status="completed",
-                    summary=f"Skill step {step_id} 调用 capability {capability_name} 完成。",
+                    status="stub" if is_stub else "completed",
+                    summary=f"Skill step {step_id} 调用 capability {capability_name} {stub_hint}{executor_hint}",
                     node_type="capability",
                     ref=capability_name,
-                    ref_source=self._registry.get(capability_name).source,
+                    ref_source=capability.source,
                 )
             )
         return result

@@ -11,6 +11,7 @@ import type { TenantPackagesResponse } from "@/lib/api-client/types";
 
 type NavKey =
   | "overview"
+  | "ai-workbench"
   | "chat"
   | "packages"
   | "security"
@@ -21,6 +22,7 @@ type NavKey =
 
 type NavHref =
   | "/"
+  | "/ai-workbench"
   | "/chat"
   | "/packages"
   | "/security"
@@ -61,6 +63,7 @@ const navGroups: ConsoleNavGroup[] = [
     label: "运营驾驶舱",
     items: [
       { key: "overview", href: "/", label: "运营总览", icon: "dashboard" },
+      { key: "ai-workbench", href: "/ai-workbench", label: "AI 工作台", icon: "precision_manufacturing" },
       { key: "chat", href: "/chat", label: "对话演示", icon: "forum" },
     ],
   },

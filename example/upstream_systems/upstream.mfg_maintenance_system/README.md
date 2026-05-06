@@ -61,6 +61,7 @@ MCP endpoint:  http://127.0.0.1:18081/mcp
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
+| `GET` | `/api/v1/equipment` | 查询设备台账 |
 | `GET` | `/api/v1/workorders` | 查询历史维修工单 |
 | `POST` | `/api/v1/workorders/drafts` | 创建维修工单草稿 |
 | `GET` | `/api/v1/alarms` | 查询设备报警流水 |
@@ -71,7 +72,7 @@ MCP endpoint:  http://127.0.0.1:18081/mcp
 ```powershell
 Invoke-RestMethod `
   -Headers @{ Authorization = 'Bearer local-dev-token' } `
-  'http://127.0.0.1:18081/api/v1/workorders?tenant_id=tenant-placeholder&equipment_id=EQ-DEMO-001&limit=3'
+  'http://127.0.0.1:18081/api/v1/workorders?tenant_id=tenant-placeholder&equipment_id=EQ-CNC-650-01&limit=3'
 ```
 
 [openapi.json](openapi.json) 描述了这组 HTTP REST API。它只描述接口结构，不包含真实业务数据。
@@ -103,6 +104,7 @@ MCP 工具：
 
 | MCP tool | 说明 |
 |---|---|
+| `equipment.lookup` | 查询模拟设备台账 |
 | `work_order.history` | 查询模拟历史维修工单 |
 | `work_order.draft.create` | 创建模拟维修工单草稿 |
 | `alarm.query` | 查询模拟设备报警流水 |

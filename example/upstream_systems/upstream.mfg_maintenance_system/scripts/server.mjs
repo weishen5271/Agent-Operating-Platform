@@ -135,6 +135,30 @@ const alarmFixtures = [
     unit: "MPa",
   },
   {
+    alarm_id: "ALM-20260418-084811",
+    equipment_id: "EQ-CNC-650-01",
+    code: "SP-118",
+    severity: "medium",
+    message: "主轴温度超过预警阈值 68°C。", 
+    occurred_at: "2026-04-18T08:48:11+08:00",
+    cleared_at: "2026-04-18T09:21:36+08:00",
+    tag: "CNC650_SPINDLE_TEMP",
+    value: 70.2,
+    unit: "°C",
+  },
+  {
+    alarm_id: "ALM-20260418-085720",
+    equipment_id: "EQ-CNC-650-01",
+    code: "AX-203",
+    severity: "high",
+    message: "X 轴伺服负载再次超过 115%，建议复核导轨阻力与润滑状态。",
+    occurred_at: "2026-04-18T08:57:20+08:00",
+    cleared_at: null,
+    tag: "CNC650_AXIS_X_LOAD",
+    value: 118.9,
+    unit: "%",
+  },
+  {
     alarm_id: "ALM-20260412-210611",
     equipment_id: "EQ-IM-220T-03",
     code: "HT-407",
@@ -147,6 +171,30 @@ const alarmFixtures = [
     unit: "°C",
   },
   {
+    alarm_id: "ALM-20260412-211004",
+    equipment_id: "EQ-IM-220T-03",
+    code: "PRS-022",
+    severity: "medium",
+    message: "注射压力波动超过设定范围，连续 3 个周期触发。",
+    occurred_at: "2026-04-12T21:10:04+08:00",
+    cleared_at: "2026-04-12T21:38:18+08:00",
+    tag: "IM220T_INJECTION_PRESSURE",
+    value: 14.8,
+    unit: "MPa",
+  },
+  {
+    alarm_id: "ALM-20260412-212945",
+    equipment_id: "EQ-IM-220T-03",
+    code: "HT-407",
+    severity: "critical",
+    message: "料筒三区温度反馈丢失，温控回路进入保护。",
+    occurred_at: "2026-04-12T21:29:45+08:00",
+    cleared_at: "2026-04-12T22:20:03+08:00",
+    tag: "IM220T_BARREL_ZONE3_SENSOR",
+    value: null,
+    unit: "",
+  },
+  {
     alarm_id: "ALM-20260410-091855",
     equipment_id: "EQ-PACK-01",
     code: "PK-052",
@@ -156,6 +204,30 @@ const alarmFixtures = [
     cleared_at: "2026-04-10T10:01:12+08:00",
     tag: "PACK_INLET_PHOTOEYE",
     value: 17,
+    unit: "times/min",
+  },
+  {
+    alarm_id: "ALM-20260410-092601",
+    equipment_id: "EQ-PACK-01",
+    code: "PK-061",
+    severity: "low",
+    message: "输送带速度短时低于设定值。",
+    occurred_at: "2026-04-10T09:26:01+08:00",
+    cleared_at: "2026-04-10T09:27:40+08:00",
+    tag: "PACK_CONVEYOR_SPEED",
+    value: 0.62,
+    unit: "m/s",
+  },
+  {
+    alarm_id: "ALM-20260410-093204",
+    equipment_id: "EQ-PACK-01",
+    code: "PK-052",
+    severity: "medium",
+    message: "入口光电传感器连续抖动，疑似镜面污染或位置偏移。",
+    occurred_at: "2026-04-10T09:32:04+08:00",
+    cleared_at: null,
+    tag: "PACK_INLET_PHOTOEYE",
+    value: 21,
     unit: "times/min",
   },
 ];
@@ -304,7 +376,7 @@ function simulatedMeta() {
 }
 
 function makeWorkOrders({ equipmentId, faultCode }) {
-  const filtered = workOrderFixtures.filter((item) => {
+  return workOrderFixtures.filter((item) => {
     if (equipmentId && item.equipment_id !== equipmentId) {
       return false;
     }
@@ -313,11 +385,34 @@ function makeWorkOrders({ equipmentId, faultCode }) {
     }
     return true;
   });
-  return filtered.length > 0 ? filtered : workOrderFixtures.slice(0, 2);
+}
+
+function makeEquipment({ equipmentId, keyword }) {
+  const normalizedKeyword = String(keyword || "").trim().toLowerCase();
+  const items = Object.values(equipmentProfiles).filter((item) => {
+    if (equipmentId && item.equipment_id !== equipmentId) {
+      return false;
+    }
+    if (normalizedKeyword) {
+      return (
+        item.equipment_id.toLowerCase().includes(normalizedKeyword) ||
+        item.name.toLowerCase().includes(normalizedKeyword) ||
+        item.model.toLowerCase().includes(normalizedKeyword) ||
+        item.line_code.toLowerCase().includes(normalizedKeyword) ||
+        item.location.toLowerCase().includes(normalizedKeyword)
+      );
+    }
+    return true;
+  });
+  return {
+    item: equipmentId ? items[0] || null : null,
+    items,
+    total: items.length,
+  };
 }
 
 function makeAlarms({ equipmentId, severity }) {
-  const filtered = alarmFixtures.filter((item) => {
+  return alarmFixtures.filter((item) => {
     if (equipmentId && item.equipment_id !== equipmentId) {
       return false;
     }
@@ -326,7 +421,6 @@ function makeAlarms({ equipmentId, severity }) {
     }
     return true;
   });
-  return filtered.length > 0 ? filtered : alarmFixtures.slice(0, 2);
 }
 
 function makeSpareParts({ partNo, keyword }) {
@@ -385,6 +479,17 @@ function callMcpTool(name, args) {
       structuredContent: {
         workorders,
         total: workorders.length,
+        _meta: simulatedMeta(),
+      },
+    };
+  }
+  if (name === "equipment.lookup") {
+    return {
+      structuredContent: {
+        ...makeEquipment({
+          equipmentId: args.equipment_id,
+          keyword: args.query,
+        }),
         _meta: simulatedMeta(),
       },
     };
@@ -462,6 +567,7 @@ function handleJsonRpc(payload) {
   if (method === "tools/list") {
     return jsonRpcResult(id, {
       tools: [
+        { name: "equipment.lookup", description: "查询模拟设备台账。" },
         { name: "work_order.history", description: "查询模拟历史维修工单。" },
         { name: "work_order.draft.create", description: "创建模拟维修工单草稿。" },
         { name: "alarm.query", description: "查询模拟设备报警流水。" },
@@ -524,6 +630,17 @@ async function handleRest(req, res, url) {
         items: workorders,
         total: workorders.length,
       },
+      _meta: simulatedMeta(),
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/v1/equipment") {
+    sendJson(res, 200, {
+      data: makeEquipment({
+        equipmentId: url.searchParams.get("equipment_id"),
+        keyword: url.searchParams.get("keyword"),
+      }),
       _meta: simulatedMeta(),
     });
     return;

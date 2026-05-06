@@ -44,7 +44,7 @@
       "type": "equipment",
       "label": "设备",
       "id_field": "equipment_id",
-      "lookup_capability": ""
+      "lookup_capability": "equipment.lookup"
     }
   ],
 

@@ -34,6 +34,41 @@
   },
   "capabilities": [
     {
+      "name": "mcp.equipment.lookup",
+      "description": "通过 MCP 查询模拟设备台账基础信息。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "query": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["equipment"]
+      },
+      "binding": {
+        "mcp_server": "$config.mcp_server",
+        "mcp_tool": "equipment.lookup",
+        "argument_map": {
+          "equipment_id": "$input.equipment_id",
+          "query": "$input.query"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "response_map": {
+          "equipment": "$response.body.structuredContent.item",
+          "items": "$response.body.structuredContent.items",
+          "total": "$response.body.structuredContent.total",
+          "upstream_meta": "$response.body.structuredContent._meta"
+        }
+      }
+    },
+    {
       "name": "mcp.cmms.work_order.history",
       "description": "通过 MCP 查询某设备或故障码的历史维修工单。",
       "risk_level": "low",
@@ -64,7 +99,8 @@
         "timeout_ms": "$config.timeout_ms",
         "response_map": {
           "workorders": "$response.body.structuredContent.workorders",
-          "total": "$response.body.structuredContent.total"
+          "total": "$response.body.structuredContent.total",
+          "upstream_meta": "$response.body.structuredContent._meta"
         }
       }
     },
@@ -139,7 +175,8 @@
         "timeout_ms": "$config.timeout_ms",
         "response_map": {
           "alarms": "$response.body.structuredContent.alarms",
-          "total": "$response.body.structuredContent.total"
+          "total": "$response.body.structuredContent.total",
+          "upstream_meta": "$response.body.structuredContent._meta"
         }
       }
     },

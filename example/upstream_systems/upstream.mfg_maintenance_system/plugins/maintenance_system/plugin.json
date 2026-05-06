@@ -39,6 +39,53 @@
   },
   "capabilities": [
     {
+      "name": "equipment.lookup",
+      "description": "查询模拟设备台账基础信息。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema": {
+        "required": ["equipment_id"],
+        "properties": {
+          "equipment_id": { "type": "string" },
+          "query": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "required": ["equipment"]
+      },
+      "binding": {
+        "method": "GET",
+        "path": "/api/v1/equipment",
+        "query": {
+          "tenant_id": "$config.tenant_id",
+          "equipment_id": "$input.equipment_id",
+          "keyword": "$input.query"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.maintenance_token",
+          "Accept": "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 2,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
+        "response_map": {
+          "equipment": "$response.body.data.item",
+          "items": "$response.body.data.items",
+          "total": "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
+        },
+        "error_translation": {
+          "401": "MAINTENANCE_AUTH_FAILED",
+          "404": "MAINTENANCE_EQUIPMENT_NOT_FOUND",
+          "5xx": "MAINTENANCE_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
       "name": "cmms.work_order.history",
       "description": "查询某设备或故障码的历史维修工单。",
       "risk_level": "low",
@@ -76,7 +123,8 @@
         },
         "response_map": {
           "workorders": "$response.body.data.items",
-          "total": "$response.body.data.total"
+          "total": "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
         },
         "error_translation": {
           "401": "MAINTENANCE_AUTH_FAILED",
@@ -176,7 +224,8 @@
         },
         "response_map": {
           "alarms": "$response.body.data.items",
-          "total": "$response.body.data.total"
+          "total": "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
         },
         "error_translation": {
           "401": "MAINTENANCE_AUTH_FAILED",

@@ -26,6 +26,44 @@
   },
   "capabilities": [
     {
+      "name": "equipment.lookup",
+      "description": "按设备 ID 查询设备台账基础信息，用于 AI 动作执行前校验业务对象。",
+      "risk_level": "low",
+      "side_effect_level": "read",
+      "required_scope": "cmms:read",
+      "input_schema":  { "required": ["equipment_id"] },
+      "output_schema": { "required": ["equipment"] },
+      "binding": {
+        "method": "GET",
+        "path":   "/api/v1/equipment",
+        "query":  {
+          "equipment_id": "$input.equipment_id",
+          "keyword":      "$input.query"
+        },
+        "headers": {
+          "Authorization": "Bearer $secret.cmms_token",
+          "Accept":        "application/json"
+        },
+        "timeout_ms": "$config.timeout_ms",
+        "retry": {
+          "policy": "exponential",
+          "max_attempts": 3,
+          "retry_on": ["5xx", "UPSTREAM_TIMEOUT", "UPSTREAM_UNREACHABLE"]
+        },
+        "response_map": {
+          "equipment": "$response.body.data.item",
+          "items": "$response.body.data.items",
+          "total": "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
+        },
+        "error_translation": {
+          "401": "CMMS_AUTH_FAILED",
+          "404": "CMMS_NOT_FOUND",
+          "5xx": "CMMS_UPSTREAM_UNAVAILABLE"
+        }
+      }
+    },
+    {
       "name": "cmms.work_order.history",
       "description": "查询某设备 / 某故障码的最近 N 条工单记录。",
       "risk_level": "low",
@@ -53,7 +91,8 @@
         },
         "response_map": {
           "workorders": "$response.body.data.items",
-          "total":      "$response.body.data.total"
+          "total":      "$response.body.data.total",
+          "upstream_meta": "$response.body._meta"
         },
         "error_translation": {
           "401": "CMMS_AUTH_FAILED",

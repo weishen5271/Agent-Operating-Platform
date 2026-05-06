@@ -53,6 +53,12 @@ export function OutputList({
           <div>
             <strong>{item.title}</strong>
             <p className="row-meta">{item.summary || item.output_id}</p>
+            {item.run_id || item.action_id || item.object_id ? (
+              <p className="row-meta">
+                {item.action_id || "未关联动作"} · {item.object_type || "对象"} / {item.object_id || "-"} ·{" "}
+                {item.run_id || "-"}
+              </p>
+            ) : null}
           </div>
           <span className="status-chip plain">{typeLabels[item.type] ?? item.type}</span>
           <span className="mono">{item.package_id}</span>

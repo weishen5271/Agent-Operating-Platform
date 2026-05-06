@@ -182,7 +182,53 @@ export type PackagePluginSummary = {
     risk_level?: string;
     side_effect_level?: string;
     required_scope?: string;
+    input_schema?: {
+      required?: string[];
+      [key: string]: unknown;
+    };
   }>;
+};
+
+export type BusinessObjectDeclaration = {
+  type: string;
+  label?: string;
+  id_field?: string;
+  lookup_capability?: string;
+  package_id?: string;
+};
+
+export type PackageAIActionDeclaration = {
+  id: string;
+  label?: string;
+  description?: string;
+  object_types?: string[];
+  skill?: string;
+  required_inputs?: string[];
+  optional_inputs?: string[];
+  outputs?: string[];
+  risk_level?: string;
+  requires_confirmation?: boolean;
+  data_input_modes?: string[];
+};
+
+export type AIActionCapabilityDiagnostic = {
+  name: string;
+  status: "http" | "mcp" | "platform" | "stub" | "missing_config" | "missing_capability" | string;
+  executor: string;
+  required_scope: string;
+  risk_level: string;
+  side_effect_level: string;
+  plugin_name: string;
+  message: string;
+};
+
+export type AIActionDiagnostic = {
+  action_id: string;
+  skill: string;
+  skill_status: "available" | "missing_skill" | string;
+  capabilities: AIActionCapabilityDiagnostic[];
+  ready: boolean;
+  missing: string[];
 };
 
 export type AdminPackagesResponse = {
@@ -222,6 +268,9 @@ export type PackageDetailResponse = {
     tools: number;
   };
   plugins?: PackagePluginSummary[];
+  business_objects?: BusinessObjectDeclaration[];
+  ai_actions?: PackageAIActionDeclaration[];
+  ai_action_diagnostics?: AIActionDiagnostic[];
   knowledge_imports?: KnowledgeImportDeclaration[];
   source_kind?: "catalog" | "bundle";
   bundle_path?: string | null;
@@ -310,6 +359,13 @@ export type PluginConfigSchemaResponse = {
   };
   config: Record<string, unknown>;
   auth_refs: string[];
+};
+
+export type PluginCapabilityTestResponse = {
+  plugin_name: string;
+  capability_name: string;
+  side_effect_level: string;
+  result: Record<string, unknown>;
 };
 
 export type PluginConfigFieldSchema = {
@@ -763,6 +819,10 @@ export type BusinessOutput = {
   citations: string[];
   conversation_id: string | null;
   trace_id: string | null;
+  run_id: string | null;
+  action_id: string | null;
+  object_type: string | null;
+  object_id: string | null;
   linked_draft_group_id: string | null;
   summary: string;
   created_by: string;
@@ -772,4 +832,61 @@ export type BusinessOutput = {
 
 export type BusinessOutputListResponse = {
   items: BusinessOutput[];
+};
+
+export type AIActionDefinition = {
+  id: string;
+  label: string;
+  package_id: string;
+  object_types: string[];
+  skill: string;
+  description: string;
+  required_inputs: string[];
+  optional_inputs: string[];
+  outputs: string[];
+  risk_level: string;
+  requires_confirmation: boolean;
+  data_input_modes: Array<"platform_pull" | "host_context" | "mixed" | string>;
+};
+
+export type AIActionListResponse = {
+  items: AIActionDefinition[];
+};
+
+export type BusinessObjectListResponse = {
+  items: BusinessObjectDeclaration[];
+};
+
+export type BusinessObjectLookupResponse = {
+  package_id: string;
+  object_type: string;
+  object_id: string;
+  lookup_capability: string;
+  result: Record<string, unknown>;
+};
+
+export type AIRunRecord = {
+  run_id: string;
+  tenant_id: string;
+  user_id: string;
+  package_id: string;
+  action_id: string;
+  source: "workspace" | "chat" | "embed" | "api" | string;
+  object_type: string;
+  object_id: string;
+  inputs: Record<string, unknown>;
+  data_input_mode: string;
+  status: "pending" | "running" | "succeeded" | "failed" | string;
+  trace_id: string | null;
+  output_ids: string[];
+  draft_id: string | null;
+  error_message: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type AIActionRunResponse = {
+  run: AIRunRecord;
+  output?: BusinessOutput;
+  trace_id?: string;
 };

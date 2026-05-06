@@ -66,6 +66,10 @@ class PluginConfigUpdateRequest(BaseModel):
     config: dict[str, object] = Field(default_factory=dict)
 
 
+class PluginCapabilityTestRequest(BaseModel):
+    input: dict[str, object] = Field(default_factory=dict, description="只读 Capability 测试输入。")
+
+
 class McpServerUpsertRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
     transport: Literal["streamable-http", "http"] = Field(default="streamable-http")
@@ -286,6 +290,37 @@ async def update_plugin_config(
         raise HTTPException(status_code=404, detail="Plugin not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/plugins/{plugin_name}/capabilities/{capability_name}/test",
+    tags=["插件管理"],
+    summary="测试插件只读能力",
+    description="使用当前租户保存的插件配置调用指定只读 Capability，用于验证外部系统 endpoint、密钥和字段映射。",
+)
+async def test_plugin_capability(
+    plugin_name: str,
+    capability_name: str,
+    payload: PluginCapabilityTestRequest,
+    auth: AuthContext,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.test_plugin_capability(
+            plugin_name=plugin_name,
+            capability_name=capability_name,
+            payload=payload.input,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Capability not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/mcp-servers")

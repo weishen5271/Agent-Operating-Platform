@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { getPluginConfigSchema, listMcpServers, updatePluginConfig } from "@/lib/api-client";
-import type { McpServer, PluginConfigFieldSchema, PluginConfigSchemaResponse } from "@/lib/api-client/types";
+import { getPluginConfigSchema, listMcpServers, testPluginCapability, updatePluginConfig } from "@/lib/api-client";
+import type { McpServer, PackagePluginSummary, PluginConfigFieldSchema, PluginConfigSchemaResponse } from "@/lib/api-client/types";
 
 type FormState = Record<string, unknown>;
 
@@ -39,14 +39,59 @@ function fieldLabel(field: string, config: PluginConfigFieldSchema, parent?: str
   return config.label ?? (parent ? `${parent}.${field}` : field);
 }
 
-export function PluginConfigForm({ pluginName }: { pluginName: string }) {
+type CapabilitySummary = NonNullable<PackagePluginSummary["capabilities"]>[number];
+
+function buildInputTemplate(capability: CapabilitySummary | undefined): string {
+  const required = capability?.input_schema?.required ?? [];
+  const payload = Object.fromEntries(required.map((field) => [field, ""]));
+  return JSON.stringify(payload, null, 2);
+}
+
+function findSimulatedNotice(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const notice = findSimulatedNotice(item);
+      if (notice) return notice;
+    }
+    return "";
+  }
+  const record = value as Record<string, unknown>;
+  if (record.simulated === true) {
+    return typeof record.notice === "string" && record.notice ? record.notice : "当前返回标记为模拟/占位数据。";
+  }
+  for (const item of Object.values(record)) {
+    const notice = findSimulatedNotice(item);
+    if (notice) return notice;
+  }
+  return "";
+}
+
+export function PluginConfigForm({
+  pluginName,
+  capabilities = [],
+}: {
+  pluginName: string;
+  capabilities?: CapabilitySummary[];
+}) {
   const [schema, setSchema] = useState<PluginConfigSchemaResponse | null>(null);
   const [form, setForm] = useState<FormState>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const readCapabilities = useMemo(
+    () => capabilities.filter((capability) => capability.side_effect_level === "read"),
+    [capabilities],
+  );
+  const [selectedCapabilityName, setSelectedCapabilityName] = useState(readCapabilities[0]?.name ?? "");
+  const selectedCapability = readCapabilities.find((capability) => capability.name === selectedCapabilityName);
+  const [testInput, setTestInput] = useState(buildInputTemplate(selectedCapability));
+  const [testResult, setTestResult] = useState("");
+  const [testSimulatedNotice, setTestSimulatedNotice] = useState("");
+  const [testError, setTestError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -85,6 +130,20 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
     };
   }, [schema]);
 
+  useEffect(() => {
+    const firstCapability = readCapabilities[0]?.name ?? "";
+    setSelectedCapabilityName((current) =>
+      current && readCapabilities.some((capability) => capability.name === current) ? current : firstCapability,
+    );
+  }, [pluginName, readCapabilities]);
+
+  useEffect(() => {
+    setTestInput(buildInputTemplate(selectedCapability));
+    setTestResult("");
+    setTestSimulatedNotice("");
+    setTestError("");
+  }, [selectedCapabilityName]);
+
   function setField(field: string, value: unknown) {
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -111,6 +170,27 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
       setError(exc instanceof Error ? exc.message : "保存失败");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runCapabilityTest() {
+    if (!selectedCapabilityName) return;
+    setTesting(true);
+    setTestError("");
+    setTestResult("");
+    setTestSimulatedNotice("");
+    try {
+      const parsed = JSON.parse(testInput || "{}") as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("测试输入必须是 JSON 对象。");
+      }
+      const response = await testPluginCapability(pluginName, selectedCapabilityName, parsed as Record<string, unknown>);
+      setTestResult(JSON.stringify(response.result, null, 2));
+      setTestSimulatedNotice(findSimulatedNotice(response.result));
+    } catch (exc) {
+      setTestError(exc instanceof Error ? exc.message : "测试失败");
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -261,6 +341,40 @@ export function PluginConfigForm({ pluginName }: { pluginName: string }) {
         <span className="material-symbols-outlined">save</span>
         {saving ? "保存中..." : "保存配置"}
       </button>
+      {readCapabilities.length ? (
+        <div className="plugin-capability-test">
+          <div className="section-mini-head">
+            <h4>只读能力测试</h4>
+            <span className="status-chip plain">真实调用</span>
+          </div>
+          <label className="plugin-config-field">
+            <span>Capability</span>
+            <select value={selectedCapabilityName} onChange={(event) => setSelectedCapabilityName(event.target.value)}>
+              {readCapabilities.map((capability) => (
+                <option key={capability.name} value={capability.name}>
+                  {capability.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="plugin-config-field">
+            <span>测试输入 JSON</span>
+            <textarea value={testInput} onChange={(event) => setTestInput(event.target.value)} />
+          </label>
+          {testError ? <p className="inline-error">{testError}</p> : null}
+          {testSimulatedNotice ? (
+            <div className="plugin-test-warning">
+              <span className="material-symbols-outlined">info</span>
+              <p>{testSimulatedNotice}</p>
+            </div>
+          ) : null}
+          {testResult ? <pre className="plugin-test-result">{testResult}</pre> : null}
+          <button type="button" className="secondary-button compact" disabled={testing || !selectedCapabilityName} onClick={() => void runCapabilityTest()}>
+            <span className="material-symbols-outlined">play_arrow</span>
+            {testing ? "测试中..." : "测试只读能力"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

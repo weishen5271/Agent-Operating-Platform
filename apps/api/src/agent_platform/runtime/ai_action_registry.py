@@ -27,6 +27,26 @@ class AIActionRegistry:
                 return action
         return None
 
+    def list_business_objects(self, package_id: str | None = None) -> list[dict[str, object]]:
+        objects: list[dict[str, object]] = []
+        for package in self._loader.list_packages():
+            current_package_id = str(package.get("package_id") or "")
+            if package_id and current_package_id != package_id:
+                continue
+            for raw in package.get("business_objects", []):
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                item["package_id"] = current_package_id
+                objects.append(item)
+        return objects
+
+    def get_business_object(self, package_id: str, object_type: str) -> dict[str, object] | None:
+        for item in self.list_business_objects(package_id):
+            if str(item.get("type") or "") == object_type:
+                return item
+        return None
+
     @staticmethod
     def _normalize(raw: dict[str, object], package_id: str) -> AIActionDefinition:
         """把 manifest 原始字典收敛成后端内部稳定契约。"""

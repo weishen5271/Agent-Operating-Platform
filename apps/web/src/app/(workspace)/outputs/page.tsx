@@ -1,8 +1,13 @@
+"use client";
+
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 import { OutputList } from "@/components/outputs/output-list";
 import { Shell } from "@/components/shared/shell";
 import { listBusinessOutputs } from "@/lib/api-client";
+import type { BusinessOutput } from "@/lib/api-client/types";
 
 const TYPE_LABELS: Record<string, string> = {
   report: "分析报告",
@@ -19,23 +24,48 @@ const STATUS_LABELS: Record<string, string> = {
   archived: "已归档",
 };
 
-export default async function OutputsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ type?: string; status?: string; package?: string }>;
-}) {
-  const params = await searchParams;
-  const data = await listBusinessOutputs({
-    type: params.type,
-    status: params.status,
-    package: params.package,
-  }).catch(() => ({ items: [] as Awaited<ReturnType<typeof listBusinessOutputs>>["items"] }));
+export default function OutputsPage() {
+  const searchParams = useSearchParams();
+  const [items, setItems] = useState<BusinessOutput[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const filters = useMemo(
+    () => ({
+      type: searchParams.get("type") ?? undefined,
+      status: searchParams.get("status") ?? undefined,
+      package: searchParams.get("package") ?? undefined,
+    }),
+    [searchParams],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError("");
+    listBusinessOutputs(filters)
+      .then((data) => {
+        if (!alive) return;
+        setItems(data.items);
+      })
+      .catch((exc) => {
+        if (!alive) return;
+        setItems([]);
+        setError(exc instanceof Error ? exc.message : "业务成果加载失败");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [filters]);
 
   const counts = {
-    total: data.items.length,
-    draft: data.items.filter((item) => item.status === "draft").length,
-    reviewing: data.items.filter((item) => item.status === "reviewing").length,
-    exported: data.items.filter((item) => item.status === "exported").length,
+    total: items.length,
+    draft: items.filter((item) => item.status === "draft").length,
+    reviewing: items.filter((item) => item.status === "reviewing").length,
+    exported: items.filter((item) => item.status === "exported").length,
   };
 
   return (
@@ -49,7 +79,7 @@ export default async function OutputsPage({
               <span className="current">业务成果</span>
             </div>
             <h1>业务成果工作台</h1>
-            <p>管理对话产出的报告、图表、决策建议与行动计划，并联动审批与证据链。</p>
+            <p>管理 AI 动作和对话产出的报告、决策建议与行动计划，并联动 Trace 证据链。</p>
           </div>
         </div>
 
@@ -92,7 +122,7 @@ export default async function OutputsPage({
           <div className="panel-header">
             <div>
               <h3>成果列表</h3>
-              <p>按类型 / 状态筛选，或从对话页"保存为成果"创建。</p>
+              <p>按类型 / 状态筛选，AI 工作台执行成功后会自动生成成果。</p>
             </div>
             <div className="panel-actions">
               <Link href="/outputs?type=report" className="secondary-button compact">
@@ -109,11 +139,19 @@ export default async function OutputsPage({
               </Link>
             </div>
           </div>
-          <OutputList
-            items={data.items}
-            typeLabels={TYPE_LABELS}
-            statusLabels={STATUS_LABELS}
-          />
+          {loading ? (
+            <div className="trace-empty-state">
+              <span className="material-symbols-outlined">progress_activity</span>
+              <p>正在加载业务成果...</p>
+            </div>
+          ) : error ? (
+            <div className="trace-empty-state">
+              <span className="material-symbols-outlined">error</span>
+              <p>{error}</p>
+            </div>
+          ) : (
+            <OutputList items={items} typeLabels={TYPE_LABELS} statusLabels={STATUS_LABELS} />
+          )}
         </section>
       </section>
     </Shell>

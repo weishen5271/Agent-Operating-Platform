@@ -13,9 +13,13 @@ import type {
   AdminWikiFileDistributionResponse,
   AdminWikiPagesResponse,
   AdminWikiSearchResponse,
+  AIActionListResponse,
+  AIActionRunResponse,
   AuthResponse,
   BusinessOutput,
   BusinessOutputListResponse,
+  BusinessObjectListResponse,
+  BusinessObjectLookupResponse,
   ChatCompletionResponse,
   ChatStreamEvent,
   ConversationListResponse,
@@ -33,6 +37,7 @@ import type {
   PackageKnowledgePreviewResponse,
   PasswordKeyResponse,
   PluginConfigSchemaResponse,
+  PluginCapabilityTestResponse,
   TenantListResponse,
   TenantPackagesResponse,
   TenantProfile,
@@ -242,6 +247,8 @@ function buildAuthHeaders(extra?: Record<string, string>): Record<string, string
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const requiresBrowserAuth =
     path.startsWith("/admin") ||
+    path.startsWith("/ai") ||
+    path.startsWith("/outputs") ||
     path.startsWith("/workspace") ||
     path.startsWith("/chat/actions") ||
     path.startsWith("/chat/conversations") ||
@@ -252,6 +259,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const target =
     path.startsWith("/admin") ||
+    path.startsWith("/ai") ||
+    path.startsWith("/outputs") ||
     path.startsWith("/workspace") ||
     path.startsWith("/chat/actions") ||
     path.startsWith("/chat/conversations") ||
@@ -396,6 +405,53 @@ export function getTrace(traceId: string): Promise<TraceResponse> {
   return request<TraceResponse>(`/chat/traces/${traceId}`);
 }
 
+export function listAIActions(packageId?: string): Promise<AIActionListResponse> {
+  const suffix = packageId ? `?package_id=${encodeURIComponent(packageId)}` : "";
+  return request<AIActionListResponse>(`/ai/actions${suffix}`);
+}
+
+export function runAIAction(
+  actionId: string,
+  payload: {
+    package_id: string;
+    source?: "workspace" | "chat" | "embed" | "api" | string;
+    object: {
+      object_type: string;
+      object_id: string;
+    };
+    inputs?: Record<string, unknown>;
+    data_input?: {
+      mode: "platform_pull" | "host_context" | "mixed" | string;
+      context?: Record<string, unknown>;
+    };
+  },
+): Promise<AIActionRunResponse> {
+  return request<AIActionRunResponse>(`/ai/actions/${encodeURIComponent(actionId)}/run`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getAIRunTrace(runId: string): Promise<TraceResponse> {
+  return request<TraceResponse>(`/ai/runs/${encodeURIComponent(runId)}/trace`);
+}
+
+export function listBusinessObjects(packageId?: string): Promise<BusinessObjectListResponse> {
+  const suffix = packageId ? `?package_id=${encodeURIComponent(packageId)}` : "";
+  return request<BusinessObjectListResponse>(`/ai/business-objects${suffix}`);
+}
+
+export function lookupBusinessObject(payload: {
+  package_id: string;
+  object_type: string;
+  object_id: string;
+}): Promise<BusinessObjectLookupResponse> {
+  return request<BusinessObjectLookupResponse>("/ai/business-objects/lookup", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getAdminPackages(): Promise<AdminPackagesResponse> {
   return request<AdminPackagesResponse>("/admin/packages");
 }
@@ -493,6 +549,20 @@ export function updatePluginConfig(
     {
       method: "PUT",
       body: JSON.stringify({ config }),
+    },
+  );
+}
+
+export function testPluginCapability(
+  pluginName: string,
+  capabilityName: string,
+  input: Record<string, unknown>,
+): Promise<PluginCapabilityTestResponse> {
+  return request<PluginCapabilityTestResponse>(
+    `/admin/plugins/${encodeURIComponent(pluginName)}/capabilities/${encodeURIComponent(capabilityName)}/test`,
+    {
+      method: "POST",
+      body: JSON.stringify({ input }),
     },
   );
 }

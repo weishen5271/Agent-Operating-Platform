@@ -32,6 +32,7 @@ Binding 形态::
 from __future__ import annotations
 
 import copy
+import re
 import threading
 import time
 from typing import Any
@@ -52,6 +53,7 @@ _MAX_RETRY_DELAY_SECONDS = 1.0
 _IDEMPOTENCY_CACHE_TTL_SECONDS = 300
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _MAX_RATE_LIMIT_PER_MINUTE = 10000
+_SECRET_REF_PATTERN = re.compile(r"\$secret\.([A-Za-z0-9_.\-]+)")
 
 
 _IDEMPOTENCY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -116,6 +118,7 @@ class HttpExecutor(CapabilityPlugin):
         self._validate_url(url)
 
         query = render_mapping(self._binding.get("query") or {}, ctx)
+        self._ensure_header_secrets_configured(ctx)
         headers = render_mapping(self._binding.get("headers") or {}, ctx)
         timeout_seconds = self._resolve_timeout(ctx)
         body = self._binding.get("body")
@@ -260,6 +263,17 @@ class HttpExecutor(CapabilityPlugin):
             "retry_on": {str(item).upper() for item in retry_on if item is not None},
         }
 
+    def _ensure_header_secrets_configured(self, ctx: BindingContext) -> None:
+        headers = self._binding.get("headers") or {}
+        for secret_name in _collect_secret_refs(headers):
+            value = ctx.resolve("secret", secret_name)
+            if value in (None, ""):
+                raise HttpExecutorError(
+                    "MISSING_CONFIG",
+                    None,
+                    f"plugin_config.secrets.{secret_name} 未配置；请先在「业务包管理 → 能力 → 插件配置」填入。",
+                )
+
     def _should_retry_status(self, status: int, retry_policy: dict[str, Any], attempt: int) -> bool:
         if attempt >= retry_policy["max_attempts"]:
             return False
@@ -400,6 +414,21 @@ class HttpExecutor(CapabilityPlugin):
 
 def _drop_none(mapping: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in mapping.items() if value is not None}
+
+
+def _collect_secret_refs(value: Any) -> set[str]:
+    refs: set[str] = set()
+    if isinstance(value, dict):
+        for item in value.values():
+            refs.update(_collect_secret_refs(item))
+        return refs
+    if isinstance(value, list):
+        for item in value:
+            refs.update(_collect_secret_refs(item))
+        return refs
+    if isinstance(value, str):
+        refs.update(match.group(1) for match in _SECRET_REF_PATTERN.finditer(value))
+    return refs
 
 
 def _stringify_headers(headers: dict[str, Any]) -> dict[str, str]:

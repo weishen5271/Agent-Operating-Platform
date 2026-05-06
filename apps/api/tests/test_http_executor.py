@@ -275,6 +275,21 @@ def test_http_executor_blocks_metadata_ip_before_request() -> None:
     assert client.requests == []
 
 
+def test_http_executor_rejects_missing_header_secret_before_request() -> None:
+    client = RecordingHttpClient(responses=[httpx.Response(200, json={"data": []})])
+    executor = build_executor(client, base_binding())
+
+    with pytest.raises(HttpExecutorError) as exc:
+        executor.invoke_with_config(
+            {"equipment_id": "eq-1", "summary": "missing token"},
+            tenant_config={"endpoint": "https://upstream.test", "secrets": {}},
+        )
+
+    assert exc.value.code == "MISSING_CONFIG"
+    assert "plugin_config.secrets.token" in exc.value.detail
+    assert client.requests == []
+
+
 def test_http_executor_blocks_localhost_before_request() -> None:
     client = RecordingHttpClient(responses=[httpx.Response(200, json={"data": []})])
     executor = build_executor(client, base_binding())

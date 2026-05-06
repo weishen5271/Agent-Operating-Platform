@@ -17,6 +17,7 @@ from agent_platform.domain.models import (
     UserContext,
     utc_now,
 )
+from agent_platform.plugins.base import CapabilityPlugin
 from agent_platform.plugins.executors import HttpExecutor, McpExecutor
 from agent_platform.runtime.skill_registry import ToolRegistry
 from agent_platform.runtime.registry import CapabilityRegistry
@@ -194,6 +195,35 @@ class FakeMcpServers:
         before = len(self.items)
         self.items = [item for item in self.items if item.name != name]
         return len(self.items) < before
+
+
+class RecordingReadPlugin(CapabilityPlugin):
+    plugin_name = "cmms.work_order"
+
+    def __init__(self, side_effect_level: str = "read") -> None:
+        self.capability = CapabilityDefinition(
+            name="cmms.work_order.history",
+            description="CMMS work order history",
+            risk_level="low",
+            side_effect_level=side_effect_level,
+            required_scope="cmms:read",
+            input_schema={"required": ["equipment_id"]},
+            output_schema={"required": ["workorders"]},
+            source="package",
+            package_id="industry.mfg_maintenance",
+        )
+        self.last_payload: dict[str, object] | None = None
+
+    def invoke(self, payload: dict[str, object]) -> dict[str, object]:
+        self.last_payload = dict(payload)
+        return {
+            "workorders": [
+                {
+                    "work_order_id": "wo-1",
+                    "equipment_id": payload["equipment_id"],
+                }
+            ]
+        }
 
 
 class FakeReleasePlans:
@@ -543,6 +573,51 @@ def test_mcp_server_registry_resolves_into_capability_tenant_config() -> None:
             "status": "active",
         }
     }
+
+
+def test_plugin_capability_test_only_invokes_read_capability() -> None:
+    service = build_service(scopes=["admin:read", "tenant:manage"])
+    plugin = RecordingReadPlugin()
+    service._registry._package_plugins = {"cmms.work_order.history": plugin}
+
+    response = asyncio.run(
+        service.test_plugin_capability(
+            "cmms.work_order",
+            "cmms.work_order.history",
+            {"equipment_id": "EQ-CNC-650-01"},
+            tenant_id="tenant-default",
+            user_id="user-admin",
+        )
+    )
+
+    assert plugin.last_payload == {"equipment_id": "EQ-CNC-650-01"}
+    assert response["plugin_name"] == "cmms.work_order"
+    assert response["result"] == {
+        "workorders": [
+            {
+                "work_order_id": "wo-1",
+                "equipment_id": "EQ-CNC-650-01",
+            }
+        ]
+    }
+
+
+def test_plugin_capability_test_rejects_non_read_capability() -> None:
+    service = build_service(scopes=["admin:read", "tenant:manage"])
+    service._registry._package_plugins = {
+        "cmms.work_order.history": RecordingReadPlugin(side_effect_level="draft")
+    }
+
+    with pytest.raises(ValueError, match="Only read-only capabilities"):
+        asyncio.run(
+            service.test_plugin_capability(
+                "cmms.work_order",
+                "cmms.work_order.history",
+                {"equipment_id": "EQ-CNC-650-01"},
+                tenant_id="tenant-default",
+                user_id="user-admin",
+            )
+        )
 
 
 def test_tool_override_update_persists_override() -> None:

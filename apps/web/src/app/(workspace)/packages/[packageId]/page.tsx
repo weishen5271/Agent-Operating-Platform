@@ -32,6 +32,29 @@ function importModeLabel(autoImport: boolean): string {
   return autoImport ? "自动导入" : "手动导入";
 }
 
+function dependencyStatusTone(status: string): string {
+  if (status === "http" || status === "mcp" || status === "platform") return "success";
+  if (status === "stub") return "warning";
+  if (status === "missing_config" || status === "missing_capability") return "danger";
+  return "plain";
+}
+
+function dependencyStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    http: "HTTP",
+    mcp: "MCP",
+    platform: "平台",
+    stub: "Stub",
+    missing_config: "配置缺失",
+    missing_capability: "能力缺失",
+  };
+  return labels[status] ?? status;
+}
+
+function joinList(items: string[] | undefined): string {
+  return items?.length ? items.join(" · ") : "未声明";
+}
+
 export default function PackageDetailPage() {
   const params = useParams<{ packageId: string }>();
   const router = useRouter();
@@ -181,6 +204,9 @@ export default function PackageDetailPage() {
   const autoImportCount = knowledgeImports.filter((item) => item.auto_import).length;
   const isInstalledBundle = packageDetail.source_kind === "bundle" || Boolean(packageDetail.bundle_path);
   const plugins = packageDetail.plugins ?? [];
+  const businessObjects = packageDetail.business_objects ?? [];
+  const aiActions = packageDetail.ai_actions ?? [];
+  const actionDiagnostics = packageDetail.ai_action_diagnostics ?? [];
   const selectedPlugin = selectedPluginName ? plugins.find((item) => item.name === selectedPluginName) : undefined;
 
   return (
@@ -265,6 +291,98 @@ export default function PackageDetailPage() {
             </div>
           </div>
           <PackageDependencyGraph dependencies={packageDetail.dependencies} plugins={plugins} />
+        </section>
+
+        <section className="panel-card">
+          <div className="panel-header">
+            <div>
+              <h3>业务对象与 AI 动作</h3>
+              <p>展示 manifest 声明的业务对象、结构化动作和运行依赖状态。</p>
+            </div>
+          </div>
+          {!businessObjects.length && !aiActions.length ? (
+            <div className="trace-empty-state">
+              <span className="material-symbols-outlined">schema</span>
+              <p>当前业务包没有声明 business_objects 或 ai_actions。</p>
+            </div>
+          ) : (
+            <div className="package-action-grid">
+              <div className="package-action-column">
+                <h4>业务对象</h4>
+                {businessObjects.length ? (
+                  <div className="stack-list compact">
+                    {businessObjects.map((item) => (
+                      <article key={item.type} className="stack-item">
+                        <div>
+                          <strong>{item.label ?? item.type}</strong>
+                          <p className="row-meta">
+                            {item.type} · ID 字段 {item.id_field ?? "未声明"}
+                          </p>
+                          <p className="row-meta">
+                            lookup: {item.lookup_capability || "第一版手动输入对象 ID"}
+                          </p>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-distribution">未声明业务对象。</div>
+                )}
+              </div>
+
+              <div className="package-action-column">
+                <h4>AI 动作</h4>
+                {aiActions.length ? (
+                  <div className="stack-list compact">
+                    {aiActions.map((action) => {
+                      const diagnostic = actionDiagnostics.find((item) => item.action_id === action.id);
+                      return (
+                        <article key={action.id} className="stack-item package-action-card">
+                          <div>
+                            <div className="package-action-title-row">
+                              <strong>{action.label ?? action.id}</strong>
+                              <span className={`status-chip ${diagnostic?.ready ? "success" : "warning"}`}>
+                                {diagnostic?.ready ? "依赖就绪" : "需处理"}
+                              </span>
+                            </div>
+                            <p>{action.description || action.id}</p>
+                            <p className="row-meta">
+                              对象 {joinList(action.object_types)} · Skill {action.skill || "未声明"}
+                            </p>
+                            <p className="row-meta">
+                              必填 {joinList(action.required_inputs)} · 输出 {joinList(action.outputs)}
+                            </p>
+                            <p className="row-meta">
+                              风险 {action.risk_level ?? "low"} · 数据输入 {joinList(action.data_input_modes)}
+                            </p>
+                            {diagnostic?.capabilities.length ? (
+                              <div className="package-capability-status-list">
+                                {diagnostic.capabilities.map((capability) => (
+                                  <div key={capability.name} className="package-capability-status">
+                                    <span className="mono">{capability.name}</span>
+                                    <span className={`status-chip ${dependencyStatusTone(capability.status)}`}>
+                                      {dependencyStatusLabel(capability.status)}
+                                    </span>
+                                    <span>{capability.message}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="row-meta">
+                                {diagnostic?.skill_status === "missing_skill" ? "Skill 未注册。" : "未声明 Capability 依赖。"}
+                              </p>
+                            )}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-distribution">未声明 AI 动作。</div>
+                )}
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="panel-card">
@@ -426,7 +544,11 @@ export default function PackageDetailPage() {
               </section>
               <section className="drawer-section">
                 <h4>连接配置</h4>
-                <PluginConfigForm key={selectedPlugin.name} pluginName={selectedPlugin.name} />
+                <PluginConfigForm
+                  key={selectedPlugin.name}
+                  pluginName={selectedPlugin.name}
+                  capabilities={selectedPlugin.capabilities ?? []}
+                />
               </section>
             </div>
           </aside>

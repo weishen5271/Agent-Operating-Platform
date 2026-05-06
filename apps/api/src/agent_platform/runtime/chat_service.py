@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
 import json
 import logging
 from pathlib import Path
@@ -911,6 +911,10 @@ class ChatService:
             "citations": list(item.citations),
             "conversation_id": item.conversation_id,
             "trace_id": item.trace_id,
+            "run_id": item.run_id,
+            "action_id": item.action_id,
+            "object_type": item.object_type,
+            "object_id": item.object_id,
             "linked_draft_group_id": item.linked_draft_group_id,
             "summary": item.summary,
             "created_by": item.created_by,
@@ -1167,7 +1171,163 @@ class ChatService:
                 "plugins": sum(1 for item in dependencies if item.get("kind") == "plugin"),
                 "tools": sum(1 for item in dependencies if item.get("kind") == "platform_tool"),
             },
+            "ai_action_diagnostics": await self._build_ai_action_diagnostics(
+                package=package,
+                tenant_id=context.tenant_id,
+            ),
         }
+
+    async def _build_ai_action_diagnostics(
+        self,
+        *,
+        package: dict[str, object],
+        tenant_id: str,
+    ) -> list[dict[str, object]]:
+        package_id = str(package.get("package_id") or "")
+        diagnostics: list[dict[str, object]] = []
+        for raw_action in package.get("ai_actions", []):
+            if not isinstance(raw_action, dict):
+                continue
+            action_id = str(raw_action.get("id") or "").strip()
+            skill_name = str(raw_action.get("skill") or "").strip()
+            skill = self._resolve_package_skill(package_id, skill_name)
+            capability_statuses: list[dict[str, object]] = []
+            missing: list[str] = []
+            if skill is None:
+                if skill_name:
+                    missing.append(f"skill:{skill_name}")
+            else:
+                for capability_name in self._skill_capability_names(skill):
+                    status = await self._capability_dependency_status(
+                        capability_name=capability_name,
+                        tenant_id=tenant_id,
+                    )
+                    capability_statuses.append(status)
+                    if str(status.get("status")) in {"missing_capability", "missing_config"}:
+                        missing.append(f"capability:{capability_name}")
+
+            diagnostics.append(
+                {
+                    "action_id": action_id,
+                    "skill": skill_name,
+                    "skill_status": "available" if skill else "missing_skill",
+                    "capabilities": capability_statuses,
+                    "ready": not missing,
+                    "missing": missing,
+                }
+            )
+        return diagnostics
+
+    def _resolve_package_skill(self, package_id: str, skill_name: str) -> SkillDefinition | None:
+        if not skill_name:
+            return None
+        return self._skills.get(f"{package_id}::{skill_name}") or self._skills.get(skill_name)
+
+    @staticmethod
+    def _skill_capability_names(skill: SkillDefinition) -> list[str]:
+        names = [str(item).strip() for item in skill.depends_on_capabilities if str(item).strip()]
+        for step in skill.steps:
+            capability_name = str(step.get("capability") or "").strip()
+            if capability_name and capability_name not in names:
+                names.append(capability_name)
+        return names
+
+    async def _capability_dependency_status(
+        self,
+        *,
+        capability_name: str,
+        tenant_id: str,
+    ) -> dict[str, object]:
+        try:
+            capability = self._registry.get(capability_name)
+        except KeyError:
+            return {
+                "name": capability_name,
+                "status": "missing_capability",
+                "executor": "missing",
+                "required_scope": "",
+                "risk_level": "",
+                "side_effect_level": "",
+                "plugin_name": "",
+                "message": "Capability 未注册。",
+            }
+
+        plugin_name = self._registry.get_plugin_name_for_capability(capability_name)
+        try:
+            plugin = self._registry.get_plugin(plugin_name)
+        except KeyError:
+            plugin = None
+        executor = self._executor_kind(plugin)
+        status = executor
+        message = "Capability 可用。"
+        if executor in {"http", "mcp"}:
+            saved_config = await self._plugin_configs.get(tenant_id, plugin_name)
+            config = dict(saved_config.config) if saved_config else {}
+            missing_config = self._missing_required_config_keys(getattr(plugin, "config_schema", None), config)
+            if missing_config:
+                status = "missing_config"
+                message = f"插件配置缺失：{', '.join(missing_config)}"
+        elif executor == "stub":
+            message = "当前为 stub 占位能力，不能视为真实外部系统返回。"
+        return {
+            "name": capability.name,
+            "status": status,
+            "executor": executor,
+            "required_scope": capability.required_scope,
+            "risk_level": capability.risk_level,
+            "side_effect_level": capability.side_effect_level,
+            "plugin_name": plugin_name,
+            "message": message,
+        }
+
+    @staticmethod
+    def _executor_kind(plugin: object | None) -> str:
+        if plugin is None:
+            return "missing"
+        class_name = plugin.__class__.__name__
+        if class_name == "HttpExecutor":
+            return "http"
+        if class_name == "McpExecutor":
+            return "mcp"
+        if class_name == "StubPackagePlugin":
+            return "stub"
+        if class_name == "PlatformProxyPlugin":
+            return "platform"
+        return "platform"
+
+    @classmethod
+    def _missing_required_config_keys(
+        cls,
+        schema: object,
+        config: dict[str, object],
+        *,
+        prefix: str = "",
+    ) -> list[str]:
+        if not isinstance(schema, dict):
+            return []
+        missing: list[str] = []
+        required_list = schema.get("required")
+        properties = schema.get("properties")
+        property_items = properties if isinstance(properties, dict) else schema
+        explicit_required = {str(item) for item in required_list} if isinstance(required_list, list) else set()
+        for key, raw_field in property_items.items():
+            if not isinstance(raw_field, dict):
+                continue
+            path = f"{prefix}.{key}" if prefix else str(key)
+            required = bool(raw_field.get("required")) or str(key) in explicit_required
+            value = config.get(str(key))
+            if required and value in (None, "", {}):
+                missing.append(path)
+                continue
+            if raw_field.get("type") == "object" and isinstance(value, dict):
+                missing.extend(
+                    cls._missing_required_config_keys(
+                        raw_field.get("properties"),
+                        value,
+                        prefix=path,
+                    )
+                )
+        return missing
 
     async def get_package_impact(self, target: str, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -1368,6 +1528,39 @@ class ChatService:
         return {
             "plugin_name": plugin_name,
             "config": self._mask_plugin_config(dict(saved_config.config), schema),
+        }
+
+    async def test_plugin_capability(
+        self,
+        plugin_name: str,
+        capability_name: str,
+        payload: dict[str, object],
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_tenant_management_scope(context)
+        capability = self._registry.get(capability_name)
+        resolved_plugin_name = self._registry.get_plugin_name_for_capability(capability_name)
+        if resolved_plugin_name != plugin_name:
+            raise ValueError("Capability does not belong to the specified plugin")
+        if capability.side_effect_level != "read":
+            raise ValueError("Only read-only capabilities can be tested from plugin config")
+        self._ensure_scope(context=context, required_scope=capability.required_scope)
+        tenant_config = await self._load_capability_tenant_config(
+            tenant_id=context.tenant_id,
+            capability_name=capability_name,
+        )
+        result = self._registry.invoke(
+            capability_name,
+            dict(payload or {}),
+            tenant_config=tenant_config,
+        )
+        return {
+            "plugin_name": plugin_name,
+            "capability_name": capability_name,
+            "side_effect_level": capability.side_effect_level,
+            "result": self._jsonable_value(result),
         }
 
     async def list_system_overview(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
@@ -3771,6 +3964,18 @@ class ChatService:
     @staticmethod
     def _is_masked_secret(value: str) -> bool:
         return value == "***" or (value.startswith("***") and len(value) > 3)
+
+    @classmethod
+    def _jsonable_value(cls, value: object) -> object:
+        if is_dataclass(value) and not isinstance(value, type):
+            return cls._jsonable_value(asdict(value))
+        if isinstance(value, dict):
+            return {str(key): cls._jsonable_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._jsonable_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._jsonable_value(item) for item in value]
+        return value
 
     @staticmethod
     def _build_routing_decision(tenant: TenantProfile | None, intent: str, message: str = "") -> dict[str, object]:
