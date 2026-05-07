@@ -14,9 +14,27 @@ function isSensitiveFieldName(field: string): boolean {
 }
 
 function initialState(schema: PluginConfigSchemaResponse): FormState {
-  const state: FormState = { ...schema.config };
+  const state: FormState = {};
   for (const [field, config] of Object.entries(schema.config_schema.properties)) {
-    if (state[field] === undefined && config.default !== undefined) {
+    const current = schema.config[field];
+    if (config.type === "object") {
+      const nestedCurrent = objectValue(current);
+      const nestedState: Record<string, unknown> = {};
+      for (const nestedField of Object.keys(config.properties ?? {})) {
+        if (nestedCurrent[nestedField] !== undefined) {
+          nestedState[nestedField] = nestedCurrent[nestedField];
+        }
+      }
+      if (Object.keys(nestedState).length > 0) {
+        state[field] = nestedState;
+      }
+      continue;
+    }
+    if (current !== undefined) {
+      state[field] = current;
+      continue;
+    }
+    if (config.default !== undefined) {
       state[field] = config.default;
     }
   }

@@ -47,7 +47,7 @@ class TenantUpdateRequest(BaseModel):
 
 class UserCreateRequest(BaseModel):
     email: str = Field(..., max_length=255)
-    password: str = Field(default="Aa111111", min_length=6, max_length=128)
+    password: str = Field(..., min_length=6, max_length=128)
     role: str = Field(..., max_length=64)
     scopes: list[str] = Field(default_factory=list)
 

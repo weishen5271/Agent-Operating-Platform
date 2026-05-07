@@ -307,10 +307,10 @@ export default function PackageDetailPage() {
             </div>
           ) : (
             <div className="package-action-grid">
-              <div className="package-action-column">
+              <div className="package-action-column package-object-column">
                 <h4>业务对象</h4>
                 {businessObjects.length ? (
-                  <div className="stack-list compact">
+                  <div className="stack-list compact package-object-list">
                     {businessObjects.map((item) => (
                       <article key={item.type} className="stack-item">
                         <div>
@@ -330,10 +330,10 @@ export default function PackageDetailPage() {
                 )}
               </div>
 
-              <div className="package-action-column">
+              <div className="package-action-column package-ai-action-column">
                 <h4>AI 动作</h4>
                 {aiActions.length ? (
-                  <div className="stack-list compact">
+                  <div className="stack-list compact package-ai-action-list">
                     {aiActions.map((action) => {
                       const diagnostic = actionDiagnostics.find((item) => item.action_id === action.id);
                       return (

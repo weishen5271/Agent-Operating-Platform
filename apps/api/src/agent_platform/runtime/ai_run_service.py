@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+import json
+import re
 from uuid import uuid4
 
 from agent_platform.domain.models import (
     AIRun,
     BusinessOutput,
+    DraftAction,
+    OutputGuardRule,
+    SecurityEvent,
     TraceRecord,
     TraceStep,
     UserContext,
@@ -14,7 +19,10 @@ from agent_platform.domain.models import (
 from agent_platform.infrastructure.repositories import (
     AIRunRepository,
     BusinessOutputRepository,
+    DraftRepository,
+    OutputGuardRuleRepository,
     PluginConfigRepository,
+    SecurityRepository,
     TenantRepository,
     TraceRepository,
     UserRepository,
@@ -42,6 +50,9 @@ class AIRunService:
         users: UserRepository,
         plugin_configs: PluginConfigRepository,
         business_outputs: BusinessOutputRepository,
+        output_guard_rules: OutputGuardRuleRepository | None = None,
+        drafts: DraftRepository | None = None,
+        security_events: SecurityRepository | None = None,
     ) -> None:
         self._actions = actions
         self._runs = runs
@@ -53,6 +64,9 @@ class AIRunService:
         self._users = users
         self._plugin_configs = plugin_configs
         self._business_outputs = business_outputs
+        self._output_guard_rules = output_guard_rules
+        self._drafts = drafts
+        self._security_events = security_events
 
     async def list_actions(
         self,
@@ -93,6 +107,7 @@ class AIRunService:
         capability = self._registry.get(lookup_capability)
         if capability.side_effect_level != "read":
             raise ValueError("Business object lookup capability must be read-only")
+        self._ensure_scope(context=context, required_scope=capability.required_scope)
         id_field = str(declaration.get("id_field") or "object_id").strip() or "object_id"
         payload = {id_field: object_id.strip(), "query": object_id.strip()}
         config = await self._load_tenant_config(context.tenant_id)(lookup_capability)
@@ -196,11 +211,22 @@ class AIRunService:
             executor = SkillExecutor(
                 registry=self._registry,
                 tools=self._tools,
-                load_tenant_config=self._load_tenant_config(context.tenant_id),
+                load_tenant_config=self._load_tenant_config(context.tenant_id, context=context),
                 add_step=add_step,
             )
             result = await executor.execute(skill, run.inputs)
             payload = self._structured_payload(result.outputs)
+            guard_result = await self._apply_output_guard(context.tenant_id, payload)
+            payload = guard_result["payload"]
+            if guard_result["matched"]:
+                trace.steps.append(
+                    TraceStep(
+                        name="output_guard",
+                        status="completed",
+                        summary=guard_result["summary"],
+                        node_type="guard",
+                    )
+                )
             trace.answer = str(payload.get("reasoning_summary") or result.outputs.get("summary") or "")
             trace.sources = list(result.sources)
             saved_trace = await self._traces.save(trace)
@@ -227,9 +253,21 @@ class AIRunService:
             run.status = "succeeded"
             run.trace_id = saved_trace.trace_id
             run.output_ids = [saved_output.output_id]
+            if self._requires_draft(action):
+                draft = await self._create_action_draft(
+                    context=context,
+                    action=action,
+                    run=run,
+                    output=saved_output,
+                    data_input=data_input,
+                )
+                run.draft_id = draft.draft_id
             run.updated_at = utc_timestamp_ms()
             run = await self._runs.update(run)
-            return {"run": asdict(run), "output": asdict(saved_output), "trace_id": saved_trace.trace_id}
+            response = {"run": asdict(run), "output": asdict(saved_output), "trace_id": saved_trace.trace_id}
+            if run.draft_id:
+                response["draft_action"] = self._serialize_draft(draft)
+            return response
         except Exception as exc:
             trace.steps.append(
                 TraceStep(
@@ -256,14 +294,182 @@ class AIRunService:
             raise ValueError("User not found")
         return user
 
-    def _load_tenant_config(self, tenant_id: str):
+    def _load_tenant_config(self, tenant_id: str, *, context: UserContext | None = None):
         async def load(capability_name: str) -> dict[str, object]:
             # Capability 到 plugin_name 的映射继续复用 registry，避免业务包硬编码租户配置。
+            if context is not None:
+                capability = self._registry.get(capability_name)
+                self._ensure_scope(context=context, required_scope=capability.required_scope)
             plugin_name = self._registry.get_plugin_name_for_capability(capability_name)
             config = await self._plugin_configs.get(tenant_id, plugin_name)
             return dict(config.config) if config else {}
 
         return load
+
+    @staticmethod
+    def _ensure_scope(*, context: UserContext, required_scope: str) -> None:
+        if required_scope and required_scope not in context.scopes:
+            raise PermissionError(f"Missing scope: {required_scope}")
+
+    @staticmethod
+    def _requires_draft(action) -> bool:
+        return bool(action.requires_confirmation) or action.risk_level in {"medium", "high", "critical"}
+
+    async def _create_action_draft(
+        self,
+        *,
+        context: UserContext,
+        action,
+        run: AIRun,
+        output: BusinessOutput,
+        data_input: DataInput,
+    ) -> DraftAction:
+        if self._drafts is None:
+            raise RuntimeError("Draft repository is not configured")
+        draft = DraftAction(
+            draft_id=f"draft-{uuid4().hex[:12]}",
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            capability_name=f"ai_action:{action.package_id}:{action.id}",
+            title=f"{action.label} 确认",
+            risk_level=action.risk_level,
+            status="awaiting_confirmation",
+            payload={
+                "run_id": run.run_id,
+                "output_id": output.output_id,
+                "package_id": action.package_id,
+                "action_id": action.id,
+                "object": {
+                    "object_type": run.object_type,
+                    "object_id": run.object_id,
+                },
+                "inputs": run.inputs,
+                "data_input": {
+                    "mode": data_input.mode,
+                    "context": data_input.context,
+                },
+            },
+            summary=output.summary or f"{action.label} 已生成待确认业务成果。",
+            approval_hint="请复核 AI Run、Trace、外部事实和知识引用后再确认。",
+        )
+        return await self._drafts.save(draft)
+
+    @staticmethod
+    def _serialize_draft(draft: DraftAction) -> dict[str, object]:
+        return {
+            "draft_id": draft.draft_id,
+            "title": draft.title,
+            "capability_name": draft.capability_name,
+            "risk_level": draft.risk_level,
+            "status": draft.status,
+            "summary": draft.summary,
+            "approval_hint": draft.approval_hint,
+            "payload": draft.payload,
+            "created_at": draft.created_at.isoformat(),
+        }
+
+    async def _apply_output_guard(self, tenant_id: str, payload: dict[str, object]) -> dict[str, object]:
+        if self._output_guard_rules is None:
+            return {"payload": payload, "warnings": [], "summary": "OutputGuard 未配置，跳过输出治理。", "matched": False}
+        rules = await self._output_guard_rules.list_enabled()
+        answer = self._guard_text(payload)
+        if not answer or not rules:
+            guarded = dict(payload)
+            guarded["output_guard"] = {
+                "warnings": [],
+                "summary": "输出脱敏与内容审查完成，未命中红线规则。",
+            }
+            return {"payload": guarded, "warnings": [], "summary": guarded["output_guard"]["summary"], "matched": False}
+
+        guarded_answer = answer
+        warnings: list[str] = []
+        matched_rules: list[OutputGuardRule] = []
+        blocked = False
+        for rule in rules:
+            if not rule.enabled or not self._output_guard_matches(rule.pattern, guarded_answer):
+                continue
+            matched_rules.append(rule)
+            if rule.action == "prepend_safety_warning":
+                prefix = "安全提示：执行设备、能量源或现场作业相关操作前，请先确认断电、泄压、挂牌上锁和人员资质。"
+                if not guarded_answer.startswith(prefix):
+                    guarded_answer = f"{prefix}\n\n{guarded_answer}"
+            elif rule.action == "append_warning":
+                suffix = "安全提示：以上内容仅用于辅助判断，涉及现场作业请遵循企业 SOP 与审批流程。"
+                if suffix not in guarded_answer:
+                    guarded_answer = f"{guarded_answer}\n\n{suffix}"
+            elif rule.action == "mask_sensitive_data":
+                guarded_answer = self._mask_sensitive_output(guarded_answer)
+            elif rule.action == "downgrade_answer":
+                guarded_answer = (
+                    "该问题命中安全治理规则，我只能提供原则性说明，不能给出可直接执行的高风险操作步骤。\n\n"
+                    f"{self._summarize_guarded_answer(guarded_answer)}"
+                )
+                warnings.append(f"OutputGuard 已降级回答：{rule.rule_id}")
+            elif rule.action == "block_or_escalate":
+                guarded_answer = "该回答命中安全红线，已停止输出具体操作建议。请联系安全治理组或具备资质的现场负责人复核。"
+                blocked = True
+                warnings.append(f"OutputGuard 已拦截回答：{rule.rule_id}")
+                break
+
+        for rule in matched_rules:
+            if self._security_events is not None:
+                await self._security_events.save(
+                    SecurityEvent(
+                        event_id=f"sec-og-{uuid4().hex[:12]}",
+                        tenant_id=tenant_id,
+                        category="safety",
+                        severity="critical" if rule.action == "block_or_escalate" else "high",
+                        title=f"OutputGuard 命中 {rule.rule_id}",
+                        status="已阻断" if blocked and rule.action == "block_or_escalate" else "已处理",
+                        owner="安全治理组",
+                    )
+                )
+
+        summary = (
+            "输出脱敏与内容审查完成，未命中红线规则。"
+            if not matched_rules
+            else f"输出治理命中 {len(matched_rules)} 条红线规则：{', '.join(rule.rule_id for rule in matched_rules)}。"
+        )
+        guarded_payload = dict(payload)
+        if matched_rules:
+            guarded_payload["reasoning_summary"] = guarded_answer
+            if blocked:
+                guarded_payload["recommendations"] = []
+                guarded_payload["action_plan"] = []
+        guarded_payload["output_guard"] = {"warnings": warnings, "summary": summary}
+        return {"payload": guarded_payload, "warnings": warnings, "summary": summary, "matched": bool(matched_rules)}
+
+    @staticmethod
+    def _guard_text(payload: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                "reasoning_summary": payload.get("reasoning_summary"),
+                "recommendations": payload.get("recommendations"),
+                "action_plan": payload.get("action_plan"),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    @staticmethod
+    def _output_guard_matches(pattern: str, answer: str) -> bool:
+        if not pattern:
+            return False
+        try:
+            return re.search(pattern, answer, flags=re.IGNORECASE | re.MULTILINE) is not None
+        except re.error:
+            return pattern.lower() in answer.lower()
+
+    @staticmethod
+    def _mask_sensitive_output(answer: str) -> str:
+        masked = re.sub(r"\b1[3-9]\d{3}(\d{4})\d{4}\b", r"1****\1****", answer)
+        masked = re.sub(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[^'\"\s,;}]+", r"\1=***", masked)
+        return masked
+
+    @staticmethod
+    def _summarize_guarded_answer(answer: str) -> str:
+        text = re.sub(r"\s+", " ", answer).strip()
+        return text[:240] + ("..." if len(text) > 240 else "")
 
     @staticmethod
     def _build_skill_inputs(

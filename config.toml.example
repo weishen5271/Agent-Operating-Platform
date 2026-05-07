@@ -9,3 +9,27 @@ database_url = "postgresql+psycopg://username:password@127.0.0.1:5432/agent_plat
 
 # 本地联调业务包上游示例服务时可显式放行 loopback；生产环境不要配置 127.0.0.1。
 # http_executor_allowlist = ["127.0.0.1"]
+
+# 可选：首次本地启动时显式初始化一个开发租户和管理员。
+# 不配置时，系统不会自动创建默认租户或默认管理员。
+# bootstrap_tenant_id = "your-tenant-id"
+# bootstrap_tenant_name = "本地开发租户"
+# bootstrap_tenant_package = "通用业务包"
+# bootstrap_tenant_environment = "本地开发"
+# bootstrap_tenant_budget = "0"
+# bootstrap_admin_user_id = "local-admin"
+# bootstrap_admin_email = "admin@example.local"
+# bootstrap_admin_password = "change-this-local-password"
+# bootstrap_admin_scopes = [
+#   "chat:read",
+#   "knowledge:read",
+#   "hr:read",
+#   "workflow:draft",
+#   "draft:confirm",
+#   "admin:read",
+#   "tenant:manage",
+#   "cmms:read",
+#   "scada:read",
+#   "spare_parts:read",
+#   "cmms:write",
+# ]

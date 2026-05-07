@@ -73,14 +73,6 @@ from agent_platform.infrastructure.db_models import (
 from agent_platform.retrieval.text import chunk_text, content_hash, cosine_similarity, embed_text, tokenize
 
 
-DEFAULT_TENANT_ID = "sw"
-DEFAULT_TENANT_NAME = "SW 默认租户"
-DEFAULT_TENANT_PACKAGE = "通用业务包"
-DEFAULT_TENANT_ENVIRONMENT = "生产"
-DEFAULT_TENANT_BUDGET = "¥ 0"
-DEFAULT_ADMIN_USER_ID = "admin"
-DEFAULT_ADMIN_EMAIL = "admin@sw.com"
-DEFAULT_ADMIN_PASSWORD = "Aa111111"
 logger = logging.getLogger("agent_platform.infrastructure.repositories")
 DEFAULT_CHUNK_ATTRIBUTES_SCHEMA = {
     "equipment_model": {"type": "string", "indexed": "hot", "filter": "in"},
@@ -2141,70 +2133,80 @@ async def seed_postgres_defaults(runtime: DatabaseRuntime) -> None:
     sources must come from explicit admin actions or migrations.
     """
     async with runtime.session() as session:
-        tenant_result = await session.execute(select(TenantRecord).where(TenantRecord.tenant_id == DEFAULT_TENANT_ID))
-        if tenant_result.scalar_one_or_none() is None:
-            session.add(
-                TenantRecord(
-                    tenant_record_id="tn-default-sw",
-                    tenant_id=DEFAULT_TENANT_ID,
-                    name=DEFAULT_TENANT_NAME,
-                    package=DEFAULT_TENANT_PACKAGE,
-                    environment=DEFAULT_TENANT_ENVIRONMENT,
-                    budget=DEFAULT_TENANT_BUDGET,
-                    active=True,
-                )
+        bootstrap_tenant_id = (settings.bootstrap_tenant_id or "").strip()
+        bootstrap_admin_user_id = (settings.bootstrap_admin_user_id or "").strip()
+        bootstrap_admin_email = (settings.bootstrap_admin_email or "").strip()
+        bootstrap_admin_password = settings.bootstrap_admin_password or ""
+        if bootstrap_tenant_id:
+            tenant_result = await session.execute(
+                select(TenantRecord).where(TenantRecord.tenant_id == bootstrap_tenant_id)
             )
+            if tenant_result.scalar_one_or_none() is None:
+                session.add(
+                    TenantRecord(
+                        tenant_record_id=f"tn-{uuid4().hex[:12]}",
+                        tenant_id=bootstrap_tenant_id,
+                        name=(settings.bootstrap_tenant_name or bootstrap_tenant_id).strip(),
+                        package=settings.bootstrap_tenant_package,
+                        environment=settings.bootstrap_tenant_environment,
+                        budget=settings.bootstrap_tenant_budget,
+                        active=True,
+                    )
+                )
 
-        user_result = await session.execute(select(UserAccountRecord).where(UserAccountRecord.user_id == DEFAULT_ADMIN_USER_ID))
-        default_admin = user_result.scalar_one_or_none()
-        if default_admin is None:
-            session.add(
-                UserAccountRecord(
-                    user_account_id="usr-default-admin",
-                    user_id=DEFAULT_ADMIN_USER_ID,
-                    tenant_id=DEFAULT_TENANT_ID,
-                    email=DEFAULT_ADMIN_EMAIL,
-                    password_hash=get_password_hash(DEFAULT_ADMIN_PASSWORD),
-                    role="platform_admin",
-                    scopes=[
-                        "chat:read",
-                        "knowledge:read",
-                        "hr:read",
-                        "workflow:draft",
-                        "draft:confirm",
-                        "admin:read",
-                        "tenant:manage",
-                    ],
-                )
+        if bootstrap_tenant_id and bootstrap_admin_user_id and bootstrap_admin_email and bootstrap_admin_password:
+            user_result = await session.execute(
+                select(UserAccountRecord).where(UserAccountRecord.user_id == bootstrap_admin_user_id)
             )
-        elif "tenant:manage" not in default_admin.scopes:
-            default_admin.scopes = [*default_admin.scopes, "tenant:manage"]
+            default_admin = user_result.scalar_one_or_none()
+            bootstrap_admin_scopes = [
+                scope for scope in settings.bootstrap_admin_scopes if str(scope).strip()
+            ]
+            if default_admin is None:
+                session.add(
+                    UserAccountRecord(
+                        user_account_id=f"usr-{uuid4().hex[:12]}",
+                        user_id=bootstrap_admin_user_id,
+                        tenant_id=bootstrap_tenant_id,
+                        email=bootstrap_admin_email,
+                        password_hash=get_password_hash(bootstrap_admin_password),
+                        role="platform_admin",
+                        scopes=bootstrap_admin_scopes,
+                    )
+                )
+            else:
+                missing_default_admin_scopes = [
+                    scope for scope in bootstrap_admin_scopes if scope not in default_admin.scopes
+                ]
+                if missing_default_admin_scopes:
+                    default_admin.scopes = [*default_admin.scopes, *missing_default_admin_scopes]
 
-        existing_event_ids = set((await session.execute(select(SecurityEventRecord.event_id))).scalars().all())
-        if "sec-001" not in existing_event_ids:
-            session.add(
-                SecurityEventRecord(
-                    event_id="sec-001",
-                    tenant_id=DEFAULT_TENANT_ID,
-                    category="approval",
-                    severity="high",
-                    title="报销提交草稿确认",
-                    status="待审批",
-                    owner="安全治理组",
+        if bootstrap_tenant_id:
+            existing_event_ids = set((await session.execute(select(SecurityEventRecord.event_id))).scalars().all())
+            if "sec-001" not in existing_event_ids:
+                session.add(
+                    SecurityEventRecord(
+                        event_id="sec-001",
+                        tenant_id=bootstrap_tenant_id,
+                        category="approval",
+                        severity="high",
+                        title="报销提交草稿确认",
+                        status="待审批",
+                        owner="安全治理组",
+                    )
                 )
-            )
-        if "sec-002" not in existing_event_ids:
-            session.add(
-                SecurityEventRecord(
-                    event_id="sec-002",
-                    tenant_id=DEFAULT_TENANT_ID,
-                    category="governance",
-                    severity="critical",
-                    title="跨租户访问已拦截",
-                    status="已阻断",
-                    owner="权限治理组",
+            if "sec-002" not in existing_event_ids:
+                session.add(
+                    SecurityEventRecord(
+                        event_id="sec-002",
+                        tenant_id=bootstrap_tenant_id,
+                        category="governance",
+                        severity="critical",
+                        title="跨租户访问已拦截",
+                        status="已阻断",
+                        owner="权限治理组",
+                    )
                 )
-            )
 
         if await session.get(LLMRuntimeConfigRecord, "default") is None:
             session.add(

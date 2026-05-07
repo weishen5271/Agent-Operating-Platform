@@ -19,6 +19,10 @@ type ResultPayload = {
   action_plan?: unknown[];
   runtime_warnings?: string[];
   alarms?: unknown[];
+  output_guard?: {
+    warnings?: string[];
+    summary?: string;
+  };
 };
 
 function packageLabel(packageId: string): string {
@@ -54,6 +58,67 @@ function displayValue(value: unknown): string {
     return String(value);
   }
   return JSON.stringify(value, null, 2);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function FieldValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="ai-field-empty">-</span>;
+    return (
+      <div className="ai-field-list">
+        {value.map((item, index) => (
+          <div key={index} className="ai-field-list-item">
+            <span className="ai-field-index">#{index + 1}</span>
+            {isRecord(item) ? <FieldValueTable value={item} compact /> : <FieldValue value={item} />}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (isRecord(value)) {
+    return <FieldValueTable value={value} compact />;
+  }
+
+  if (value === null || value === undefined || value === "") return <span className="ai-field-empty">-</span>;
+  if (typeof value === "boolean") {
+    return <span className={`ai-field-bool ${value ? "true" : "false"}`}>{value ? "是" : "否"}</span>;
+  }
+  return <span className="ai-field-text">{String(value)}</span>;
+}
+
+function FieldValueTable({ value, compact = false }: { value: Record<string, unknown>; compact?: boolean }) {
+  const entries = Object.entries(value);
+
+  if (!entries.length) {
+    return <span className="ai-field-empty">-</span>;
+  }
+
+  return (
+    <div className={`ai-field-table ${compact ? "compact" : ""}`} aria-label="字段值明细">
+      {!compact ? (
+        <div className="ai-field-row header">
+          <span>字段</span>
+          <span>字段值</span>
+        </div>
+      ) : null}
+      {entries.map(([key, item]) => (
+        <div key={key} className="ai-field-row">
+          <span className="ai-field-name">{fieldLabel(key)}</span>
+          <div className="ai-field-value">
+            <FieldValue value={item} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ResultFields({ value }: { value: Record<string, unknown> }) {
+  return <FieldValueTable value={value} />;
 }
 
 function findSimulatedNotice(value: unknown): string {
@@ -139,7 +204,7 @@ function ResultSection({
                 <strong>{itemTitle(item, `${title} ${index + 1}`)}</strong>
                 {itemMeta(item) ? <p className="row-meta">{itemMeta(item)}</p> : null}
                 {typeof item === "object" && item !== null ? (
-                  <pre className="ai-json-snippet">{displayValue(item)}</pre>
+                  <ResultFields value={item as Record<string, unknown>} />
                 ) : (
                   <p>{displayValue(item)}</p>
                 )}
@@ -559,6 +624,33 @@ export function AIWorkbench() {
                     {payload.runtime_warnings.map((warning) => (
                       <p key={warning}>{warning}</p>
                     ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {payload?.output_guard?.warnings?.length ? (
+                <div className="ai-warning-box">
+                  <span className="material-symbols-outlined">gpp_maybe</span>
+                  <div>
+                    <strong>OutputGuard</strong>
+                    {payload.output_guard.warnings.map((warning) => (
+                      <p key={warning}>{warning}</p>
+                    ))}
+                    {payload.output_guard.summary ? <p>{payload.output_guard.summary}</p> : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {runResult.draft_action ? (
+                <div className="ai-warning-box">
+                  <span className="material-symbols-outlined">approval_delegation</span>
+                  <div>
+                    <strong>待确认草稿</strong>
+                    <p>{runResult.draft_action.summary || runResult.draft_action.title}</p>
+                    <p className="row-meta">
+                      {runResult.draft_action.status} · {runResult.draft_action.risk_level} ·{" "}
+                      {runResult.draft_action.draft_id}
+                    </p>
                   </div>
                 </div>
               ) : null}

@@ -111,10 +111,11 @@ class SkillExecutor:
         capability_name: str,
         payload: dict[str, object],
     ) -> dict[str, object]:
-        # capability 调用前加载租户级插件配置，HTTP/MCP 等执行器会从这里取得 endpoint/secrets。
-        tenant_config = await self._load_tenant_config(capability_name)
         capability = self._registry.get(capability_name)
         try:
+            # capability 调用前加载租户级插件配置，HTTP/MCP 等执行器会从这里取得 endpoint/secrets。
+            # 权限或配置加载失败也必须进入当前 step 的 Trace，避免只留下顶层失败原因。
+            tenant_config = await self._load_tenant_config(capability_name)
             result = self._registry.invoke(capability_name, payload, tenant_config=tenant_config)
         except Exception as exc:
             if self._add_step is not None:

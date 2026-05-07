@@ -889,4 +889,15 @@ export type AIActionRunResponse = {
   run: AIRunRecord;
   output?: BusinessOutput;
   trace_id?: string;
+  draft_action?: {
+    draft_id: string;
+    title: string;
+    capability_name: string;
+    risk_level: string;
+    status: string;
+    summary: string;
+    approval_hint: string;
+    payload: Record<string, unknown>;
+    created_at: string;
+  };
 };

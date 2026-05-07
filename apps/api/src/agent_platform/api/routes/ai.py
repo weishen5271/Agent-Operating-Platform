@@ -88,6 +88,8 @@ async def lookup_business_object(payload: BusinessObjectLookupRequest, auth: Aut
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Lookup capability not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -105,17 +107,24 @@ async def run_action(
     auth: AuthContext,
 ) -> dict[str, object]:
     tenant_id, user_id = auth
-    return await ai_run_service.run_action(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        package_id=payload.package_id,
-        action_id=action_id,
-        source=payload.source,
-        object_type=payload.business_object.object_type,
-        object_id=payload.business_object.object_id,
-        inputs=payload.inputs,
-        data_input=DataInput(mode=payload.data_input.mode, context=payload.data_input.context),
-    )
+    try:
+        return await ai_run_service.run_action(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            package_id=payload.package_id,
+            action_id=action_id,
+            source=payload.source,
+            object_type=payload.business_object.object_type,
+            object_id=payload.business_object.object_id,
+            inputs=payload.inputs,
+            data_input=DataInput(mode=payload.data_input.mode, context=payload.data_input.context),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/runs", summary="查询 AI Run 列表", description="查询当前租户最近的结构化 AI 动作执行记录。")

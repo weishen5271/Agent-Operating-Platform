@@ -130,6 +130,17 @@ AOP_SECRET_KEY='change-me'
 
 也可以参考 `config.toml.example` 创建本地 `config.toml`。注意不要提交真实密钥。
 
+首次本地启动如需自动创建开发租户和管理员，必须显式配置 bootstrap 字段；未配置时系统不会创建默认账号：
+
+```powershell
+$env:AOP_BOOTSTRAP_TENANT_ID='local-dev'
+$env:AOP_BOOTSTRAP_TENANT_NAME='本地开发租户'
+$env:AOP_BOOTSTRAP_ADMIN_USER_ID='local-admin'
+$env:AOP_BOOTSTRAP_ADMIN_EMAIL='admin@example.local'
+$env:AOP_BOOTSTRAP_ADMIN_PASSWORD='请替换为本地密码'
+$env:AOP_BOOTSTRAP_ADMIN_SCOPES='["chat:read","knowledge:read","admin:read","tenant:manage","cmms:read","scada:read","spare_parts:read","cmms:write"]'
+```
+
 ### 4. 启动 API
 
 macOS / Linux:
@@ -177,14 +188,7 @@ npm run dev:web
 - 登录页：`http://127.0.0.1:3000/login`
 - 对话页：`http://127.0.0.1:3000/chat`
 
-默认账号：
-
-```text
-邮箱：admin@sw.com
-密码：Aa111111
-租户：sw
-角色：platform_admin
-```
+登录账号以你的 bootstrap 配置或后续注册/管理后台创建的用户为准；仓库不再内置默认管理员邮箱、密码或租户名称。
 
 ## 控制台页面
 

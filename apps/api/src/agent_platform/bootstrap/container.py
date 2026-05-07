@@ -107,6 +107,9 @@ ai_run_service = AIRunService(
     users=user_repository,
     plugin_configs=plugin_config_repository,
     business_outputs=business_output_repository,
+    output_guard_rules=output_guard_rule_repository,
+    drafts=draft_repository,
+    security_events=security_repository,
 )
 
 

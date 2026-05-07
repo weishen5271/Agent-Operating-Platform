@@ -11,6 +11,9 @@ from agent_platform.domain.models import (
     AIRun,
     BusinessOutput,
     CapabilityDefinition,
+    DraftAction,
+    OutputGuardRule,
+    SecurityEvent,
     SkillDefinition,
     SourceReference,
     TenantProfile,
@@ -145,18 +148,67 @@ class StaticTenantRepository:
 
 
 class StaticUserRepository:
+    def __init__(self, scopes: list[str] | None = None) -> None:
+        self.scopes = scopes or ["cmms:read", "knowledge:read", "scada:read"]
+
     async def get(self, tenant_id: str, user_id: str) -> UserContext | None:
         return UserContext(
             user_id=user_id,
             tenant_id=tenant_id,
             role="tester",
-            scopes=["cmms:read", "knowledge:read"],
+            scopes=list(self.scopes),
         )
 
 
 class EmptyPluginConfigRepository:
     async def get(self, tenant_id: str, plugin_name: str) -> None:
         return None
+
+
+class MemoryOutputGuardRuleRepository:
+    def __init__(self, rules: list[OutputGuardRule] | None = None) -> None:
+        self.rules = rules or []
+
+    async def list_all(self) -> list[OutputGuardRule]:
+        return list(self.rules)
+
+    async def list_enabled(self) -> list[OutputGuardRule]:
+        return [item for item in self.rules if item.enabled]
+
+    async def upsert(self, rule: OutputGuardRule) -> OutputGuardRule:
+        self.rules = [item for item in self.rules if item.rule_id != rule.rule_id]
+        self.rules.append(rule)
+        return rule
+
+
+class MemoryDraftRepository:
+    def __init__(self) -> None:
+        self.items: dict[str, DraftAction] = {}
+
+    async def save(self, draft: DraftAction) -> DraftAction:
+        self.items[draft.draft_id] = draft
+        return draft
+
+    async def confirm(self, draft_id: str, tenant_id: str, confirmed_at) -> DraftAction | None:
+        draft = self.items.get(draft_id)
+        if draft is None or draft.tenant_id != tenant_id:
+            return None
+        return draft
+
+    async def list_recent(self, tenant_id: str, limit: int = 10) -> list[DraftAction]:
+        return [item for item in self.items.values() if item.tenant_id == tenant_id][:limit]
+
+
+class MemorySecurityRepository:
+    def __init__(self) -> None:
+        self.items: list[SecurityEvent] = []
+
+    async def list_recent(self, tenant_id: str) -> list[SecurityEvent]:
+        return [item for item in self.items if item.tenant_id == tenant_id]
+
+    async def save(self, event: SecurityEvent) -> SecurityEvent:
+        self.items.append(event)
+        return event
 
 
 class WorkOrderHistoryPlugin(CapabilityPlugin):
@@ -238,11 +290,27 @@ class KnowledgeFixturePlugin(CapabilityPlugin):
         }
 
 
-def build_service(*, registry: CapabilityRegistry, skill: SkillDefinition) -> tuple[AIRunService, MemoryRunRepository, MemoryTraceRepository, MemoryBusinessOutputRepository]:
+def build_service(
+    *,
+    registry: CapabilityRegistry,
+    skill: SkillDefinition,
+    action: AIActionDefinition | None = None,
+    user_scopes: list[str] | None = None,
+    output_guard_rules: MemoryOutputGuardRuleRepository | None = None,
+    drafts: MemoryDraftRepository | None = None,
+    security_events: MemorySecurityRepository | None = None,
+) -> tuple[
+    AIRunService,
+    MemoryRunRepository,
+    MemoryTraceRepository,
+    MemoryBusinessOutputRepository,
+    MemoryDraftRepository,
+    MemorySecurityRepository,
+]:
     runs = MemoryRunRepository()
     traces = MemoryTraceRepository()
     outputs = MemoryBusinessOutputRepository()
-    action = AIActionDefinition(
+    resolved_action = action or AIActionDefinition(
         id="equipment_fault_analysis",
         label="故障分析",
         package_id="industry.mfg_maintenance",
@@ -253,19 +321,24 @@ def build_service(*, registry: CapabilityRegistry, skill: SkillDefinition) -> tu
         outputs=["recommendation", "action_plan"],
         data_input_modes=["platform_pull"],
     )
+    draft_repo = drafts or MemoryDraftRepository()
+    security_repo = security_events or MemorySecurityRepository()
     service = AIRunService(
-        actions=StaticActionRegistry(action),  # type: ignore[arg-type]
+        actions=StaticActionRegistry(resolved_action),  # type: ignore[arg-type]
         runs=runs,
         registry=registry,
         skills=StaticSkillRegistry(skill),  # type: ignore[arg-type]
         tools=ToolRegistry(),
         traces=traces,
         tenants=StaticTenantRepository(),  # type: ignore[arg-type]
-        users=StaticUserRepository(),  # type: ignore[arg-type]
+        users=StaticUserRepository(user_scopes),  # type: ignore[arg-type]
         plugin_configs=EmptyPluginConfigRepository(),  # type: ignore[arg-type]
         business_outputs=outputs,
+        output_guard_rules=output_guard_rules or MemoryOutputGuardRuleRepository(),
+        drafts=draft_repo,
+        security_events=security_repo,
     )
-    return service, runs, traces, outputs
+    return service, runs, traces, outputs, draft_repo, security_repo
 
 
 def fault_triage_skill() -> SkillDefinition:
@@ -326,7 +399,10 @@ def test_ai_run_service_saves_structured_output_and_marks_stub() -> None:
         "cmms.work_order.history": WorkOrderHistoryPlugin(),
         "knowledge.search": KnowledgeFixturePlugin(),
     }
-    service, _runs, traces, outputs = build_service(registry=registry, skill=fault_triage_skill())
+    service, _runs, traces, outputs, _drafts, _security = build_service(
+        registry=registry,
+        skill=fault_triage_skill(),
+    )
 
     response = asyncio.run(
         service.run_action(
@@ -391,7 +467,7 @@ def test_ai_run_service_records_failed_step_when_config_missing() -> None:
         ],
         outputs_mapping={"workorders": "$steps.history.workorders"},
     )
-    service, _runs, traces, _outputs = build_service(registry=registry, skill=skill)
+    service, _runs, traces, _outputs, _drafts, _security = build_service(registry=registry, skill=skill)
 
     response = asyncio.run(
         service.run_action(
@@ -418,7 +494,10 @@ def test_ai_run_service_records_failed_step_when_config_missing() -> None:
 def test_ai_run_service_looks_up_business_object_before_action() -> None:
     registry = CapabilityRegistry(loader=EmptyLoader())  # type: ignore[arg-type]
     registry._package_plugins = {"equipment.lookup": EquipmentLookupPlugin()}
-    service, _runs, _traces, _outputs = build_service(registry=registry, skill=fault_triage_skill())
+    service, _runs, _traces, _outputs, _drafts, _security = build_service(
+        registry=registry,
+        skill=fault_triage_skill(),
+    )
 
     response = asyncio.run(
         service.lookup_business_object(
@@ -436,7 +515,10 @@ def test_ai_run_service_looks_up_business_object_before_action() -> None:
 
 def test_ai_run_service_rejects_object_lookup_without_declaration() -> None:
     registry = CapabilityRegistry(loader=EmptyLoader())  # type: ignore[arg-type]
-    service, _runs, _traces, _outputs = build_service(registry=registry, skill=fault_triage_skill())
+    service, _runs, _traces, _outputs, _drafts, _security = build_service(
+        registry=registry,
+        skill=fault_triage_skill(),
+    )
 
     with pytest.raises(ValueError, match="not declared"):
         asyncio.run(
@@ -448,3 +530,195 @@ def test_ai_run_service_rejects_object_lookup_without_declaration() -> None:
                 object_id="asset-1",
             )
         )
+
+
+def test_ai_run_service_rejects_missing_capability_scope_before_external_call() -> None:
+    registry = CapabilityRegistry(loader=EmptyLoader())  # type: ignore[arg-type]
+    registry._package_plugins = {"cmms.work_order.history": WorkOrderHistoryPlugin()}
+    skill = SkillDefinition(
+        name="fault_triage",
+        description="测试用故障分析 skill",
+        version="1.0.0",
+        source="package",
+        package_id="industry.mfg_maintenance",
+        steps=[
+            {
+                "id": "history",
+                "capability": "cmms.work_order.history",
+                "input": {"equipment_id": "$inputs.equipment_id"},
+            }
+        ],
+        outputs_mapping={"workorders": "$steps.history.workorders"},
+    )
+    service, _runs, traces, _outputs, _drafts, _security = build_service(
+        registry=registry,
+        skill=skill,
+        user_scopes=["knowledge:read"],
+    )
+
+    response = asyncio.run(
+        service.run_action(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            package_id="industry.mfg_maintenance",
+            action_id="equipment_fault_analysis",
+            source="workspace",
+            object_type="equipment",
+            object_id="CNC-01",
+            inputs={},
+            data_input=DataInput(),
+        )
+    )
+
+    run = response["run"]
+    assert run["status"] == "failed"
+    assert "Missing scope: cmms:read" in run["error_message"]
+    trace = traces.items[run["trace_id"]]
+    assert any(step.name == "skill_step:history" and step.status == "failed" for step in trace.steps)
+
+
+def test_ai_run_service_applies_output_guard_to_action_output() -> None:
+    registry = CapabilityRegistry(loader=EmptyLoader())  # type: ignore[arg-type]
+    registry._package_plugins = {
+        "cmms.work_order.history": WorkOrderHistoryPlugin(),
+        "knowledge.search": KnowledgeFixturePlugin(),
+    }
+    skill = SkillDefinition(
+        name="fault_triage",
+        description="测试用故障分析 skill",
+        version="1.0.0",
+        source="package",
+        package_id="industry.mfg_maintenance",
+        steps=[
+            {
+                "id": "history",
+                "capability": "cmms.work_order.history",
+                "input": {"equipment_id": "$inputs.equipment_id"},
+            },
+            {
+                "id": "knowledge",
+                "capability": "knowledge.search",
+                "input": {"query": "$inputs.query"},
+            },
+        ],
+        outputs_mapping={
+            "summary": "已完成设备 $inputs.equipment_id 的故障排查编排。",
+            "workorders": "$steps.history.workorders",
+            "knowledge_matches": "$steps.knowledge.matches",
+        },
+    )
+    security = MemorySecurityRepository()
+    service, _runs, traces, outputs, _drafts, security = build_service(
+        registry=registry,
+        skill=skill,
+        output_guard_rules=MemoryOutputGuardRuleRepository(
+            [
+                OutputGuardRule(
+                    rule_id="test.block",
+                    package_id="industry.mfg_maintenance",
+                    pattern="已完成设备",
+                    action="block_or_escalate",
+                    source="test",
+                    enabled=True,
+                )
+            ]
+        ),
+        security_events=security,
+    )
+
+    response = asyncio.run(
+        service.run_action(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            package_id="industry.mfg_maintenance",
+            action_id="equipment_fault_analysis",
+            source="workspace",
+            object_type="equipment",
+            object_id="CNC-01",
+            inputs={},
+            data_input=DataInput(),
+        )
+    )
+
+    run = response["run"]
+    output = next(iter(outputs.items.values()))
+    assert run["status"] == "succeeded"
+    assert "命中安全红线" in output.payload["reasoning_summary"]
+    assert output.payload["recommendations"] == []
+    assert output.payload["action_plan"] == []
+    assert output.payload["output_guard"]["warnings"] == ["OutputGuard 已拦截回答：test.block"]
+    assert security.items[0].title == "OutputGuard 命中 test.block"
+    trace = traces.items[run["trace_id"]]
+    assert any(step.name == "output_guard" and step.node_type == "guard" for step in trace.steps)
+
+
+def test_ai_run_service_creates_draft_for_confirmation_action() -> None:
+    registry = CapabilityRegistry(loader=EmptyLoader())  # type: ignore[arg-type]
+    registry._package_plugins = {
+        "cmms.work_order.history": WorkOrderHistoryPlugin(),
+        "knowledge.search": KnowledgeFixturePlugin(),
+    }
+    skill = SkillDefinition(
+        name="fault_triage",
+        description="测试用故障分析 skill",
+        version="1.0.0",
+        source="package",
+        package_id="industry.mfg_maintenance",
+        steps=[
+            {
+                "id": "history",
+                "capability": "cmms.work_order.history",
+                "input": {"equipment_id": "$inputs.equipment_id"},
+            },
+            {
+                "id": "knowledge",
+                "capability": "knowledge.search",
+                "input": {"query": "$inputs.query"},
+            },
+        ],
+        outputs_mapping={
+            "summary": "已完成设备 $inputs.equipment_id 的故障排查编排。",
+            "workorders": "$steps.history.workorders",
+            "knowledge_matches": "$steps.knowledge.matches",
+        },
+    )
+    action = AIActionDefinition(
+        id="equipment_fault_analysis",
+        label="故障分析",
+        package_id="industry.mfg_maintenance",
+        object_types=["equipment"],
+        skill=skill.name,
+        required_inputs=["equipment_id"],
+        outputs=["recommendation", "action_plan"],
+        risk_level="medium",
+        requires_confirmation=True,
+        data_input_modes=["platform_pull"],
+    )
+    service, _runs, _traces, _outputs, drafts, _security = build_service(
+        registry=registry,
+        skill=skill,
+        action=action,
+    )
+
+    response = asyncio.run(
+        service.run_action(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            package_id="industry.mfg_maintenance",
+            action_id="equipment_fault_analysis",
+            source="workspace",
+            object_type="equipment",
+            object_id="CNC-01",
+            inputs={},
+            data_input=DataInput(),
+        )
+    )
+
+    run = response["run"]
+    assert run["status"] == "succeeded"
+    assert run["draft_id"]
+    assert run["draft_id"] in drafts.items
+    draft = drafts.items[run["draft_id"]]
+    assert draft.capability_name == "ai_action:industry.mfg_maintenance:equipment_fault_analysis"
+    assert draft.payload["run_id"] == run["run_id"]
+    assert response["draft_action"]["draft_id"] == run["draft_id"]

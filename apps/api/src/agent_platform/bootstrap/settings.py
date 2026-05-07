@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     default_tenant_id: str = "sw"
     default_user_id: str = "admin"
+    bootstrap_tenant_id: str | None = None
+    bootstrap_tenant_name: str | None = None
+    bootstrap_tenant_package: str = ""
+    bootstrap_tenant_environment: str = ""
+    bootstrap_tenant_budget: str = ""
+    bootstrap_admin_user_id: str | None = None
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+    bootstrap_admin_scopes: list[str] = []
     database_url: str | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = None

@@ -20,6 +20,10 @@ const AVAILABLE_SCOPES = [
   "draft:confirm",
   "admin:read",
   "tenant:manage",
+  "cmms:read",
+  "scada:read",
+  "spare_parts:read",
+  "cmms:write",
 ];
 
 export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }: UserManagementProps) {
@@ -29,7 +33,7 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
   const [editUser, setEditUser] = useState<UserProfile | null>(null);
   const [createForm, setCreateForm] = useState({
     email: "",
-    password: "Aa111111",
+    password: "",
     role: "platform_admin",
     scopes: ["chat:read", "knowledge:read"],
   });
@@ -44,13 +48,17 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
       setFeedback("请填写用户邮箱");
       return;
     }
+    if (createForm.password.length < 6) {
+      setFeedback("请填写至少 6 位初始密码");
+      return;
+    }
     try {
       const newUser = await createUser(tenantId, createForm);
       setUsers((prev) => [...prev, newUser]);
       setIsCreateModalOpen(false);
       setCreateForm({
         email: "",
-        password: "Aa111111",
+        password: "",
         role: "platform_admin",
         scopes: ["chat:read", "knowledge:read"],
       });
@@ -139,7 +147,7 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
                 type="email"
                 value={createForm.email}
                 onChange={(e) => setCreateForm((f) => ({ ...f, email: e.target.value }))}
-                placeholder="如: admin@sw.com"
+                placeholder="如: admin@example.local"
               />
               <p className="row-meta">系统会自动生成用户 ID</p>
             </div>
@@ -149,7 +157,7 @@ export function UserManagement({ tenantId, tenantName, initialUsers, isLoading }
                 type="text"
                 value={createForm.password}
                 onChange={(e) => setCreateForm((f) => ({ ...f, password: e.target.value }))}
-                placeholder="默认 Aa111111"
+                placeholder="请输入至少 6 位初始密码"
               />
             </div>
             <div className="form-field">
