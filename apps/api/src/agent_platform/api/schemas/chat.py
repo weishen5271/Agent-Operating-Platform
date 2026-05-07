@@ -109,6 +109,10 @@ class DraftActionRequest(BaseModel):
     user_id: str | None = None
 
 
+class DraftDecisionRequest(BaseModel):
+    comment: str = Field(default="", max_length=2000, description="审批意见。")
+
+
 class DraftActionResponse(BaseModel):
     draft_id: str
     title: str
@@ -119,3 +123,6 @@ class DraftActionResponse(BaseModel):
     approval_hint: str
     payload: dict
     created_at: datetime
+    confirmed_at: datetime | None = None
+    decided_at: datetime | None = None
+    decision_comment: str = ""

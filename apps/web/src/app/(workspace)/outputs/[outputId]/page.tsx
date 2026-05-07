@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { ChartCanvas } from "@/components/outputs/chart-canvas";
 import { DecisionCard } from "@/components/outputs/decision-card";
 import { ReportWorkspace } from "@/components/outputs/report-workspace";
+import { StructuredAIOutput, isStructuredAIOutput } from "@/components/outputs/structured-ai-output";
 import { Shell } from "@/components/shared/shell";
 import { getBusinessOutput } from "@/lib/api-client";
 import type { BusinessOutput } from "@/lib/api-client/types";
@@ -22,6 +23,7 @@ const STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   reviewing: "审阅中",
   approved: "已确认",
+  rejected: "已驳回",
   exported: "已导出",
   archived: "已归档",
 };
@@ -34,6 +36,8 @@ function statusTone(status: string): string {
       return "info";
     case "reviewing":
       return "warning";
+    case "rejected":
+      return "danger";
     case "archived":
       return "plain";
     default:
@@ -116,13 +120,29 @@ export default function OutputDetailPage() {
                   <span className="material-symbols-outlined">arrow_back</span>
                   返回列表
                 </Link>
+                <Link
+                  href={output.trace_id ? `/audit?trace_id=${encodeURIComponent(output.trace_id)}` : "#lineage"}
+                  className={`secondary-button ${output.trace_id ? "" : "muted"}`}
+                >
+                  <span className="material-symbols-outlined">account_tree</span>
+                  查看 Trace
+                </Link>
+                <Link
+                  href={output.linked_draft_group_id ? "/approvals" : "#lineage"}
+                  className={`secondary-button ${output.linked_draft_group_id ? "" : "muted"}`}
+                >
+                  <span className="material-symbols-outlined">approval</span>
+                  {output.linked_draft_group_id ? "查看审批" : "无审批草稿"}
+                </Link>
                 <span className={`status-chip ${statusTone(output.status)}`}>
                   {STATUS_LABELS[output.status] ?? output.status}
                 </span>
               </div>
             </div>
 
-            {output.type === "report" ? (
+            {isStructuredAIOutput(output) ? (
+              <StructuredAIOutput output={output} />
+            ) : output.type === "report" ? (
               <ReportWorkspace output={output} />
             ) : output.type === "chart" ? (
               <ChartCanvas output={output} />
@@ -153,13 +173,29 @@ export default function OutputDetailPage() {
               )}
             </section>
 
-            <section className="panel-card output-lineage-panel">
+            <section id="lineage" className="panel-card output-lineage-panel">
               <div className="panel-header">
                 <div>
                   <h3>来源链路</h3>
                   <p>从业务对象到 AI Run、Trace 和成果沉淀的关联信息。</p>
                 </div>
-                <span className="status-chip plain">{output.run_id ? "AI Run" : "手动成果"}</span>
+                <div className="panel-actions">
+                  {output.trace_id ? (
+                    <Link href={`/audit?trace_id=${encodeURIComponent(output.trace_id)}`} className="secondary-button compact">
+                      <span className="material-symbols-outlined">account_tree</span>
+                      查看 Trace
+                    </Link>
+                  ) : null}
+                  {output.linked_draft_group_id ? (
+                    <Link href="/approvals" className="secondary-button compact">
+                      <span className="material-symbols-outlined">approval</span>
+                      查看审批
+                    </Link>
+                  ) : (
+                    <span className="status-chip plain">无审批草稿</span>
+                  )}
+                  <span className="status-chip plain">{output.run_id ? "AI Run" : "手动成果"}</span>
+                </div>
               </div>
 
               <div className="lineage-summary">
@@ -211,7 +247,7 @@ export default function OutputDetailPage() {
                   <dd className="mono">{output.conversation_id || "-"}</dd>
                 </div>
                 <div>
-                  <dt>草稿包</dt>
+                  <dt>审批草稿</dt>
                   <dd className="mono">{output.linked_draft_group_id || "-"}</dd>
                 </div>
                 <div>

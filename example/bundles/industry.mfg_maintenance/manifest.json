@@ -61,6 +61,19 @@
       "risk_level": "low",
       "requires_confirmation": false,
       "data_input_modes": ["platform_pull"]
+    },
+    {
+      "id": "equipment_fault_review",
+      "label": "故障处置复核",
+      "description": "查询报警、历史工单和知识库，生成需主管确认的故障处置建议，用于验证审批草稿闭环。",
+      "object_types": ["equipment"],
+      "skill": "fault_triage",
+      "required_inputs": ["equipment_id"],
+      "optional_inputs": ["fault_code", "last_n", "query"],
+      "outputs": ["recommendation", "action_plan"],
+      "risk_level": "medium",
+      "requires_confirmation": true,
+      "data_input_modes": ["platform_pull"]
     }
   ],
 

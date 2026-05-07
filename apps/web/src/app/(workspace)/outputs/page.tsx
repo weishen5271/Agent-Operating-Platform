@@ -20,6 +20,7 @@ const STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   reviewing: "审阅中",
   approved: "已确认",
+  rejected: "已驳回",
   exported: "已导出",
   archived: "已归档",
 };

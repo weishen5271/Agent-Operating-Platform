@@ -5,7 +5,7 @@ import json
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from agent_platform.api.deps import AuthContext
@@ -16,6 +16,7 @@ from agent_platform.api.schemas.chat import (
     ConversationResponse,
     DraftActionRequest,
     DraftActionResponse,
+    DraftDecisionRequest,
     TraceResponse,
 )
 from agent_platform.bootstrap.container import chat_service
@@ -217,11 +218,52 @@ async def create_draft(payload: DraftActionRequest, auth: AuthContext) -> dict[s
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/actions/{draft_id}/confirm", response_model=DraftActionResponse)
-async def confirm_draft(draft_id: str, auth: AuthContext) -> dict[str, object]:
+@router.get("/actions/drafts")
+async def list_drafts(
+    auth: AuthContext,
+    limit: int = Query(default=50, ge=1, le=100, description="返回最近草稿数量。"),
+) -> dict[str, object]:
     tenant_id, user_id = auth
     try:
-        return await chat_service.confirm_draft(draft_id=draft_id, tenant_id=tenant_id, user_id=user_id)
+        return await chat_service.list_drafts(tenant_id=tenant_id, user_id=user_id, limit=limit)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/actions/{draft_id}/confirm", response_model=DraftActionResponse)
+async def confirm_draft(
+    draft_id: str,
+    auth: AuthContext,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.confirm_draft(
+            draft_id=draft_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            comment=payload.comment if payload else "",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/actions/{draft_id}/reject", response_model=DraftActionResponse)
+async def reject_draft(
+    draft_id: str,
+    auth: AuthContext,
+    payload: DraftDecisionRequest | None = None,
+) -> dict[str, object]:
+    tenant_id, user_id = auth
+    try:
+        return await chat_service.reject_draft(
+            draft_id=draft_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            comment=payload.comment if payload else "",
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:

@@ -262,6 +262,9 @@ class AIRunService:
                     data_input=data_input,
                 )
                 run.draft_id = draft.draft_id
+                saved_output.linked_draft_group_id = draft.draft_id
+                saved_output.status = "reviewing"
+                saved_output = await self._business_outputs.update(saved_output)
             run.updated_at = utc_timestamp_ms()
             run = await self._runs.update(run)
             response = {"run": asdict(run), "output": asdict(saved_output), "trace_id": saved_trace.trace_id}
@@ -366,6 +369,9 @@ class AIRunService:
             "approval_hint": draft.approval_hint,
             "payload": draft.payload,
             "created_at": draft.created_at.isoformat(),
+            "confirmed_at": draft.confirmed_at.isoformat() if draft.confirmed_at else None,
+            "decided_at": draft.decided_at.isoformat() if draft.decided_at else None,
+            "decision_comment": draft.decision_comment,
         }
 
     async def _apply_output_guard(self, tenant_id: str, payload: dict[str, object]) -> dict[str, object]:

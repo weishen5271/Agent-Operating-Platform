@@ -1,12 +1,7 @@
 import { ApprovalCenter } from "@/components/admin/approval-center";
 import { Shell } from "@/components/shared/shell";
-import { getAdminSecurity } from "@/lib/api-client";
-import type { DraftActionResponse } from "@/lib/api-client/types";
 
-export default async function ApprovalsPage() {
-  const adminSecurity = await getAdminSecurity().catch(() => null);
-  const drafts = (adminSecurity?.drafts ?? []) as DraftActionResponse[];
-
+export default function ApprovalsPage() {
   return (
     <Shell
       activeKey="security"
@@ -18,7 +13,7 @@ export default async function ApprovalsPage() {
         { label: "执行记录" },
       ]}
     >
-      <ApprovalCenter initialDrafts={drafts} />
+      <ApprovalCenter />
     </Shell>
   );
 }

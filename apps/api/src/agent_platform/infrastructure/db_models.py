@@ -104,6 +104,8 @@ class ApprovalRequestRecord(Base):
     approval_hint: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
 
 class SecurityEventRecord(Base):

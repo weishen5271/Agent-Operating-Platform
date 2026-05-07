@@ -477,6 +477,13 @@ export type DraftActionResponse = {
   approval_hint: string;
   payload: Record<string, unknown>;
   created_at: string;
+  confirmed_at: string | null;
+  decided_at: string | null;
+  decision_comment: string;
+};
+
+export type DraftActionListResponse = {
+  drafts: DraftActionResponse[];
 };
 
 export type AdminKnowledgeSourceDetailResponse = {
@@ -806,7 +813,7 @@ export type AdminTracesResponse = {
 };
 
 export type BusinessOutputType = "report" | "chart" | "recommendation" | "action_plan";
-export type BusinessOutputStatus = "draft" | "reviewing" | "approved" | "exported" | "archived";
+export type BusinessOutputStatus = "draft" | "reviewing" | "approved" | "rejected" | "exported" | "archived";
 
 export type BusinessOutput = {
   output_id: string;
@@ -899,5 +906,8 @@ export type AIActionRunResponse = {
     approval_hint: string;
     payload: Record<string, unknown>;
     created_at: string;
+    confirmed_at: string | null;
+    decided_at: string | null;
+    decision_comment: string;
   };
 };

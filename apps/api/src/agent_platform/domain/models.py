@@ -136,6 +136,8 @@ class DraftAction:
     approval_hint: str
     created_at: datetime = field(default_factory=utc_now)
     confirmed_at: datetime | None = None
+    decided_at: datetime | None = None
+    decision_comment: str = ""
 
 
 @dataclass(slots=True)
@@ -328,7 +330,7 @@ class RoutingDecision:
 
 
 BusinessOutputType = Literal["report", "chart", "recommendation", "action_plan"]
-BusinessOutputStatus = Literal["draft", "reviewing", "approved", "exported", "archived"]
+BusinessOutputStatus = Literal["draft", "reviewing", "approved", "rejected", "exported", "archived"]
 
 
 @dataclass(slots=True)

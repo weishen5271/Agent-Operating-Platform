@@ -24,6 +24,7 @@ import type {
   ChatStreamEvent,
   ConversationListResponse,
   ConversationResponse,
+  DraftActionListResponse,
   DraftActionResponse,
   HomeSnapshot,
   LLMRuntimeConfig,
@@ -835,9 +836,21 @@ export function getAdminTraces(): Promise<AdminTracesResponse> {
   return request<AdminTracesResponse>("/admin/traces");
 }
 
-export function confirmDraftAction(draftId: string): Promise<DraftActionResponse> {
+export function confirmDraftAction(draftId: string, comment = ""): Promise<DraftActionResponse> {
   return request<DraftActionResponse>(`/chat/actions/${draftId}/confirm`, {
     method: "POST",
+    body: JSON.stringify({ comment }),
+  });
+}
+
+export function listDraftActions(limit = 50): Promise<DraftActionListResponse> {
+  return request<DraftActionListResponse>(`/chat/actions/drafts?limit=${limit}`);
+}
+
+export function rejectDraftAction(draftId: string, comment = ""): Promise<DraftActionResponse> {
+  return request<DraftActionResponse>(`/chat/actions/${draftId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ comment }),
   });
 }
 

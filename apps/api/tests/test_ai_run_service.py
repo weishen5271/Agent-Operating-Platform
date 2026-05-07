@@ -25,6 +25,7 @@ from agent_platform.plugins.executors.http import HttpExecutor
 from agent_platform.plugins.stub import StubPackagePlugin
 from agent_platform.runtime.data_input import DataInput
 from agent_platform.runtime.ai_run_service import AIRunService
+from agent_platform.runtime.chat_service import ChatService
 from agent_platform.runtime.registry import CapabilityRegistry
 from agent_platform.runtime.skill_registry import ToolRegistry
 
@@ -131,6 +132,12 @@ class MemoryBusinessOutputRepository:
         output = self.items.get(output_id)
         return output if output and output.tenant_id == tenant_id else None
 
+    async def get_by_draft_id(self, tenant_id: str, draft_id: str) -> BusinessOutput | None:
+        for output in self.items.values():
+            if output.tenant_id == tenant_id and output.linked_draft_group_id == draft_id:
+                return output
+        return None
+
     async def list_for_tenant(self, tenant_id: str, **_: object) -> list[BusinessOutput]:
         return [item for item in self.items.values() if item.tenant_id == tenant_id]
 
@@ -189,10 +196,23 @@ class MemoryDraftRepository:
         self.items[draft.draft_id] = draft
         return draft
 
-    async def confirm(self, draft_id: str, tenant_id: str, confirmed_at) -> DraftAction | None:
+    async def confirm(self, draft_id: str, tenant_id: str, confirmed_at, *, comment: str = "") -> DraftAction | None:
         draft = self.items.get(draft_id)
         if draft is None or draft.tenant_id != tenant_id:
             return None
+        draft.status = "confirmed"
+        draft.confirmed_at = confirmed_at
+        draft.decided_at = confirmed_at
+        draft.decision_comment = comment
+        return draft
+
+    async def reject(self, draft_id: str, tenant_id: str, rejected_at, *, comment: str = "") -> DraftAction | None:
+        draft = self.items.get(draft_id)
+        if draft is None or draft.tenant_id != tenant_id:
+            return None
+        draft.status = "rejected"
+        draft.decided_at = rejected_at
+        draft.decision_comment = comment
         return draft
 
     async def list_recent(self, tenant_id: str, limit: int = 10) -> list[DraftAction]:
@@ -694,7 +714,7 @@ def test_ai_run_service_creates_draft_for_confirmation_action() -> None:
         requires_confirmation=True,
         data_input_modes=["platform_pull"],
     )
-    service, _runs, _traces, _outputs, drafts, _security = build_service(
+    service, _runs, _traces, outputs, drafts, _security = build_service(
         registry=registry,
         skill=skill,
         action=action,
@@ -722,3 +742,93 @@ def test_ai_run_service_creates_draft_for_confirmation_action() -> None:
     assert draft.capability_name == "ai_action:industry.mfg_maintenance:equipment_fault_analysis"
     assert draft.payload["run_id"] == run["run_id"]
     assert response["draft_action"]["draft_id"] == run["draft_id"]
+    output = next(iter(outputs.items.values()))
+    assert output.linked_draft_group_id == run["draft_id"]
+    assert output.status == "reviewing"
+    assert response["output"]["linked_draft_group_id"] == run["draft_id"]
+    assert response["output"]["status"] == "reviewing"
+
+
+def test_confirm_and_reject_draft_update_linked_business_output_status() -> None:
+    async def scenario() -> None:
+        outputs = MemoryBusinessOutputRepository()
+        drafts = MemoryDraftRepository()
+        service = ChatService.__new__(ChatService)
+        service._tenants = StaticTenantRepository()
+        service._users = StaticUserRepository(scopes=["draft:confirm"])
+        service._drafts = drafts
+        service._business_outputs = outputs
+
+        confirm_draft = await drafts.save(
+            DraftAction(
+                draft_id="draft-confirm",
+                tenant_id="tenant-a",
+                user_id="user-a",
+                capability_name="ai_action:pkg:action",
+                title="确认草稿",
+                risk_level="medium",
+                status="awaiting_confirmation",
+                payload={},
+                summary="确认摘要",
+                approval_hint="请审批",
+            )
+        )
+        await outputs.create(
+            BusinessOutput(
+                output_id="out-confirm",
+                tenant_id="tenant-a",
+                package_id="pkg",
+                type="recommendation",
+                title="确认成果",
+                status="reviewing",
+                linked_draft_group_id=confirm_draft.draft_id,
+            )
+        )
+
+        confirmed = await service.confirm_draft(
+            draft_id=confirm_draft.draft_id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            comment="同意执行",
+        )
+        assert confirmed["status"] == "confirmed"
+        assert confirmed["decision_comment"] == "同意执行"
+        assert outputs.items["out-confirm"].status == "approved"
+
+        reject_draft = await drafts.save(
+            DraftAction(
+                draft_id="draft-reject",
+                tenant_id="tenant-a",
+                user_id="user-a",
+                capability_name="ai_action:pkg:action",
+                title="驳回草稿",
+                risk_level="high",
+                status="awaiting_confirmation",
+                payload={},
+                summary="驳回摘要",
+                approval_hint="请审批",
+            )
+        )
+        await outputs.create(
+            BusinessOutput(
+                output_id="out-reject",
+                tenant_id="tenant-a",
+                package_id="pkg",
+                type="recommendation",
+                title="驳回成果",
+                status="reviewing",
+                linked_draft_group_id=reject_draft.draft_id,
+            )
+        )
+
+        rejected = await service.reject_draft(
+            draft_id=reject_draft.draft_id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            comment="证据不足",
+        )
+        assert rejected["status"] == "rejected"
+        assert rejected["decision_comment"] == "证据不足"
+        assert outputs.items["out-reject"].status == "rejected"
+
+    asyncio.run(scenario())

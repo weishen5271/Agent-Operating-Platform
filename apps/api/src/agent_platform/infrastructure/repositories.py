@@ -227,6 +227,8 @@ class BusinessOutputRepository(Protocol):
 
     async def update(self, output: BusinessOutput) -> BusinessOutput: ...
 
+    async def get_by_draft_id(self, tenant_id: str, draft_id: str) -> BusinessOutput | None: ...
+
 
 class AIRunRepository(Protocol):
     async def create(self, run: AIRun) -> AIRun: ...
@@ -241,7 +243,23 @@ class AIRunRepository(Protocol):
 class DraftRepository(Protocol):
     async def save(self, draft: DraftAction) -> DraftAction: ...
 
-    async def confirm(self, draft_id: str, tenant_id: str, confirmed_at: datetime) -> DraftAction | None: ...
+    async def confirm(
+        self,
+        draft_id: str,
+        tenant_id: str,
+        confirmed_at: datetime,
+        *,
+        comment: str = "",
+    ) -> DraftAction | None: ...
+
+    async def reject(
+        self,
+        draft_id: str,
+        tenant_id: str,
+        rejected_at: datetime,
+        *,
+        comment: str = "",
+    ) -> DraftAction | None: ...
 
     async def list_recent(self, tenant_id: str, limit: int = 10) -> list[DraftAction]: ...
 
@@ -363,6 +381,8 @@ def _draft_from_record(record: ApprovalRequestRecord) -> DraftAction:
         approval_hint=record.approval_hint,
         created_at=record.created_at,
         confirmed_at=record.confirmed_at,
+        decided_at=record.decided_at,
+        decision_comment=record.decision_comment or "",
     )
 
 
@@ -1081,6 +1101,18 @@ class PostgresBusinessOutputRepository:
                 return None
             return self._to_domain(record)
 
+    async def get_by_draft_id(self, tenant_id: str, draft_id: str) -> BusinessOutput | None:
+        async with self._runtime.session() as session:
+            result = await session.execute(
+                select(BusinessOutputRecord)
+                .where(BusinessOutputRecord.tenant_id == tenant_id)
+                .where(BusinessOutputRecord.linked_draft_group_id == draft_id)
+                .order_by(desc(BusinessOutputRecord.created_at))
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            return self._to_domain(record) if record else None
+
     async def create(self, output: BusinessOutput) -> BusinessOutput:
         async with self._runtime.session() as session:
             record = BusinessOutputRecord(
@@ -1258,18 +1290,48 @@ class PostgresDraftRepository:
                     approval_hint=draft.approval_hint,
                     created_at=draft.created_at,
                     confirmed_at=draft.confirmed_at,
+                    decided_at=draft.decided_at,
+                    decision_comment=draft.decision_comment,
                 )
             )
             await session.commit()
         return draft
 
-    async def confirm(self, draft_id: str, tenant_id: str, confirmed_at: datetime) -> DraftAction | None:
+    async def confirm(
+        self,
+        draft_id: str,
+        tenant_id: str,
+        confirmed_at: datetime,
+        *,
+        comment: str = "",
+    ) -> DraftAction | None:
         async with self._runtime.session() as session:
             record = await session.get(ApprovalRequestRecord, draft_id)
             if record is None or record.tenant_id != tenant_id:
                 return None
             record.status = "confirmed"
             record.confirmed_at = confirmed_at
+            record.decided_at = confirmed_at
+            record.decision_comment = comment
+            await session.commit()
+            await session.refresh(record)
+            return _draft_from_record(record)
+
+    async def reject(
+        self,
+        draft_id: str,
+        tenant_id: str,
+        rejected_at: datetime,
+        *,
+        comment: str = "",
+    ) -> DraftAction | None:
+        async with self._runtime.session() as session:
+            record = await session.get(ApprovalRequestRecord, draft_id)
+            if record is None or record.tenant_id != tenant_id:
+                return None
+            record.status = "rejected"
+            record.decided_at = rejected_at
+            record.decision_comment = comment
             await session.commit()
             await session.refresh(record)
             return _draft_from_record(record)

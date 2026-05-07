@@ -62,7 +62,7 @@ from agent_platform.wiki.service import WikiService
 
 TENANT_MANAGE_SCOPE = "tenant:manage"
 BUSINESS_OUTPUT_TYPES = {"report", "chart", "recommendation", "action_plan"}
-BUSINESS_OUTPUT_STATUSES = {"draft", "reviewing", "approved", "exported", "archived"}
+BUSINESS_OUTPUT_STATUSES = {"draft", "reviewing", "approved", "rejected", "exported", "archived"}
 OUTPUT_GUARD_ACTIONS = {
     "prepend_safety_warning",
     "append_warning",
@@ -967,6 +967,7 @@ class ChatService:
         draft_id: str,
         tenant_id: str | None = None,
         user_id: str | None = None,
+        comment: str = "",
     ) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
         self._ensure_scope(context=context, required_scope="draft:confirm")
@@ -974,10 +975,65 @@ class ChatService:
             draft_id=draft_id,
             tenant_id=context.tenant_id,
             confirmed_at=utc_now(),
+            comment=comment.strip(),
         )
         if draft is None:
             raise ValueError("Draft not found")
+        await self._update_linked_business_output_status(
+            tenant_id=context.tenant_id,
+            draft_id=draft_id,
+            status="approved",
+        )
         return self._serialize_draft(draft)
+
+    async def reject_draft(
+        self,
+        draft_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        comment: str = "",
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="draft:confirm")
+        draft = await self._drafts.reject(
+            draft_id=draft_id,
+            tenant_id=context.tenant_id,
+            rejected_at=utc_now(),
+            comment=comment.strip(),
+        )
+        if draft is None:
+            raise ValueError("Draft not found")
+        await self._update_linked_business_output_status(
+            tenant_id=context.tenant_id,
+            draft_id=draft_id,
+            status="rejected",
+        )
+        return self._serialize_draft(draft)
+
+    async def _update_linked_business_output_status(self, *, tenant_id: str, draft_id: str, status: str) -> None:
+        if self._business_outputs is None:
+            return
+        output = await self._business_outputs.get_by_draft_id(tenant_id, draft_id)
+        if output is None:
+            return
+        output.status = status
+        await self._business_outputs.update(output)
+
+    async def list_drafts(
+        self,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
+        self._ensure_scope(context=context, required_scope="draft:confirm")
+        normalized_limit = min(max(int(limit), 1), 100)
+        return {
+            "drafts": [
+                self._serialize_draft(item)
+                for item in await self._drafts.list_recent(context.tenant_id, limit=normalized_limit)
+            ]
+        }
 
     async def list_admin_packages(self, tenant_id: str | None = None, user_id: str | None = None) -> dict[str, object]:
         context = await self._require_context(tenant_id=tenant_id, user_id=user_id)
@@ -4386,6 +4442,9 @@ class ChatService:
             "approval_hint": draft.approval_hint,
             "payload": draft.payload,
             "created_at": draft.created_at.isoformat(),
+            "confirmed_at": draft.confirmed_at.isoformat() if draft.confirmed_at else None,
+            "decided_at": draft.decided_at.isoformat() if draft.decided_at else None,
+            "decision_comment": draft.decision_comment,
         }
 
     @staticmethod
